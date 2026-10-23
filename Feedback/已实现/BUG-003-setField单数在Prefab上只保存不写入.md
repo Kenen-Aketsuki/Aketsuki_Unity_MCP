@@ -2,10 +2,10 @@
 id: BUG-003
 type: bug
 title: component.setField（单数）在 Prefab 资产上只保存不写入——ExecuteOnPrefab 漏了 ApplyField
-status: open
+status: done
 source: project_island_back
 created: 2026-10-23
-updated: 2026-10-23
+updated: 2026-10-24
 files: Assets/Editor/ExternalCommandSystem/Commands/ComponentCommands.cs
 ---
 
@@ -64,4 +64,29 @@ UnityEditor.PrefabUtility.SaveAsPrefabAsset(root, prefabPath);   // ← 中间�
 
 ## 怎么修的
 
-（待处理）
+`ExecuteOnPrefab` 在 `SaveAsPrefabAsset` 之前补上写入，与场景分支对称：
+
+```csharp
+var op = ResolveField(component, fieldName, raw, context, path => FindInPrefab(root, path));
+
+// 与场景分支对称：ResolveField 只做「解析 + 值转换」，真正写入在 ApplyField。
+ApplyField(op, false);
+
+UnityEditor.PrefabUtility.SaveAsPrefabAsset(root, prefabPath);
+```
+
+`recordUndo` 传 false：Prefab 内容是一次性快照，不存在撤销栈。
+
+**实测（project_island_back，`Assets/GameRes/FishingWeather/Area1.prefab` 的 `Area1/Rain/Particle_Rain`）**：
+
+| 步骤 | 指令 | 结果 |
+| --- | --- | --- |
+| 基线 | `component.get` localScale | `0.66, 0.66, 0.66` |
+| 写入 | `component.setField` localScale = 1,1,1 | Success |
+| 回读 | `component.get` localScale | `1, 1, 1` ← 修复前这里是旧值 |
+| 还原 | `component.setField` localScale = 0.66 | Success |
+| 回读 | `component.get` localScale | `0.66, 0.66, 0.66` |
+
+> 副作用提示：`SaveAsPrefabAsset` 会重写整个 YAML，Unity 2022 顺手把老 Transform 升级成
+> `serializedVersion: 2`（去掉 `m_RootOrder`）、给 ParticleSystemRenderer 补现代字段，
+> 并把 `0.65999997` 这类浮点写成 `0.66`。数据值一致，但被测 prefab 在 git 里会显示为已修改。

@@ -2,10 +2,10 @@
 id: DOC-001
 type: doc
 title: HTTP 200 不代表指令成功——asset.compile 在 Play 模式下返回 200 + ok:false，容易误判
-status: open
+status: done
 source: project_island_back
 created: 2026-10-23
-updated: 2026-10-23
+updated: 2026-10-24
 files: README.md, Assets/Editor/ExternalCommandSystem/CommandHttpServer.cs
 ---
 
@@ -52,4 +52,39 @@ files: README.md, Assets/Editor/ExternalCommandSystem/CommandHttpServer.cs
 
 ## 怎么修的
 
-（待处理）
+建议 1 与建议 3 落地，**建议 2（失败返回非 2xx）没自己做**——那是协议变更，见下文与待拍板清单。
+
+**建议 1：醒目声明（三处）**
+
+根目录 `README.md`、`Assets/Editor/ExternalCommandSystem/README.md`、以及随包分发的
+`McpBridge/SKILL.md` 顶部各加了一块告警：HTTP 200 ≠ 成功，成败只看 `body.ok`；
+批量再看 `succeeded`/`failed`；状态码只用来识别网络/协议层错误。
+（每个包一份 SKILL，所以 MCP 桥那份不能漏。）
+
+**建议 3：让 status 能区分"上次编译"和"这次被拒"**
+
+`CompileReport` 加两个字段，`/v1/status` 的 `lastCompile` 随之带上：
+
+| 字段 | 含义 |
+| --- | --- |
+| `requestedUtc` | 最近一次"请求编译"的时刻（无论有没有真的编译） |
+| `rejectedReason` | 被拒原因；空串表示没被拒 |
+
+判据：**`requestedUtc` 比 `finishedUtc` 新 = 这次没编译成**。
+实现要点是 `RecordRejected` **只补这两个字段、保留上一次的真实结果**（错误数/耗时/消息都不动），
+否则"上次编译失败了吗"这个信息会被一次被拒的请求冲掉；它同样写进 `SessionState`，
+跨域重载不丢。`asset.compile` 在 Play 模式下会先 `RecordRejected` 再按原样抛错。
+成功编译时 `requestedUtc` = 编译开始时间、`rejectedReason` = 空串。
+
+**实测**：部署到 project_island_back 后 `/v1/status` 已返回这两个字段：
+
+```json
+"lastCompile": {"ok": true, "errorCount": 0, "finishedUtc": "...", "requestedUtc": "", "rejectedReason": ""}
+```
+
+（值为空串是因为那是一次真实编译；Play 模式拒绝路径没有实测——进 Play 会打断正在运行的编辑器，
+留给手上有空窗口的时候补。）
+
+**建议 2（未做，待拍板）**：单条指令失败时同时返回非 2xx。改的是 HTTP 状态码语义，
+所有已经"只看状态码"的调用方都会一夜之间从成功变成抛异常，属于破坏性兼容变更。
+选项与影响已整理进待拍板清单。

@@ -3,6 +3,15 @@
 一个"用 JSON 文件驱动 Unity 执行操作"的**编辑器专用**扩展。
 核心目标：**新增一种操作 = 新增一个类**，不需要改动任何已有代码。
 
+> **⚠️ 判成败只看一件事：`ok` 字段（DOC-001）。**
+> **HTTP 200 ≠ 指令成功**：业务逻辑失败时服务端**照样返回 200**，失败信息在 body 的 `ok` 与
+> `records[].status`（`Success`/`Failed`/`Skipped`/`UnknownCommand`）里。
+> 判据顺序：**先看 `body.ok`，批量再看 `succeeded`/`failed`**，HTTP 状态码只用来识别网络与协议层错误。
+> 典型坑：Play 模式下 `asset.compile` 被拒，返回 `200 + ok:false`，只盯状态码会误判成"编译过了"。
+> 这种"请求被拒、根本没编译"的情况，可查 `/v1/status` 的 `lastCompile.requestedUtc` 与
+> `lastCompile.rejectedReason`——`requestedUtc` 比 `finishedUtc` 新就是没编译成。
+> 例外：单条执行（非 batch）失败时的**非 2xx 返回**属于协议变更，仍在征求使用方意见（见 `Feedback/`）。
+
 - Unity 版本：2021.3（仅依赖 `System.IO` / `UnityEngine` / `UnityEditor`，无第三方库）
 - 命名空间：`CivilRev.CommandSystem`（编辑器扩展为 `CivilRev.CommandSystem.Editor`）
 - **整套代码位于 `Editor/` 目录下，不会打进游戏包**（见 [1.1 打包隔离](#11-打包隔离编辑器专用)）
@@ -333,12 +342,12 @@ CommandRegistry.Default.RegisterInstance("my.cmd", new MyCommand(dependency));
 | `gameobject.instantiate` | 实例化 Prefab 到场景（保留 Prefab 连接） | `asset`(必填), `parent`, `name`, 布局参数, `select` |
 | `gameobject.find` | 按名称/类型/路径查找节点，返回完整路径与组件清单（绑字段前先用它确认目标）；每个节点带 `layer`/`layerName`/`tag`/`isStatic` | `query`(必填), `all`, `maxCount` |
 | `scene.hierarchy` | 列出某节点子树（含组件类型、激活状态、`layer`/`layerName`/`tag`/`isStatic`）；不给 `target` 列出所有场景根 | `target`, `maxDepth` |
-| `component.setField` | 给任意组件的字段/属性赋值（含 `[SerializeField]` 私有字段）；解析失败**绝不静默置零**。`field` 支持 **`m_` 前缀自动兼容**（写 `m_Enabled` 或 `enabled` 等价）与 **`A.B.C` 嵌套路径**（如 `m_Colors.m_PressedColor`）。`value` 支持：节点/类型选择器/ `asset:` 引用、数字/布尔/字符串/枚举/向量（`[x,y,z]` 或 `{"x":1,"y":1}`）、颜色（`#RRGGBB` / `[r,g,b,a]`）；**结构体整体赋值**（`Color`/`Vector*`/`Rect`/ `ColorBlock`/`SpriteState`/`Navigation`/`AnimationTriggers` 等，传对象按子字段名逐个灌，失败信息会列出可写子字段）。 | `target`(必填), `component`(必填), `field`(必填), `value`, `prefab` |
+| `component.setField` | 给任意组件的字段/属性赋值（含 `[SerializeField]` 私有字段）；解析失败**绝不静默置零**。`field` 支持 **`m_` 前缀自动兼容**（写 `m_Enabled` 或 `enabled` 等价）与 **`A.B.C` 嵌套路径**（如 `m_Colors.m_PressedColor`）。`value` 支持：节点/类型选择器/ `asset:` 引用、数字/布尔/字符串/枚举/向量（`[x,y,z]` 或 `{"x":1,"y":1}`）、颜色（`#RRGGBB` / `[r,g,b,a]`）；**结构体整体赋值**（`Color`/`Vector*`/`Rect`/ `ColorBlock`/`SpriteState`/`Navigation`/`AnimationTriggers` 等，传对象按子字段名逐个灌，失败信息会列出可写子字段）。**反射写不进的只读属性**（典型：`ParticleSystem` 的 `main`/`shape`/`emission` 等模块）会自动退到 **SerializedObject 写入通道**，可直接写 `main.startSize.scalar`、`shape.radius` 这类"模块名 + 属性路径"（`component.get` 读回来的 `InitialModule.startSize.scalar` 这类原生序列化路径同样可用）。 | `target`(必填；Prefab 模式下空串=Prefab 根), `component`(必填), `field`(必填), `value`, `prefab` |
 | `component.get` | 读取组件字段当前值（与 setField 对称）；`field` 省略返回全部可序列化字段；`field` 支持**点号嵌套路径**（`m_Colors.normalColor`，也自动补 `m_` 前缀，写 `colors.normalColor` 同样命中）与旧口径的尾段名；引用返回 `{path,name,type}`；**Play 模式运行时值也读得到** | `target`(必填), `component`(必填), `field`, `prefab` |
-| `component.setFields` | 一次写入同组件多个字段（原子：先全部解析/校验，**任一失败整体不生效**，不会留半成品）；成功返回各字段旧值便于复核。字段语法与 `component.setField` 完全一致（支持 `m_` 前缀、`A.B.C` 嵌套、结构体整体赋值） | `target`(必填), `component`(必填), `fields`(必填, 对象: 字段名→值), `prefab` |
+| `component.setFields` | 一次写入同组件多个字段（原子：先全部解析/校验，**任一失败整体不生效**，不会留半成品）；成功返回各字段旧值便于复核，**注意 `data` 回显的是"修改前的旧值"**（消息里也带这句提示），不要拿它当写后的值核对。字段语法与 `component.setField` 完全一致（支持 `m_` 前缀、`A.B.C` 嵌套、结构体整体赋值、只读模块属性的序列化兜底） | `target`(必填；Prefab 模式下空串=Prefab 根), `component`(必填), `fields`(必填, 对象: 字段名→值), `prefab` |
 | `scene.inspect` | 目标节点全组件快照（每个组件的全部可序列化字段），UI/运行时盲调的解药 | `target`(必填) |
-| `component.add` | 给节点挂组件（场景或 Prefab 资产，类型名反射解析，已存在时幂等跳过） | `target`(必填), `component`(必填), `prefab`, `require`(默认 false) |
-| `component.remove` | 从节点移除组件（场景走 `Undo.DestroyObjectImmediate`；Prefab 走 `LoadPrefabContents` 生命周期）。类型名按反射解析，缺失报错 | `target`(必填), `component`(必填), `prefab` |
+| `component.add` | 给节点挂组件（场景或 Prefab 资产，类型名反射解析，已存在时幂等跳过）。**Prefab 模式下 `target` 可写空串表示根节点** | `target`(必填；Prefab 模式下空串=Prefab 根), `component`(必填), `prefab`, `require`(默认 false) |
+| `component.remove` | 从节点移除组件（场景走 `Undo.DestroyObjectImmediate`；Prefab 走 `LoadPrefabContents` 生命周期）。类型名按反射解析，缺失报错。**Prefab 模式下 `target` 可写空串表示根节点** | `target`(必填；Prefab 模式下空串=Prefab 根), `component`(必填), `prefab` |
 | `prefab.addNode` | 往 Prefab 资产里添加节点（可选复制源节点组件、按类型名追加组件）。`copyFrom` 支持**跨 Prefab**：写 `Assets/.../Other.prefab/节点/路径`（省略节点路径取该 Prefab 根）；跨 Prefab 只搬组件数据，对象引用需另行重指（结果里带 `warning`） | `prefab`(必填), `name`(必填), `parent`(默认根), `copyFrom`, `components`, `active` |
 | `prefab.duplicateNode` | 在 Prefab 资产内复制节点（**默认含子树与组件**，引用不重映射）。返回 `childCount` / `subtreeCount` / `subtreePaths` 便于核对层级；`includeChildren:false` 只要节点自身 | `prefab`(必填), `target`(必填), `name`, `parent`, `active`, `includeChildren`(默认 true) |
 | `prefab.tree` | 列出 Prefab 资产的节点树（路径/组件/激活态，只读） | `prefab`(必填), `maxDepth` |
@@ -845,7 +854,11 @@ AI 拿到的是"编译已完成"，实际编译早已失败。
 | `CommandConsoleBuffer` | 环形缓冲（400 条），订阅 `Application.logMessageReceivedThreaded`，供读运行时异常 |
 | `asset.compileReport` 指令 | 返回最近一次编译的完整结果（assembly / file / line / column / message） |
 | `console.read` 指令 | 返回最近的编辑器/运行时日志，支持 `type` / `contains` / `clear` |
-| `/v1/status` 的 `lastCompile` | 编译结果摘要（ok / errorCount / warningCount / durationMs） |
+| `/v1/status` 的 `lastCompile` | 编译结果摘要（ok / errorCount / warningCount / durationMs / requestedUtc / rejectedReason） |
+
+`requestedUtc` / `rejectedReason` 是为 DOC-001 加的：Play 模式下的 `asset.compile` 会被拒，
+此时没有任何编译发生，`finishedUtc` 仍是**上一次**的时间戳，唯一的新信号就是这两个字段
+（`rejectedReason` 非空 = 最近一次请求被挡回来了）。
 
 ### 10.3 关键机制：编译失败不触发域重载
 

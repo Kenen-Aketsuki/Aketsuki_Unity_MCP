@@ -43,7 +43,19 @@ namespace CivilRev.CommandSystem.Editor
         public int WarningCount;
         public List<CompileMessage> Messages = new List<CompileMessage>();
 
-        /// <summary>转成 JSON；<paramref name="includeMessages"/> 为 false 时只给计数（用于 status 摘要）</summary>
+        /// <summary>最近一次「请求编译」的时间（无论有没有真的编译）。Play 模式下被拒时它就是请求时刻。</summary>
+        public string RequestedUtc;
+
+        /// <summary>最近一次编译请求被拒的原因；空串表示没被拒。</summary>
+        public string RejectedReason;
+
+        /// <summary>
+        /// 转成 JSON；<paramref name="includeMessages"/> 为 false 时只给计数（用于 status 摘要）。
+        /// <para>
+        /// DOC-001：编译失败/被拒时 HTTP 仍是 200，<c>requestedUtc</c> 与 <c>rejectedReason</c>
+        /// 是调用方区分「上一次真的编译过」和「这次被挡回来了」的唯一信号。
+        /// </para>
+        /// </summary>
         public JsonValue ToJson(bool includeMessages)
         {
             var payload = JsonValue.NewObject();
@@ -54,6 +66,8 @@ namespace CivilRev.CommandSystem.Editor
             payload.Set("warningCount", JsonValue.Of(WarningCount));
             payload.Set("durationMs", JsonValue.Of(Math.Round(DurationMs, 1)));
             payload.Set("finishedUtc", JsonValue.Of(FinishedUtc ?? string.Empty));
+            payload.Set("requestedUtc", JsonValue.Of(RequestedUtc ?? string.Empty));
+            payload.Set("rejectedReason", JsonValue.Of(RejectedReason ?? string.Empty));
 
             if (!includeMessages)
             {
@@ -131,6 +145,41 @@ namespace CivilRev.CommandSystem.Editor
                     return _last;
                 }
             }
+        }
+
+        /// <summary>
+        /// 记一次「编译请求被拒」（DOC-001）。
+        /// <para>
+        /// 被拒时不会有任何编译发生，`finishedUtc` 仍是**上一次**的时间戳，调用方看不出这次没编译。
+        /// 这里保留上一次的结果数据不动，只补 `requestedUtc` 与 `rejectedReason`——
+        /// 「requestedUtc 比 finishedUtc 新」就是"这次被挡回来了"的判据。
+        /// </para>
+        /// </summary>
+        public static void RecordRejected(string reason)
+        {
+            CompileReport snapshot;
+            lock (Gate)
+            {
+                var previous = _last ?? new CompileReport();
+                snapshot = new CompileReport
+                {
+                    Started = previous.Started,
+                    Finished = previous.Finished,
+                    Ok = previous.Ok,
+                    ErrorCount = previous.ErrorCount,
+                    WarningCount = previous.WarningCount,
+                    DurationMs = previous.DurationMs,
+                    FinishedUtc = previous.FinishedUtc,
+                    RequestedUtc = DateTime.UtcNow.ToString("o"),
+                    RejectedReason = reason ?? string.Empty,
+                    Messages = previous.Messages ?? new List<CompileMessage>()
+                };
+
+                _last = snapshot;
+            }
+
+            SaveSessionSummary(snapshot);
+            CommandLog.Warning($"[编译监控] 编译请求被拒：{snapshot.RejectedReason}");
         }
 
         /// <summary>编译是否正在进行（含 Unity 自身判定）</summary>
@@ -258,6 +307,8 @@ namespace CivilRev.CommandSystem.Editor
                     WarningCount = warnings,
                     DurationMs = (DateTime.UtcNow - _startedUtc).TotalMilliseconds,
                     FinishedUtc = DateTime.UtcNow.ToString("o"),
+                    RequestedUtc = _startedUtc.ToString("o"),
+                    RejectedReason = string.Empty,
                     Messages = messages
                 };
 
@@ -385,6 +436,8 @@ namespace CivilRev.CommandSystem.Editor
                     WarningCount = json.GetInt("warningCount", 0),
                     DurationMs = json.GetDouble("durationMs", 0),
                     FinishedUtc = json.GetString("finishedUtc", string.Empty),
+                    RequestedUtc = json.GetString("requestedUtc", string.Empty),
+                    RejectedReason = json.GetString("rejectedReason", string.Empty),
                     Messages = new List<CompileMessage>()
                 };
             }

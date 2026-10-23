@@ -2,10 +2,10 @@
 id: IMPR-004
 type: improve
 title: component.setFields 的 data 回显的是修改前的旧值，消息里没说，容易被当成"没写进去"
-status: open
+status: done
 source: project_island_back
 created: 2026-10-23
-updated: 2026-10-23
+updated: 2026-10-24
 files: Assets/Editor/ExternalCommandSystem/Commands/ComponentCommands.cs
 ---
 
@@ -67,4 +67,24 @@ return CommandResult.Ok(
 
 ## 怎么修的
 
-（待处理）
+采纳建议里的**方案 1**（成本最低、不改结构、不破坏任何现有调用）：消息后缀加一句说明，
+`setFields` 的场景分支与 Prefab 分支都加了。
+
+```csharp
+private const string OldValuesNote =
+    "（data 为各字段修改前的旧值，用于复核；写后的值请再看消息或 component.get）";
+```
+
+同时在 `[Command]` 的 Description 里写明"`data` 回显各字段修改前的旧值"，
+这样 `list_commands` / MCP 工具描述里也能看到，不必执行才知道。
+
+**实测（project_island_back，Particle_Rain 的 ParticleSystem）**：
+
+```
+已批量设置 Prefab '...Area1.prefab' 的 Particle_Rain.ParticleSystem 的 1 个字段
+（data 为各字段修改前的旧值，用于复核；写后的值请再看消息或 component.get）
+data: {"main.startSize.scalar": "0.05"}     ← 写入前的值，写后是 1.25
+```
+
+**没有做的**：方案 2（`{"old":...,"new":...}`）与方案 3（单数/复数统一成旧值对象）都会改 `data` 的结构，
+属破坏性变更——已列入待你拍板清单，没替你决定。

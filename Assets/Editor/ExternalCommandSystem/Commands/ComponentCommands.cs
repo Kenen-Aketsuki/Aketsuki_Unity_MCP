@@ -39,28 +39,21 @@ namespace CivilRev.CommandSystem
 
         public CommandResult Execute(CommandContext context)
         {
-            var targetSpec = context.Args.GetString("target", null);
-            if (targetSpec == null)
-            {
-                throw new CommandArgumentException(context.CommandId, "target",
-                    "缺少必填参数 target（Prefab 模式下可用空串表示 Prefab 根）");
-            }
+            var targetSpec = RequireTargetSpec(context);
 
             var typeName = context.Args.RequireString("component");
             var fieldName = context.Args.RequireString("field");
             var raw = context.Args.Get("value");
 
+            // IMPR-006：target 的读法由 RequireTargetSpec / EnsureSceneTarget / ResolvePrefabTarget 统一，
+            // 保证 setField / setFields / add / remove 四条指令的约定一致。
             var prefabPath = context.Args.GetString("prefab", null);
             if (!string.IsNullOrEmpty(prefabPath))
             {
                 return ExecuteOnPrefab(context, prefabPath, targetSpec, typeName, fieldName, raw);
             }
 
-            if (targetSpec.Trim().Length == 0)
-            {
-                throw new CommandArgumentException(context.CommandId, "target",
-                    "场景模式的 target 不能为空（空串只在 Prefab 模式下表示根节点）");
-            }
+            EnsureSceneTarget(targetSpec, context);
 
             if (!SceneQuery.TryResolveUnique(targetSpec, out var target, out var resolveError))
             {
@@ -97,11 +90,15 @@ namespace CivilRev.CommandSystem
 
             try
             {
-                var target = FindInPrefabUnique(root, targetSpec, context);
+                var target = ResolvePrefabTarget(root, targetSpec, context);
                 var component = RequireComponent(target, typeName, context);
                 // 引用值也要在 Prefab 内容里找，不能走场景查找
                 var op = ResolveField(component, fieldName, raw, context,
                     path => FindInPrefab(root, path));
+
+                // 与场景分支对称：ResolveField 只做「解析 + 值转换」，真正写入在 ApplyField。
+                // 早期版本漏了这一句，导致 Prefab 上回显 Success 却什么都没改（BUG-003）。
+                ApplyField(op, false);
 
                 UnityEditor.PrefabUtility.SaveAsPrefabAsset(root, prefabPath);
                 return CommandResult.Ok(
@@ -118,6 +115,46 @@ namespace CivilRev.CommandSystem
         }
 
         // ------------------------------------------------------------ 目标解析
+
+        /// <summary>
+        /// 读 <c>target</c> 参数的唯一入口（IMPR-006）。
+        /// <para>
+        /// 约定与 <c>component.setField</c> 一致：Prefab 模式下 <c>target</c> 可以省略或写空串
+        /// （都表示 Prefab 根），因此这里只拦「完全没给」这一种情况——早期版本在
+        /// <c>component.add</c> / <c>component.remove</c> 上用的是 <c>RequireString</c>，
+        /// 空串会被当成"缺少必填参数"拦下，逼调用方改传根节点名（重名时还会歧义）。
+        /// </para>
+        /// </summary>
+        internal static string RequireTargetSpec(CommandContext context)
+        {
+            var spec = context.Args.GetString("target", null);
+            if (spec == null)
+            {
+                throw new CommandArgumentException(context.CommandId, "target",
+                    "缺少必填参数 target（Prefab 模式下可用空串表示 Prefab 根）");
+            }
+
+            return spec;
+        }
+
+        /// <summary>场景模式下的 target 非空校验：场景没有唯一根，空串在这里没有意义。</summary>
+        internal static void EnsureSceneTarget(string spec, CommandContext context)
+        {
+            if (spec.Trim().Length == 0)
+            {
+                throw new CommandArgumentException(context.CommandId, "target",
+                    "场景模式的 target 不能为空（空串只在 Prefab 模式下表示根节点）");
+            }
+        }
+
+        /// <summary>
+        /// Prefab 模式解析 target 的共用入口：空串 / 省略 = Prefab 根。
+        /// add / remove / setField / setFields 四条指令都走这里，避免"某条指令不支持"再次发生。
+        /// </summary>
+        internal static Transform ResolvePrefabTarget(GameObject root, string spec, CommandContext context)
+        {
+            return FindInPrefabUnique(root, spec ?? string.Empty, context);
+        }
 
         internal static Component RequireComponent(Transform target, string typeName, CommandContext context)
         {
@@ -251,33 +288,75 @@ namespace CivilRev.CommandSystem
             public List<(object parent, Member member)> backChain;
             public object converted;
             public object oldValue;
+
+            /// <summary>
+            /// 非空时走「序列化写入」通道，由它完成真正的写入（IMPR-005）。
+            /// <para>反射认不出来但 Unity 自己能序列化的字段（ParticleSystem 的 <c>main</c>/<c>shape</c>/<c>emission</c>
+            /// 这类只读模块属性）走这条通道。</para>
+            /// </summary>
+            public Func<object> applyOverride;
         }
 
         /// <summary>
         /// 解析并校验一个字段写入（支持 <c>A.B.C</c> 嵌套路径与结构体整体赋值），完成值转换但不落盘。
         /// 解析或转换任一失败会直接抛错——配合 <see cref="ApplyField"/> 即可实现「先全部校验、再整体写入」的原子语义。
+        /// <para>
+        /// 两条写入通道：反射优先（普通字段 / 可写属性）；反射找不到时退到
+        /// <see cref="TryResolveSerializedWrite"/>（SerializedObject），这样 ParticleSystem 之类的
+        /// 只读模块属性也能写（此前是"读得到、写不进"，见 IMPR-005）。
+        /// </para>
         /// </summary>
         internal static FieldOp ResolveField(Component component, string fieldName, JsonValue raw,
             CommandContext context, Func<string, Transform> nodeResolver)
         {
-            var leaf = RequireFieldPath(component, fieldName, context, out var leafContainer, out var backChain);
-            var oldValue = GetMemberValue(leaf, leafContainer);
-            var converted = ConvertValue(raw, MemberType(leaf), context, fieldName, nodeResolver);
-            return new FieldOp
+            if (TryResolveFieldPath(component, fieldName, context, out var leaf, out var leafContainer,
+                    out var backChain, out var resolveError))
             {
-                componentHolder = component,
-                fieldName = fieldName,
-                leaf = leaf,
-                leafContainer = leafContainer,
-                backChain = backChain,
-                converted = converted,
-                oldValue = oldValue
-            };
+                var oldValue = GetMemberValue(leaf, leafContainer);
+                var converted = ConvertValue(raw, MemberType(leaf), context, fieldName, nodeResolver);
+                return new FieldOp
+                {
+                    componentHolder = component,
+                    fieldName = fieldName,
+                    leaf = leaf,
+                    leafContainer = leafContainer,
+                    backChain = backChain,
+                    converted = converted,
+                    oldValue = oldValue,
+                    applyOverride = null
+                };
+            }
+
+            Func<object> applyOverride;
+            object fallbackValue;
+            object fallbackOld;
+            string fallbackError;
+            if (TryResolveSerializedWrite(component, fieldName, raw, context,
+                    out applyOverride, out fallbackValue, out fallbackOld, out fallbackError))
+            {
+                return new FieldOp
+                {
+                    componentHolder = component,
+                    fieldName = fieldName,
+                    converted = fallbackValue,
+                    oldValue = fallbackOld,
+                    applyOverride = applyOverride
+                };
+            }
+
+            throw new CommandArgumentException(context.CommandId, "field",
+                string.IsNullOrEmpty(fallbackError) ? resolveError : resolveError + "；" + fallbackError);
         }
 
         /// <summary>把 <see cref="ResolveField"/> 解析出的结果真正写入组件（含 Undo/脏标记），并返回新值。</summary>
         internal static object ApplyField(FieldOp op, bool recordUndo)
         {
+            // 序列化通道：自带 SerializedObject 的写入与脏标记，不走下面的反射路径
+            if (op.applyOverride != null)
+            {
+                return op.applyOverride();
+            }
+
 #if UNITY_EDITOR
             if (recordUndo)
             {
@@ -322,6 +401,308 @@ namespace CivilRev.CommandSystem
             }
         }
 
+        // ------------------------------------------------------------ 序列化写入通道（IMPR-005）
+
+        /// <summary>
+        /// 脚本 API 里的模块短名 → Unity 序列化里的模块名。
+        /// <para>
+        /// <c>ParticleSystem.main</c> / <c>.shape</c> / <c>.emission</c> 都是**只读属性**
+        /// （返回模块 struct 的拷贝，本就不能整体赋值），而 YAML 里它们叫 InitialModule / ShapeModule /
+        /// EmissionModule。有了这张表，调用方就能用写脚本时的习惯写 <c>main.startSize.scalar</c>。
+        /// </para>
+        /// </summary>
+        private static readonly Dictionary<string, string> ParticleModuleAliases =
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                { "main", "InitialModule" },
+                { "emission", "EmissionModule" },
+                { "shape", "ShapeModule" },
+                { "velocityOverLifetime", "VelocityModule" },
+                { "limitVelocityOverLifetime", "LimitVelocityModule" },
+                { "inheritVelocity", "InheritVelocityModule" },
+                { "forceOverLifetime", "ForceModule" },
+                { "colorOverLifetime", "ColorModule" },
+                { "colorBySpeed", "ColorBySpeedModule" },
+                { "sizeOverLifetime", "SizeModule" },
+                { "sizeBySpeed", "SizeBySpeedModule" },
+                { "rotationOverLifetime", "RotationModule" },
+                { "rotationBySpeed", "RotationBySpeedModule" },
+                { "externalForces", "ExternalForcesModule" },
+                { "noise", "NoiseModule" },
+                { "collision", "CollisionModule" },
+                { "trigger", "TriggerModule" },
+                { "subEmitters", "SubModule" },
+                { "textureSheetAnimation", "TextureSheetAnimationModule" },
+                { "lights", "LightsModule" },
+                { "trails", "TrailsModule" },
+                { "customData", "CustomDataModule" },
+                { "uv", "UVModule" }
+            };
+
+        /// <summary>
+        /// 反射写不进去的字段的最后一条路：用 <c>SerializedObject</c> 按 Unity 自己的序列化路径写。
+        /// <para>
+        /// 解析期只做「路径能不能找到 + 值能不能转」，真正的写入包成委托推迟到 <see cref="ApplyField"/>，
+        /// 这样 <c>component.setFields</c> 的原子语义（先全部校验、再整体写入）依然成立。
+        /// </para>
+        /// <para>
+        /// 写入时**新建一个** SerializedObject：多条 op 若共用解析期的旧快照，后写的会把先写的覆盖回去。
+        /// </para>
+        /// </summary>
+        private static bool TryResolveSerializedWrite(Component component, string fieldPath, JsonValue raw,
+            CommandContext context, out Func<object> apply, out object converted, out object oldValue,
+            out string error)
+        {
+            apply = null;
+            converted = null;
+            oldValue = null;
+            error = null;
+
+            if (component == null)
+            {
+                return false;
+            }
+
+#if UNITY_EDITOR
+            var probe = new UnityEditor.SerializedObject(component);
+            var prop = FindSerializedProperty(probe, fieldPath);
+            if (prop == null)
+            {
+                error = SerializedPathHint(component, fieldPath);
+                return false;
+            }
+
+            object pending;
+            string convertError;
+            if (!TryConvertSerializedValue(prop, raw, context, fieldPath, out pending, out convertError))
+            {
+                error = convertError;
+                return false;
+            }
+
+            oldValue = DescribeSerializedValue(prop);
+            converted = pending;
+
+            var resolvedPath = prop.propertyPath;
+            var holder = component;
+            apply = () =>
+            {
+                var fresh = new UnityEditor.SerializedObject(holder);
+                var target = fresh.FindProperty(resolvedPath);
+                if (target == null)
+                {
+                    throw new CommandException(
+                        $"序列化写入失败：'{holder.GetType().Name}' 上找不到路径 '{resolvedPath}'（对象可能已被销毁）");
+                }
+
+                WriteSerializedValue(target, pending);
+                fresh.ApplyModifiedProperties();
+                UnityEditor.EditorUtility.SetDirty(holder);
+                UnityEditor.PrefabUtility.RecordPrefabInstancePropertyModifications(holder);
+                return pending;
+            };
+
+            return true;
+#else
+            return false;
+#endif
+        }
+
+#if UNITY_EDITOR
+        /// <summary>按原路径找序列化属性；找不到时把首段按模块别名表翻译一次再找（<c>main.x</c> → <c>InitialModule.x</c>）。</summary>
+        private static UnityEditor.SerializedProperty FindSerializedProperty(UnityEditor.SerializedObject so,
+            string fieldPath)
+        {
+            var prop = so.FindProperty(fieldPath);
+            if (prop != null)
+            {
+                return prop;
+            }
+
+            var dot = fieldPath.IndexOf('.');
+            if (dot <= 0)
+            {
+                return null;
+            }
+
+            var head = fieldPath.Substring(0, dot).Trim();
+            var tail = fieldPath.Substring(dot);
+
+            string mapped;
+            return ParticleModuleAliases.TryGetValue(head, out mapped)
+                ? so.FindProperty(mapped + tail)
+                : null;
+        }
+
+        private static string FirstSegment(string fieldPath)
+        {
+            var dot = fieldPath.IndexOf('.');
+            return dot < 0 ? fieldPath : fieldPath.Substring(0, dot);
+        }
+
+        /// <summary>序列化路径也没命中时给出的提示：只对"确实是只读模块属性"的情况说话，普通拼错不添噪音。</summary>
+        private static string SerializedPathHint(Component component, string fieldPath)
+        {
+            var head = FirstSegment(fieldPath).Trim();
+            string mapped;
+            if (!ParticleModuleAliases.TryGetValue(head, out mapped))
+            {
+                return null;
+            }
+
+            return $"'{head}' 是只读模块属性，请写到具体字段（如 {head}.<字段名>），" +
+                   $"或直接写 Unity 序列化路径 {mapped}.…（component.get 读回来的路径可直接用）";
+        }
+
+        /// <summary>按 <c>SerializedProperty</c> 的类型做值转换；不支持的类型给出明确原因。</summary>
+        private static bool TryConvertSerializedValue(UnityEditor.SerializedProperty prop, JsonValue raw,
+            CommandContext context, string fieldName, out object value, out string error)
+        {
+            value = null;
+            error = null;
+
+            if (raw == null || raw.IsNull)
+            {
+                error = $"字段 {fieldName}：缺少 value";
+                return false;
+            }
+
+            switch (prop.propertyType)
+            {
+                case UnityEditor.SerializedPropertyType.Float:
+                    value = raw.AsFloat();
+                    return true;
+                case UnityEditor.SerializedPropertyType.Integer:
+                    value = raw.AsInt();
+                    return true;
+                case UnityEditor.SerializedPropertyType.Boolean:
+                    value = raw.AsBool();
+                    return true;
+                case UnityEditor.SerializedPropertyType.String:
+                    value = raw.AsString();
+                    return true;
+                case UnityEditor.SerializedPropertyType.Color:
+                    value = ToColor(raw, context, fieldName);
+                    return true;
+                case UnityEditor.SerializedPropertyType.Vector2:
+                    value = ToVector2(raw, context, fieldName);
+                    return true;
+                case UnityEditor.SerializedPropertyType.Vector3:
+                    value = ToVector3(raw, context, fieldName);
+                    return true;
+                case UnityEditor.SerializedPropertyType.Vector4:
+                    value = ToVector4(raw, context, fieldName);
+                    return true;
+                case UnityEditor.SerializedPropertyType.Enum:
+                    value = ResolveEnumIndex(prop, raw, context, fieldName);
+                    return true;
+                case UnityEditor.SerializedPropertyType.Generic:
+                    error = $"字段 {fieldName}：'{prop.propertyPath}' 是复合结构（{prop.propertyType}），" +
+                            "序列化通道不支持整体写入，请写到具体分量（如 main.startSize.scalar）";
+                    return false;
+                default:
+                    error = $"字段 {fieldName}：序列化类型 {prop.propertyType} 暂不支持写入";
+                    return false;
+            }
+        }
+
+        private static void WriteSerializedValue(UnityEditor.SerializedProperty prop, object value)
+        {
+            switch (prop.propertyType)
+            {
+                case UnityEditor.SerializedPropertyType.Float:
+                    prop.floatValue = Convert.ToSingle(value, CultureInfo.InvariantCulture);
+                    break;
+                case UnityEditor.SerializedPropertyType.Integer:
+                    prop.intValue = Convert.ToInt32(value, CultureInfo.InvariantCulture);
+                    break;
+                case UnityEditor.SerializedPropertyType.Boolean:
+                    prop.boolValue = Convert.ToBoolean(value, CultureInfo.InvariantCulture);
+                    break;
+                case UnityEditor.SerializedPropertyType.String:
+                    prop.stringValue = Convert.ToString(value, CultureInfo.InvariantCulture);
+                    break;
+                case UnityEditor.SerializedPropertyType.Color:
+                    prop.colorValue = (Color)value;
+                    break;
+                case UnityEditor.SerializedPropertyType.Vector2:
+                    prop.vector2Value = (Vector2)value;
+                    break;
+                case UnityEditor.SerializedPropertyType.Vector3:
+                    prop.vector3Value = (Vector3)value;
+                    break;
+                case UnityEditor.SerializedPropertyType.Vector4:
+                    prop.vector4Value = (Vector4)value;
+                    break;
+                case UnityEditor.SerializedPropertyType.Enum:
+                    prop.enumValueIndex = Convert.ToInt32(value, CultureInfo.InvariantCulture);
+                    break;
+                default:
+                    throw new CommandException($"序列化写入不支持类型 {prop.propertyType}（'{prop.propertyPath}'）");
+            }
+        }
+
+        private static int ResolveEnumIndex(UnityEditor.SerializedProperty prop, JsonValue raw,
+            CommandContext context, string fieldName)
+        {
+            var names = prop.enumNames ?? new string[0];
+            if (raw.IsString)
+            {
+                var text = raw.AsString();
+                for (var i = 0; i < names.Length; i++)
+                {
+                    if (string.Equals(names[i], text, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return i;
+                    }
+                }
+
+                throw new CommandArgumentException(context.CommandId, "value",
+                    $"字段 {fieldName}：'{text}' 不是合法枚举值，可选：{string.Join("、", names)}");
+            }
+
+            var index = raw.AsInt();
+            if (index < 0 || (names.Length > 0 && index >= names.Length))
+            {
+                throw new CommandArgumentException(context.CommandId, "value",
+                    $"字段 {fieldName}：枚举下标 {index} 越界，可选：{string.Join("、", names)}");
+            }
+
+            return index;
+        }
+
+        /// <summary>把序列化属性的当前值描述成字符串，用于回显旧值。</summary>
+        private static string DescribeSerializedValue(UnityEditor.SerializedProperty prop)
+        {
+            switch (prop.propertyType)
+            {
+                case UnityEditor.SerializedPropertyType.Float:
+                    return prop.floatValue.ToString(CultureInfo.InvariantCulture);
+                case UnityEditor.SerializedPropertyType.Integer:
+                    return prop.intValue.ToString(CultureInfo.InvariantCulture);
+                case UnityEditor.SerializedPropertyType.Boolean:
+                    return prop.boolValue ? "true" : "false";
+                case UnityEditor.SerializedPropertyType.String:
+                    return prop.stringValue;
+                case UnityEditor.SerializedPropertyType.Enum:
+                    return prop.enumNames != null && prop.enumValueIndex >= 0 &&
+                           prop.enumValueIndex < prop.enumNames.Length
+                        ? prop.enumNames[prop.enumValueIndex]
+                        : prop.enumValueIndex.ToString(CultureInfo.InvariantCulture);
+                case UnityEditor.SerializedPropertyType.Color:
+                    return prop.colorValue.ToString();
+                case UnityEditor.SerializedPropertyType.Vector2:
+                    return prop.vector2Value.ToString();
+                case UnityEditor.SerializedPropertyType.Vector3:
+                    return prop.vector3Value.ToString();
+                case UnityEditor.SerializedPropertyType.Vector4:
+                    return prop.vector4Value.ToString();
+                default:
+                    return $"<{prop.propertyType}>";
+            }
+        }
+#endif // UNITY_EDITOR
+
         /// <summary>
         /// 解析嵌套字段路径（<c>A.B.C</c>），返回叶子成员与「直接持有叶子的容器」以及需要回写的中间容器链。
         /// 每段都兼容 <c>m_</c> 前缀（C5）并在解析失败时给出最接近的候选（C5）。
@@ -329,6 +710,30 @@ namespace CivilRev.CommandSystem
         private static Member RequireFieldPath(Component component, string fieldName, CommandContext context,
             out object leafContainer, out List<(object parent, Member member)> backChain)
         {
+            Member leaf;
+            string error;
+            if (!TryResolveFieldPath(component, fieldName, context, out leaf, out leafContainer, out backChain,
+                    out error))
+            {
+                throw new CommandArgumentException(context.CommandId, "field", error);
+            }
+
+            return leaf;
+        }
+
+        /// <summary>
+        /// <see cref="RequireFieldPath"/> 的可失败版本：解析不出来时返回 false 并把原因放进 <paramref name="error"/>，
+        /// 好让调用方先退到序列化写入通道（IMPR-005）再决定报什么错。
+        /// </summary>
+        private static bool TryResolveFieldPath(Component component, string fieldName, CommandContext context,
+            out Member leaf, out object leafContainer, out List<(object parent, Member member)> backChain,
+            out string error)
+        {
+            leaf = default;
+            leafContainer = null;
+            backChain = null;
+            error = null;
+
             var segments = fieldName.Split('.');
             object current = component;
             var currentType = component.GetType();
@@ -351,22 +756,23 @@ namespace CivilRev.CommandSystem
                     var hint = suggestions.Count > 0
                         ? $"。您是不是要写：{string.Join("、", suggestions.ToArray())}"
                         : string.Empty;
-                    throw new CommandArgumentException(context.CommandId, "field",
-                        $"{currentType.Name} 上没有字段或属性 '{seg}'（解析 '{fieldName}' 时）{hint}");
+                    error = $"{currentType.Name} 上没有字段或属性 '{seg}'（解析 '{fieldName}' 时）{hint}";
+                    return false;
                 }
 
                 if (i == segments.Length - 1)
                 {
+                    leaf = member.Value;
                     leafContainer = current;
                     backChain = chain;
-                    return member.Value;
+                    return true;
                 }
 
                 var value = GetMemberValue(member.Value, current);
                 if (value == null)
                 {
-                    throw new CommandArgumentException(context.CommandId, "field",
-                        $"'{fieldName}' 的中间字段 '{seg}' 为 null，无法继续访问下一级");
+                    error = $"'{fieldName}' 的中间字段 '{seg}' 为 null，无法继续访问下一级";
+                    return false;
                 }
 
                 chain.Add((current, member.Value));
@@ -376,9 +782,8 @@ namespace CivilRev.CommandSystem
                     : member.Value.property.PropertyType;
             }
 
-            leafContainer = null;
-            backChain = null;
-            return default;
+            error = $"'{fieldName}' 不是合法的字段路径";
+            return false;
         }
 
         /// <summary>在 Prefab 内容里按名字 / 路径找节点并做唯一性校验（空串 = 根节点）。复用 SceneQuery 的子树匹配。</summary>
@@ -965,13 +1370,14 @@ namespace CivilRev.CommandSystem
     /// prefab（可选，给了就操作 Prefab 资源内的目标节点，空串表示根节点）</para>
     /// </summary>
     [Command("component.remove", Description = "从节点上移除组件（场景或 Prefab 资产，类型名反射）",
-        Usage = "target: string, component: string, prefab: string",
+        Usage = "target: string（Prefab 模式下空串=根）, component: string, prefab: string",
         EditorOnly = true)]
     public sealed class RemoveComponentCommand : ICommand
     {
         public CommandResult Execute(CommandContext context)
         {
-            var targetSpec = context.Args.RequireString("target");
+            // IMPR-006：与 component.add / setField / setFields 一致——Prefab 模式下 target 可为空串（= 根节点）
+            var targetSpec = SetComponentFieldCommand.RequireTargetSpec(context);
             var typeName = context.Args.RequireString("component");
 
             var prefabPath = context.Args.GetString("prefab", null);
@@ -981,7 +1387,7 @@ namespace CivilRev.CommandSystem
                 var normalized = CivilRev.CommandSystem.Editor.PrefabEditUtil.NormalizePrefabPath(context, prefabPath);
                 return CivilRev.CommandSystem.Editor.PrefabEditUtil.EditPrefab(context, normalized, root =>
                 {
-                var node = SetComponentFieldCommand.FindInPrefabUnique(root, targetSpec, context);
+                var node = SetComponentFieldCommand.ResolvePrefabTarget(root, targetSpec, context);
                 var component = SetComponentFieldCommand.RequireComponent(node, typeName, context);
                     var componentType = component.GetType().Name;
                     UnityEngine.Object.DestroyImmediate(component);
@@ -998,11 +1404,7 @@ namespace CivilRev.CommandSystem
 #endif
             }
 
-            if (targetSpec.Trim().Length == 0)
-            {
-                throw new CommandArgumentException(context.CommandId, "target",
-                    "场景模式的 target 不能为空");
-            }
+            SetComponentFieldCommand.EnsureSceneTarget(targetSpec, context);
 
             if (!SceneQuery.TryResolveUnique(targetSpec, out var target, out var resolveError))
             {
@@ -1036,19 +1438,18 @@ namespace CivilRev.CommandSystem
     /// prefab（可选，操作 Prefab 资源）。成功时返回各字段修改前的旧值，方便复核。
     /// </para>
     /// </summary>
-    [Command("component.setFields", Description = "一次写入一个组件上的多个字段（原子：任一失败整体不生效）",
-        Usage = "target: string, component: string, fields: object, prefab: string",
+    [Command("component.setFields",
+        Description = "一次写入一个组件上的多个字段（原子：任一失败整体不生效）；data 回显各字段修改前的旧值",
+        Usage = "target: string（Prefab 模式下空串=根）, component: string, fields: object, prefab: string",
         EditorOnly = true)]
     public sealed class SetComponentFieldsCommand : ICommand
     {
+        /// <summary>IMPR-004：消息里写明 data 是旧值，免得调用方把它当"写后的当前值"。</summary>
+        private const string OldValuesNote = "（data 为各字段修改前的旧值，用于复核；写后的值请再看消息或 component.get）";
+
         public CommandResult Execute(CommandContext context)
         {
-            var targetSpec = context.Args.GetString("target", null);
-            if (targetSpec == null)
-            {
-                throw new CommandArgumentException(context.CommandId, "target",
-                    "缺少必填参数 target（Prefab 模式下可用空串表示 Prefab 根）");
-            }
+            var targetSpec = SetComponentFieldCommand.RequireTargetSpec(context);
 
             var typeName = context.Args.RequireString("component");
             var fieldsSpec = context.Args.Get("fields");
@@ -1064,11 +1465,7 @@ namespace CivilRev.CommandSystem
                 return ExecuteOnPrefab(context, prefabPath, targetSpec, typeName, fieldsSpec);
             }
 
-            if (targetSpec.Trim().Length == 0)
-            {
-                throw new CommandArgumentException(context.CommandId, "target",
-                    "场景模式的 target 不能为空（空串只在 Prefab 模式下表示根节点）");
-            }
+            SetComponentFieldCommand.EnsureSceneTarget(targetSpec, context);
 
             if (!SceneQuery.TryResolveUnique(targetSpec, out var target, out var resolveError))
             {
@@ -1084,8 +1481,10 @@ namespace CivilRev.CommandSystem
 #endif
             ApplyAll(ops, true);
 
+            // IMPR-004：data 里是"修改前的旧值"，此前消息没说明，调用方会拿它当写后值核对、误判成写入失败
             return CommandResult.Ok(
-                $"已批量设置 {SceneQuery.BuildPath(target)} 上 {component.GetType().Name} 的 {ops.Count} 个字段",
+                $"已批量设置 {SceneQuery.BuildPath(target)} 上 {component.GetType().Name} 的 {ops.Count} 个字段" +
+                OldValuesNote,
                 BuildOldValues(ops));
         }
 
@@ -1096,13 +1495,14 @@ namespace CivilRev.CommandSystem
             var normalized = CivilRev.CommandSystem.Editor.PrefabEditUtil.NormalizePrefabPath(context, prefabPath);
             return CivilRev.CommandSystem.Editor.PrefabEditUtil.EditPrefab(context, normalized, root =>
             {
-                var node = SetComponentFieldCommand.FindInPrefabUnique(root, targetSpec, context);
+                var node = SetComponentFieldCommand.ResolvePrefabTarget(root, targetSpec, context);
                 var component = SetComponentFieldCommand.RequireComponent(node, typeName, context);
                 var ops = ResolveAll(component, fieldsSpec, context, path => SetComponentFieldCommand.FindInPrefab(root, path));
                 ApplyAll(ops, false);
                 UnityEditor.PrefabUtility.SaveAsPrefabAsset(root, normalized);
                 return CommandResult.Ok(
-                    $"已批量设置 Prefab '{normalized}' 的 {node.name}.{component.GetType().Name} 的 {ops.Count} 个字段",
+                    $"已批量设置 Prefab '{normalized}' 的 {node.name}.{component.GetType().Name} 的 {ops.Count} 个字段" +
+                    OldValuesNote,
                     BuildOldValues(ops));
             });
 #else
