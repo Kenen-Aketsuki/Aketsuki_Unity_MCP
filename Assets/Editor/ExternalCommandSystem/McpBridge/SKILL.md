@@ -8,6 +8,11 @@ description: 向本项目的 Unity 编辑器下发 JSON 指令、查询编辑器
 本项目在 Unity 编辑器里跑着一个只监听本机的 HTTP 指令服务（`CivilRev.CommandSystem`）。
 本 Skill 是它的**客户端半边**：负责探活、发送、把执行报告读成人能看懂的样子。
 
+> **⚠️ HTTP 200 ≠ 指令成功（DOC-001）。** 业务失败时服务端照样返回 200，
+> 成败只在 body 的 `ok` / `records[].status` 里。**先看 `body.ok`，再看 `succeeded`/`failed`**。
+> 想确认"这次是不是真的编译了"，查 `/v1/status` 的 `lastCompile.requestedUtc` 与 `rejectedReason`
+> （被拒时 `rejectedReason` 非空，且 `requestedUtc` 会比 `finishedUtc` 新）。
+
 服务端由 `CommandHttpServerBoot` 在编辑器启动和每次域重载后**自动拉起**，正常情况下不需要用户点任何按钮。
 连不上通常是这三种情况：Unity 没开着、正在重编译（旧进程已断开、新域还没起来）、或用菜单
 `Tools / 指令系统 / HTTP 指令服务` 手动关掉了。先 `status` 确认，再对症处理，不要反复重试。

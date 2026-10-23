@@ -618,14 +618,15 @@ namespace CivilRev.CommandSystem.Editor
     /// require（默认 false）</para>
     /// </summary>
     [Command("component.add", Description = "给节点挂组件（场景或 Prefab 资产，类型名反射，幂等）",
-        Usage = "target: string, component: string, prefab: string, require: bool",
+        Usage = "target: string（Prefab 模式下空串=根）, component: string, prefab: string, require: bool",
         EditorOnly = true)]
     public sealed class AddComponentCommand : ICommand
     {
         public CommandResult Execute(CommandContext context)
         {
 #if UNITY_EDITOR
-            var targetSpec = context.Args.RequireString("target");
+            // IMPR-006：与 component.remove / setField / setFields 一致——Prefab 模式下 target 可为空串（= 根节点）
+            var targetSpec = SetComponentFieldCommand.RequireTargetSpec(context);
             var typeName = context.Args.RequireString("component");
             var require = context.Args.GetBool("require", false);
 
@@ -635,18 +636,14 @@ namespace CivilRev.CommandSystem.Editor
                 var normalized = PrefabEditUtil.NormalizePrefabPath(context, prefabPath);
                 return PrefabEditUtil.EditPrefab(context, normalized, root =>
                 {
-                    var node = SetComponentFieldCommand.FindInPrefab(root, targetSpec);
-                    if (node == null)
-                    {
-                        throw new CommandArgumentException(context.CommandId, "target",
-                            $"Prefab '{normalized}' 里找不到节点 '{targetSpec}'（空串表示根节点）");
-                    }
-
+                    var node = SetComponentFieldCommand.ResolvePrefabTarget(root, targetSpec, context);
                     var added = PrefabEditUtil.AddComponents(
                         node.gameObject, new[] { typeName }, context, require, false);
                     return BuildResult(node, typeName, added, normalized);
                 });
             }
+
+            SetComponentFieldCommand.EnsureSceneTarget(targetSpec, context);
 
             var target = SceneQuery.ResolveTarget(targetSpec);
             if (target == null)

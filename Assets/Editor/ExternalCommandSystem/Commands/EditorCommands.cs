@@ -82,6 +82,13 @@ namespace CivilRev.CommandSystem.Editor
     {
         public CommandResult Execute(CommandContext context)
         {
+            // DOC-001：被拒时 HTTP 仍是 200，只看状态码会误判成"编译过了"。
+            // 先把这次请求记进 lastCompile（requestedUtc + rejectedReason），再按原样抛错。
+            if (EditorApplication.isPlaying)
+            {
+                CommandCompileMonitor.RecordRejected("编辑器正处于预览状态，不允许编译与刷新");
+            }
+
             EditorPlayState.GuardNotPlaying();
 
             if (context.DryRun)
