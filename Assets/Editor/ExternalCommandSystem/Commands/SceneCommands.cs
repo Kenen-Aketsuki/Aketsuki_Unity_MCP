@@ -286,11 +286,12 @@ namespace CivilRev.CommandSystem.Editor
                 var folder = string.Join("/", segments, 0, i + 1);
                 if (!AssetDatabase.IsValidFolder(folder))
                 {
-                    var error = AssetDatabase.CreateFolder(
+                    // AssetDatabase.CreateFolder 返回新文件夹的 GUID（失败才是空串），不是错误信息
+                    var guid = AssetDatabase.CreateFolder(
                         string.Join("/", segments, 0, i), segments[i]);
-                    if (!string.IsNullOrEmpty(error))
+                    if (string.IsNullOrEmpty(guid) || !AssetDatabase.IsValidFolder(folder))
                     {
-                        throw new CommandException($"创建文件夹 '{folder}' 失败：{error}");
+                        throw new CommandException($"创建文件夹 '{folder}' 失败（AssetDatabase.CreateFolder 未返回 GUID）");
                     }
                 }
             }

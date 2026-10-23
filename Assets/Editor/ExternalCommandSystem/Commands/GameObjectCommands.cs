@@ -170,6 +170,179 @@ namespace CivilRev.CommandSystem
     }
 
     /// <summary>
+    /// 设置 GameObject **自身**属性（layer / tag / isStatic）——IMPR-002。
+    /// <para>
+    /// <c>component.setField</c> 只作用于组件字段，而 layer / tag / isStatic 挂在 GameObject 上
+    /// （GameObject 不是 Component，<c>GetComponent(typeof(GameObject))</c> 取不到），
+    /// 所以此前没有任何指令能改节点层级（layer）。这边补齐写侧，读侧见 <c>scene.hierarchy</c>
+    /// 每个节点上的 layer / layerName / tag / isStatic。
+    /// </para>
+    /// <para>
+    /// 参数：target（必填）、layer（int 或层名，如 "UI"）、tag（string）、isStatic（bool）、
+    /// includeChildren（默认 false，只对 layer 生效，连同整棵子树一起刷）
+    /// </para>
+    /// </summary>
+    [Command("gameobject.setProperty",
+        Description = "设置 GameObject 自身属性（layer / tag / isStatic），layer 可连同子树",
+        Usage = "target: string, layer: int|string, tag: string, isStatic: bool, includeChildren: bool",
+        EditorOnly = true)]
+    public sealed class SetGameObjectPropertyCommand : ICommand
+    {
+        public CommandResult Execute(CommandContext context)
+        {
+            var targetSpec = context.Args.RequireString("target");
+            if (!SceneQuery.TryResolveUnique(targetSpec, out var target, out var resolveError))
+            {
+                throw new CommandArgumentException(context.CommandId, "target", resolveError);
+            }
+
+            var hasLayer = context.Args.Has("layer");
+            var hasTag = context.Args.Has("tag");
+            var hasStatic = context.Args.Has("isStatic");
+            if (!hasLayer && !hasTag && !hasStatic)
+            {
+                throw new CommandArgumentException(context.CommandId, "layer",
+                    "至少要给 layer / tag / isStatic 之一（激活态请用 gameobject.setActive，改名请用 gameobject.rename）");
+            }
+
+            var includeChildren = context.Args.GetBool("includeChildren", false);
+            var layer = hasLayer ? ResolveLayer(context, context.Args.Get("layer")) : -1;
+            var tag = hasTag ? context.Args.GetString("tag", string.Empty) : null;
+            var isStatic = hasStatic && context.Args.GetBool("isStatic", false);
+
+            var go = target.gameObject;
+#if UNITY_EDITOR
+            UnityEditor.Undo.RecordObject(go, "CommandSystem.SetGameObjectProperty");
+            UnityEditor.Undo.RecordObject(target, "CommandSystem.SetGameObjectProperty");
+#endif
+            if (hasTag)
+            {
+                try
+                {
+                    go.tag = tag;
+                }
+                catch (UnityException)
+                {
+                    throw new CommandArgumentException(context.CommandId, "tag",
+                        $"'{tag}' 不是工程里已定义的 Tag（未定义的 Tag 需先在 Project Settings → Tags and Layers 里加）");
+                }
+            }
+
+            if (hasStatic)
+            {
+                go.isStatic = isStatic;
+            }
+
+            var affected = 0;
+            if (hasLayer)
+            {
+                go.layer = layer;
+                affected = 1;
+                if (includeChildren)
+                {
+                    foreach (var child in target.GetComponentsInChildren<Transform>(true))
+                    {
+                        if (child == target)
+                        {
+                            continue;
+                        }
+
+#if UNITY_EDITOR
+                        UnityEditor.Undo.RecordObject(child.gameObject, "CommandSystem.SetGameObjectProperty");
+#endif
+                        child.gameObject.layer = layer;
+                        affected++;
+                    }
+                }
+            }
+
+#if UNITY_EDITOR
+            UnityEditor.EditorUtility.SetDirty(go);
+            UnityEditor.PrefabUtility.RecordPrefabInstancePropertyModifications(go);
+#endif
+
+            var data = JsonValue.NewObject();
+            data.Set("path", JsonValue.Of(SceneQuery.BuildPath(target)));
+            data.Set("layer", hasLayer ? JsonValue.Of(layer) : JsonValue.Null);
+            data.Set("layerName", hasLayer ? JsonValue.Of(LayerMask.LayerToName(layer)) : JsonValue.Null);
+            data.Set("tag", hasTag ? JsonValue.Of(go.tag) : JsonValue.Null);
+            data.Set("isStatic", hasStatic ? JsonValue.Of(go.isStatic) : JsonValue.Null);
+            data.Set("affectedCount", JsonValue.Of(affected));
+            SceneQueryCommandsUtil.AttachScene(data);
+
+            var parts = new System.Collections.Generic.List<string>();
+            if (hasLayer)
+            {
+                parts.Add($"layer={layer}({LayerMask.LayerToName(layer)})" + (includeChildren ? $"（含子树 {affected} 个节点）" : string.Empty));
+            }
+
+            if (hasTag)
+            {
+                parts.Add($"tag={go.tag}");
+            }
+
+            if (hasStatic)
+            {
+                parts.Add($"isStatic={go.isStatic}");
+            }
+
+            return CommandResult.Ok(
+                $"已设置 {SceneQuery.BuildPath(target)} 的 {string.Join("、", parts.ToArray())}", data);
+        }
+
+        /// <summary>layer 参数：数字（0-31）或层名（"UI"/"Default"/自定义层），失败时列出可选层名。</summary>
+        private static int ResolveLayer(CommandContext context, JsonValue spec)
+        {
+            if (spec == null || spec.IsNull)
+            {
+                throw new CommandArgumentException(context.CommandId, "layer", "缺少 layer 的值（数字 0-31 或层名）");
+            }
+
+            if (spec.IsNumber)
+            {
+                return CheckLayerRange(context, spec.AsInt(-1));
+            }
+
+            var text = spec.AsString(string.Empty).Trim();
+            if (int.TryParse(text, out var parsed))
+            {
+                return CheckLayerRange(context, parsed);
+            }
+
+            var named = LayerMask.NameToLayer(text);
+            if (named >= 0)
+            {
+                return named;
+            }
+
+            var known = new System.Collections.Generic.List<string>();
+            for (var i = 0; i < 32; i++)
+            {
+                var name = LayerMask.LayerToName(i);
+                if (!string.IsNullOrEmpty(name))
+                {
+                    known.Add($"{i}:{name}");
+                }
+            }
+
+            throw new CommandArgumentException(context.CommandId, "layer",
+                $"工程里没有名为 '{text}' 的层。已有层：{string.Join("、", known.ToArray())}"
+                + "（自定义层先在 Project Settings → Tags and Layers 里加）");
+        }
+
+        private static int CheckLayerRange(CommandContext context, int layer)
+        {
+            if (layer < 0 || layer > 31)
+            {
+                throw new CommandArgumentException(context.CommandId, "layer",
+                    $"layer 必须在 0-31 之间，收到 {layer}");
+            }
+
+            return layer;
+        }
+    }
+
+    /// <summary>
     /// 改变节点父级（RectTransform 用 worldPositionStays 语义）
     /// <para>参数：target（必填）、parent（必填）、keepWorldPosition（默认 true）</para>
     /// </summary>
