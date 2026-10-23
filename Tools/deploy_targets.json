@@ -1,0 +1,24 @@
+{
+  "$comment": "Tools/deploy.py 的部署目标。root 是 Unity 工程根（含 Assets/ 与 ProjectSettings/ 的那一层），不是工作区根。改了这里不用改脚本。",
+  "source": "Assets/Editor/ExternalCommandSystem",
+  "targets": [
+    {
+      "name": "project_island_back",
+      "root": "D:/Wrok_proj/project_island_back",
+      "unity": "2022.3.62f2c1",
+      "note": "工作区根与工程根同一层（.workbuddy 在工程根下）"
+    },
+    {
+      "name": "majotavern",
+      "root": "D:/Wrok_proj/majotavern",
+      "unity": "2022.3.62f2c1",
+      "note": "工作区根与工程根同一层"
+    },
+    {
+      "name": "CivelRev",
+      "root": "D:/Wrok_proj/CivelRev/Demo/CivilizationRevival",
+      "unity": "2021.3.16f1c1",
+      "note": "工作区根是 CivelRev/Demo，工程根比它低一层"
+    }
+  ]
+}
