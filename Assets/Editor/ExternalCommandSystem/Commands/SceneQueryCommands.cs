@@ -193,6 +193,11 @@ namespace CivilRev.CommandSystem.Editor
                 : JsonValue.Null);
             item.Set("activeSelf", JsonValue.Of(node.gameObject.activeSelf));
             item.Set("activeInHierarchy", JsonValue.Of(node.gameObject.activeInHierarchy));
+            // GameObject 自身属性（不在任何组件上，读侧与 gameobject.setProperty 的写侧对称）
+            item.Set("layer", JsonValue.Of(node.gameObject.layer));
+            item.Set("layerName", JsonValue.Of(LayerMask.LayerToName(node.gameObject.layer)));
+            item.Set("tag", JsonValue.Of(node.gameObject.tag));
+            item.Set("isStatic", JsonValue.Of(node.gameObject.isStatic));
 
             var components = JsonValue.NewArray();
             foreach (var component in node.GetComponents<Component>())

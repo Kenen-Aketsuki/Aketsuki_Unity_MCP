@@ -18,7 +18,7 @@ namespace CivilRev.CommandSystem.Editor
     internal static class ComponentGetCommands
     {
         [Command("component.get",
-            Description = "读取组件字段的当前值（field 省略则返回全部可序列化字段；支持场景与 Prefab 双模式）",
+            Description = "读取组件字段的当前值（field 支持点号嵌套路径 A.B.C；省略则返回全部可序列化字段；支持场景与 Prefab 双模式）",
             Usage = "target: string, component: string, field: string, prefab: string",
             EditorOnly = true)]
         public sealed class GetComponentFieldCommand : ICommand
@@ -54,7 +54,9 @@ namespace CivilRev.CommandSystem.Editor
 
                 var component = SetComponentFieldCommand.RequireComponent(target, typeName, context);
                 var result = Read(context, component, fieldName, describeTarget: SceneQuery.BuildPath(target));
-                if (result.Data is JsonValue data)
+                // 只有对象结果才附场景信息：读 Color/Vector/数组字段时 data 是数组，Set 会抛
+                // 「[Json] 期望类型 Object，实际为 Array」（BUG-004）
+                if (result.Data is JsonValue data && data.IsObject)
                 {
                     SceneQueryCommandsUtil.AttachScene(data);
                 }
@@ -188,9 +190,30 @@ namespace CivilRev.CommandSystem.Editor
 
         // ------------------------------------------------------------ SerializedObject → JsonValue
 
-        /// <summary>在组件的顶层属性里定位字段：精确 propertyPath → 去 m_ 前缀 → 嵌套路径尾段。</summary>
+        /// <summary>
+        /// 定位字段：点号嵌套路径 → 补 m_ 前缀的嵌套路径 → 顶层精确 / 去 m_ 前缀 / 嵌套尾段（旧口径）。
+        /// <para>
+        /// 第一步优先用 <see cref="SerializedObject.FindProperty(string)"/>：它天生支持任意深度路径
+        /// （<c>m_Colors.normalColor</c>，甚至带数组下标的 <c>m_Fonts.Array.data[0].m_Font</c>），
+        /// 与 <c>component.setField</c> 的 <c>A.B.C</c> 写入侧对齐（IMPR-001）。
+        /// </para>
+        /// </summary>
         private static SerializedProperty ResolveProperty(SerializedObject so, string field)
         {
+            var direct = so.FindProperty(field);
+            if (direct != null)
+            {
+                return direct;
+            }
+
+            // 用户常按 Inspector / C# 属性名写（colors.normalColor），而序列化字段叫 m_Colors.m_NormalColor。
+            // 逐段生成「原名 / 去 m_ / 加 m_ / m_+首字母大写」的变体，整条路径交给 FindProperty 裁决。
+            var tolerant = FindPropertyTolerant(so, field);
+            if (tolerant != null)
+            {
+                return tolerant;
+            }
+
             var it = so.GetIterator();
             var enterChildren = true;
             SerializedProperty loose = null;
@@ -221,6 +244,94 @@ namespace CivilRev.CommandSystem.Editor
             }
 
             return loose;
+        }
+
+        /// <summary>
+        /// 容错解析点号路径：每段生成「原名 / 去 m_ / 加 m_ / m_+首字母大写」的变体，
+        /// 组合成整条路径逐个试 <see cref="SerializedObject.FindProperty(string)"/>，命中即返回。
+        /// 例：<c>colors.normalColor</c> → 命中 <c>m_Colors.m_NormalColor</c>。
+        /// </summary>
+        private static SerializedProperty FindPropertyTolerant(SerializedObject so, string field)
+        {
+            var parts = field.Split('.');
+            if (parts.Length == 0 || parts.Length > 6)
+            {
+                return null; // 段数过多多半是写错了，不做组合爆炸
+            }
+
+            var paths = new System.Collections.Generic.List<string> { string.Empty };
+            foreach (var part in parts)
+            {
+                var variants = SegmentVariants(part);
+                var next = new System.Collections.Generic.List<string>(paths.Count * variants.Count);
+                foreach (var prefix in paths)
+                {
+                    foreach (var variant in variants)
+                    {
+                        next.Add(prefix.Length == 0 ? variant : prefix + "." + variant);
+                    }
+                }
+
+                paths = next;
+                if (paths.Count > 256)
+                {
+                    return null;
+                }
+            }
+
+            foreach (var path in paths)
+            {
+                if (path.Length == 0)
+                {
+                    continue;
+                }
+
+                var property = so.FindProperty(path);
+                if (property != null)
+                {
+                    return property;
+                }
+            }
+
+            return null;
+        }
+
+        /// <summary>单段名的候选写法：原名、去 m_、加 m_、m_ + 首字母大写（normalColor → m_NormalColor）。</summary>
+        private static System.Collections.Generic.List<string> SegmentVariants(string segment)
+        {
+            var list = new System.Collections.Generic.List<string>();
+            AddVariant(list, segment);
+
+            // 数组下标写法（m_Fonts.Array.data[0] 里的 data[0]）原样保留，不做变形
+            if (segment.IndexOf('[') >= 0 || string.Equals(segment, "Array", StringComparison.Ordinal))
+            {
+                return list;
+            }
+
+            if (segment.StartsWith("m_", StringComparison.Ordinal))
+            {
+                AddVariant(list, segment.Substring(2));
+            }
+            else
+            {
+                AddVariant(list, "m_" + segment);
+                if (segment.Length > 0)
+                {
+                    AddVariant(list, "m_" + char.ToUpperInvariant(segment[0]) + segment.Substring(1));
+                }
+            }
+
+            return list;
+        }
+
+        private static void AddVariant(System.Collections.Generic.List<string> list, string value)
+        {
+            if (string.IsNullOrEmpty(value) || list.Contains(value))
+            {
+                return;
+            }
+
+            list.Add(value);
         }
 
         /// <summary>SerializedProperty → JsonValue。引用返回 {path, name, type}（null 返回 null），向量/颜色/矩形返回数组或对象。</summary>

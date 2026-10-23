@@ -327,19 +327,20 @@ CommandRegistry.Default.RegisterInstance("my.cmd", new MyCommand(dependency));
 | `gameobject.destroy` | 删除 GameObject | `target`(必填) |
 | `gameobject.setActive` | 设置节点激活状态（"老模块留着不删只隐藏"的常态需求）；`includeChildren` 可连同子树 | `target`(必填), `active`(默认 true), `includeChildren`(默认 false) |
 | `gameobject.rename` | 重命名节点 | `target`(必填), `name`(必填) |
+| `gameobject.setProperty` | 设置 **GameObject 自身**属性（`layer` / `tag` / `isStatic`）——这些不在任何组件上，`component.setField` 够不着。`layer` 可传数字 0-31 或层名（`"UI"`），`includeChildren` 可连同整棵子树一起刷；返回受影响节点数 | `target`(必填), `layer`, `tag`, `isStatic`, `includeChildren`(默认 false) |
 | `gameobject.setParent` | 改变节点父级（RectTransform 用 `worldPositionStays` 语义） | `target`(必填), `parent`(必填), `keepWorldPosition`(默认 true) |
 | `gameobject.duplicate` | 在场景内复制节点（含子树，引用默认指向原节点，不做重映射，与 `prefab.duplicateNode` 口径一致） | `target`(必填), `name`(默认 `原名_Copy`), `parent`(默认同级), `includeChildren`(默认 true), `keepWorldPosition`(默认 true) |
 | `gameobject.instantiate` | 实例化 Prefab 到场景（保留 Prefab 连接） | `asset`(必填), `parent`, `name`, 布局参数, `select` |
-| `gameobject.find` | 按名称/类型/路径查找节点，返回完整路径与组件清单（绑字段前先用它确认目标） | `query`(必填), `all`, `maxCount` |
-| `scene.hierarchy` | 列出某节点子树（含组件类型与激活状态）；不给 `target` 列出所有场景根 | `target`, `maxDepth` |
+| `gameobject.find` | 按名称/类型/路径查找节点，返回完整路径与组件清单（绑字段前先用它确认目标）；每个节点带 `layer`/`layerName`/`tag`/`isStatic` | `query`(必填), `all`, `maxCount` |
+| `scene.hierarchy` | 列出某节点子树（含组件类型、激活状态、`layer`/`layerName`/`tag`/`isStatic`）；不给 `target` 列出所有场景根 | `target`, `maxDepth` |
 | `component.setField` | 给任意组件的字段/属性赋值（含 `[SerializeField]` 私有字段）；解析失败**绝不静默置零**。`field` 支持 **`m_` 前缀自动兼容**（写 `m_Enabled` 或 `enabled` 等价）与 **`A.B.C` 嵌套路径**（如 `m_Colors.m_PressedColor`）。`value` 支持：节点/类型选择器/ `asset:` 引用、数字/布尔/字符串/枚举/向量（`[x,y,z]` 或 `{"x":1,"y":1}`）、颜色（`#RRGGBB` / `[r,g,b,a]`）；**结构体整体赋值**（`Color`/`Vector*`/`Rect`/ `ColorBlock`/`SpriteState`/`Navigation`/`AnimationTriggers` 等，传对象按子字段名逐个灌，失败信息会列出可写子字段）。 | `target`(必填), `component`(必填), `field`(必填), `value`, `prefab` |
-| `component.get` | 读取组件字段当前值（与 setField 对称）；`field` 省略返回全部可序列化字段；`field` 同样支持 `m_` 前缀与 `A.B.C` 嵌套路径读回（如 `component.get` `m_Colors` 能看到 `m_PressedColor` 新值）；引用返回 `{path,name,type}`；**Play 模式运行时值也读得到** | `target`(必填), `component`(必填), `field`, `prefab` |
+| `component.get` | 读取组件字段当前值（与 setField 对称）；`field` 省略返回全部可序列化字段；`field` 支持**点号嵌套路径**（`m_Colors.normalColor`，也自动补 `m_` 前缀，写 `colors.normalColor` 同样命中）与旧口径的尾段名；引用返回 `{path,name,type}`；**Play 模式运行时值也读得到** | `target`(必填), `component`(必填), `field`, `prefab` |
 | `component.setFields` | 一次写入同组件多个字段（原子：先全部解析/校验，**任一失败整体不生效**，不会留半成品）；成功返回各字段旧值便于复核。字段语法与 `component.setField` 完全一致（支持 `m_` 前缀、`A.B.C` 嵌套、结构体整体赋值） | `target`(必填), `component`(必填), `fields`(必填, 对象: 字段名→值), `prefab` |
 | `scene.inspect` | 目标节点全组件快照（每个组件的全部可序列化字段），UI/运行时盲调的解药 | `target`(必填) |
 | `component.add` | 给节点挂组件（场景或 Prefab 资产，类型名反射解析，已存在时幂等跳过） | `target`(必填), `component`(必填), `prefab`, `require`(默认 false) |
 | `component.remove` | 从节点移除组件（场景走 `Undo.DestroyObjectImmediate`；Prefab 走 `LoadPrefabContents` 生命周期）。类型名按反射解析，缺失报错 | `target`(必填), `component`(必填), `prefab` |
-| `prefab.addNode` | 往 Prefab 资产里添加节点（可选复制源节点组件、按类型名追加组件） | `prefab`(必填), `name`(必填), `parent`(默认根), `copyFrom`, `components`, `active` |
-| `prefab.duplicateNode` | 在 Prefab 资产内复制节点（含子树与组件，引用不重映射） | `prefab`(必填), `target`(必填), `name`, `parent`, `active` |
+| `prefab.addNode` | 往 Prefab 资产里添加节点（可选复制源节点组件、按类型名追加组件）。`copyFrom` 支持**跨 Prefab**：写 `Assets/.../Other.prefab/节点/路径`（省略节点路径取该 Prefab 根）；跨 Prefab 只搬组件数据，对象引用需另行重指（结果里带 `warning`） | `prefab`(必填), `name`(必填), `parent`(默认根), `copyFrom`, `components`, `active` |
+| `prefab.duplicateNode` | 在 Prefab 资产内复制节点（**默认含子树与组件**，引用不重映射）。返回 `childCount` / `subtreeCount` / `subtreePaths` 便于核对层级；`includeChildren:false` 只要节点自身 | `prefab`(必填), `target`(必填), `name`, `parent`, `active`, `includeChildren`(默认 true) |
 | `prefab.tree` | 列出 Prefab 资产的节点树（路径/组件/激活态，只读） | `prefab`(必填), `maxDepth` |
 | `prefab.removeNode` | 删除 Prefab 资产内节点（含子树）；`keepChildren:true` 把子节点上移到父再删自身；禁止删根节点 | `prefab`(必填), `target`(必填), `keepChildren`(默认 false) |
 | `prefab.delete` | 删除 Prefab 资产文件（`AssetDatabase.DeleteAsset`，路径过白名单） | `prefab`(必填) |
