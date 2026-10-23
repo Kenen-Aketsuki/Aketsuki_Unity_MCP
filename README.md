@@ -29,6 +29,8 @@ Aketsuki_Unity_MCP/                     ← Unity 工程根（用 Unity 直接�
 │   ├── 未实现/  已实现/              移动文件 = 改状态
 │   └── 索引.md                       由 Tools/feedback_index.py 生成
 └── Tools/
+    ├── deploy.py                    把工具同步部署到各工程（Tools/deploy_targets.json 驱动）
+    ├── deploy_targets.json          部署目标清单：工程根、Unity 版本
     ├── build_unitypackage.py        打成 .unitypackage（排除 Project/，三次校验防泄漏）
     ├── install_unitypackage.py      解包直接落地到别的工程（不经过 Unity 导入器）
     ├── verify_unitypackage.py       无头 Unity 建空工程 → 导入 → 补 UGUI/TMP 再编译，断言可用
@@ -57,10 +59,49 @@ python .workbuddy/skills/unity-cmd/scripts/send.py compile --wait 300
 
 整套 `Assets/Editor/ExternalCommandSystem/` 直接拷走即可：它**零工程编译依赖**
 （唯一可选的挂钩 `MainUIRootBuilder` 是按类型名反射发现，找不到就走内置默认）。
+搬过一次之后，把工程登记进 [`Tools/deploy_targets.json`](Tools/deploy_targets.json)，
+以后都用 `Tools/deploy.py` 增量同步（见下一节），别再手工拷。
 真正的接口细节、指令清单、新增指令的写法、`.unitypackage` 打包与校验，全部在
 [`Assets/Editor/ExternalCommandSystem/README.md`](Assets/Editor/ExternalCommandSystem/README.md)。
 
+## 部署到多个工程
+
+`Tools/deploy_targets.json` 登记了正在用这套工具的工程。本仓库改完后**不用手工拷贝**，一条命令同步：
+
+```bash
+python Tools/deploy.py --list      # 各工程同步状态 + Unity 是否在跑
+python Tools/deploy.py --check     # 只报告差异，不改文件
+python Tools/deploy.py             # 部署到全部目标
+python Tools/deploy.py island      # 只部署名字能匹配上的（子串匹配）
+python Tools/deploy.py --verify            # 部署后让目标工程编译一遍，回传错误
+python Tools/deploy.py --offline-compile   # 不依赖编辑器，离线编译验证编辑程序集（2 秒级）
+python Tools/deploy.py --force-refresh     # 编辑器在后台不响应时，提到前台代按 Ctrl+R
+python Tools/deploy.py --prune             # 顺带删掉目标侧的孤儿文件（默认只报告）
+```
+
+当前登记：`project_island_back`、`majotavern`、`CivelRev`（工程根在 `CivelRev/Demo/CivilizationRevival`，
+比工作区根低一层——配置里写的是**工程根**，不是 `.workbuddy` 所在的那层）。
+
+规则（脚本头部注释里有完整理由）：
+
+- **比对忽略行尾**。目标工程 `core.autocrlf=true`（工作区 CRLF）、本仓库是 LF，按字节比会把 110 个文件全判成"不同"，
+  每次部署都往对方仓库丢一片整文件 diff。写入时沿用目标工程既有行尾。
+- **目标已有的 `.meta` 一律保留**（`guid` 是场景/预制体引用的锚点，覆盖等于断引用）。
+  仓库与目标的 GUID 本来就不同（各自 Unity 生成），所以"GUID 不一致"不算脏，只在 `--check` 里提示。
+  仅当目标缺 `.meta` 时才从仓库补。
+- **`Project/`（工程客制化）不同步**：只保证目标工程有该目录，不覆盖里面的内容。
+- **只写有差异的文件**，临时文件 + 原子替换。目标 Unity 多半开着，半截文件会被文件监视器读到并触发一次失败的重编译。
+- **首次安装整目录落地**：先写到工程 `Temp/` 下的暂存目录，再一次性 rename 进 `Assets/`。
+  逐个建文件时 Unity 会在写到一半就扫描并编译，实测报一屏 `error CS2001: Source file ... could not be found`，
+  而且之后编辑器进后台就不再自动重编。整目录 rename 对它只是"目录一次出现"，扫到的一定是完整一套。
+- **编辑器在后台会推迟自动刷新**，外部写盘它不一定立刻扫。所以部署完会补一发 `asset.refresh`；
+  服务连不上且加了 `--force-refresh` 时，脚本会把这个工程的窗口提到前台代按一次 Ctrl+R（Windows）。
+
 ## 打包分发
+
+> **日常同步不用这里**——本机的三个目标工程走上面的 `deploy.py`（直接读本仓库源码，永远是实时的）。
+> 打包三件套只用于「目标机器上没有本仓库」的场景：给别人的工程装一份、或存档一个可交付的安装包。
+> 包内是**打包那一刻的快照**，改完代码要重新打包，否则分发出去的是旧的。
 
 ```bash
 python Tools/build_unitypackage.py                  # → Tools/UnityPackage/UnityCommandBridge.unitypackage
