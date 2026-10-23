@@ -107,3 +107,8 @@ InitTestScene*.unity*
 
 # Auto-generated cache in Assets folder
 /[Aa]ssets/[Ss]ceneDependencyCache*
+
+# 指令系统运行期数据：HTTP 令牌(.http-info)、指令队列、已部署到本工程的桥脚本副本
+# 都是本机生成物，且含访问令牌，绝不入库
+/.workbuddy/
+.cursor
