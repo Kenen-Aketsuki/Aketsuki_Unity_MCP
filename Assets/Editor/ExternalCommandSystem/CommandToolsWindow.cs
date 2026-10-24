@@ -352,20 +352,23 @@ namespace CivilRev.CommandSystem.Editor
             if (newEnabled)
             {
                 EditorGUILayout.HelpBox(
-                    "已启用。AI 现在可以在 Play 模式下操作正在运行的游戏：点按钮、拖列表、写输入框都可能触发" +
-                    "存档写入、网络请求等真实副作用。请确认当前运行的游戏可被随意操作，用完记得关掉。",
+                    "已启用。AI 现在可以在 Play 模式下操作正在运行的游戏：进/出 Play、点按钮、拖列表、写输入框" +
+                    "都可能触发存档写入、网络请求等真实副作用。请确认当前运行的游戏可被随意操作，用完记得关掉。",
                     MessageType.Warning);
             }
             else
             {
                 EditorGUILayout.HelpBox(
-                    "默认关闭。关闭时所有 runtime.* 指令（运行时找节点 / 点按钮 / 拖列表 / 写输入框）" +
-                    "一律执行失败，并在错误里提示来这里打开；常规编辑指令不受影响。",
+                    "默认关闭。关闭时所有 runtime.* 指令（含 runtime.play / runtime.stop 进出 Play 模式、" +
+                    "运行时找节点 / 点按钮 / 拖列表 / 写输入框）一律执行失败，并在错误里提示来这里打开；" +
+                    "常规编辑指令（editor.play 等）不受影响。",
                     MessageType.None);
             }
 
             EditorGUILayout.LabelField("当前状态",
-                EditorApplication.isPlaying ? "Play 模式中（开关打开时即可执行）" : "编辑模式（runtime.* 会失败）",
+                EditorApplication.isPlaying
+                    ? "Play 模式中（开关打开时 Play 类指令可执行；runtime.play 此时反而会失败）"
+                    : "编辑模式（只有 runtime.play 可用，其余 runtime.* 会失败）",
                 EditorStyles.miniLabel);
 
             _showRuntimeCommands = EditorGUILayout.Foldout(_showRuntimeCommands, "运行时指令清单", true);
@@ -384,7 +387,9 @@ namespace CivilRev.CommandSystem.Editor
                 }
 
                 any = true;
-                EditorGUILayout.LabelField(descriptor.Id, descriptor.Description, EditorStyles.miniLabel);
+                EditorGUILayout.LabelField(descriptor.Id,
+                    $"[{RuntimeCommandGate.DescribePhase(descriptor.RuntimePhase)}] {descriptor.Description}",
+                    EditorStyles.miniLabel);
             }
 
             if (!any)

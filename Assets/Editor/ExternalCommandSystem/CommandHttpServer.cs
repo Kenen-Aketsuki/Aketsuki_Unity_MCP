@@ -229,7 +229,8 @@ namespace CivilRev.CommandSystem.Editor
                         Description = descriptor.Description,
                         Usage = descriptor.Usage,
                         EditorOnly = descriptor.IsEditorOnly,
-                        Runtime = descriptor.IsRuntime
+                        Runtime = descriptor.IsRuntime,
+                        PlayState = RuntimeCommandGate.DescribePhase(descriptor.RuntimePhase)
                     });
                 }
 

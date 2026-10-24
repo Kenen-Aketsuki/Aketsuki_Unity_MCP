@@ -3,6 +3,25 @@ using System;
 namespace CivilRev.CommandSystem
 {
     /// <summary>
+    /// 运行时指令要求编辑器处于哪个 Play 状态。
+    /// <para>
+    /// 大多数 runtime.* 只能在 Play 中执行（<see cref="Playing"/>）；但"进/出 Play"这两条本身就是
+    /// 切换动作，用 <see cref="NotPlaying"/> / <see cref="Any"/> 才能表达。
+    /// </para>
+    /// </summary>
+    public enum RuntimePhase
+    {
+        /// <summary>必须在 Play 模式中（默认）</summary>
+        Playing = 0,
+
+        /// <summary>必须在编辑模式（用于 runtime.play）</summary>
+        NotPlaying = 1,
+
+        /// <summary>不限（用于 runtime.stop 这类幂等的"恢复现场"指令）</summary>
+        Any = 2
+    }
+
+    /// <summary>
     /// 指令标记：声明一个类是"可被 JSON 指令调用的指令"，并指定它的唯一字符串 ID。
     /// <para>
     /// 扩展方式：新建一个类，实现 <see cref="ICommand"/>，加上本特性即可，
@@ -53,6 +72,17 @@ namespace CivilRev.CommandSystem
         /// </para>
         /// </summary>
         public bool Runtime { get; set; }
+
+        /// <summary>
+        /// 运行时指令要求的 Play 状态，默认 <see cref="RuntimePhase.Playing"/>。
+        /// <para>
+        /// 仅对 <see cref="Runtime"/>=<c>true</c> 的指令生效：<c>runtime.play</c> 要
+        /// <see cref="RuntimePhase.NotPlaying"/>（编辑模式下才能进），<c>runtime.stop</c> 用
+        /// <see cref="RuntimePhase.Any"/>（编辑模式下调用应当无害地成功）。
+        /// 无论取哪个值，都仍然受控制台开关约束——开关关着一律失败。
+        /// </para>
+        /// </summary>
+        public RuntimePhase RuntimePhase { get; set; } = RuntimePhase.Playing;
 
         /// <summary>参数说明，用于 help 输出</summary>
         public string Usage { get; set; } = string.Empty;

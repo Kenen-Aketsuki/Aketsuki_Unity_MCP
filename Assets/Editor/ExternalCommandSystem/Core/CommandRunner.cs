@@ -324,11 +324,12 @@ namespace CivilRev.CommandSystem
             // 空跑同样应该报出来，否则脚本作者体会不到开关没开。
             if (descriptor.IsRuntime)
             {
-                var rejection = RuntimeCommandGate.Check(entry.Id);
+                var rejection = RuntimeCommandGate.Check(entry.Id, descriptor.RuntimePhase);
                 if (!string.IsNullOrEmpty(rejection))
                 {
                     CommandLog.Warning(rejection);
-                    return CommandResult.Fail(rejection, RuntimeCommandGate.StatusJson(entry.Id));
+                    return CommandResult.Fail(rejection,
+                        RuntimeCommandGate.StatusJson(entry.Id, descriptor.RuntimePhase));
                 }
             }
 
