@@ -55,15 +55,13 @@ namespace CivilRev.CommandSystem.Editor
             Transform target = null;
             if (targetSpec != null && !targetSpec.IsNull)
             {
-                target = SceneQuery.ResolveTarget(targetSpec);
+                target = RuntimeSupport.ResolveTarget(targetSpec, data, out var resolveError);
                 if (target == null)
                 {
-                    return CommandResult.Fail(
-                        $"运行时场景里找不到 target：{SceneQueryCommandsUtil.Describe(targetSpec)}" +
-                        "（可先用 runtime.hierarchy 看运行时实际有哪些节点）", data);
+                    return CommandResult.Fail(resolveError, data);
                 }
 
-                data.Set("target", SceneQueryCommandsUtil.NodeToJson(target));
+                data.Set("target", RuntimeSupport.NodeJson(target));
                 var buttonInfo = RuntimeSupport.ButtonJson(target);
                 if (buttonInfo != null && buttonInfo.IsObject)
                 {
@@ -84,7 +82,7 @@ namespace CivilRev.CommandSystem.Editor
                 if (positionSource == "no-camera")
                 {
                     return CommandResult.Fail(
-                        $"target '{SceneQuery.BuildPath(target)}' 不是 UI 节点，且场景里没有 MainCamera，" +
+                        $"target '{RuntimeSupport.Qualified(target)}' 不是 UI 节点，且场景里没有 MainCamera，" +
                         "无法换算屏幕坐标；请直接用 position 指定屏幕像素坐标。", data);
                 }
             }

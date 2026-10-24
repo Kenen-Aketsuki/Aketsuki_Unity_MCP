@@ -47,18 +47,17 @@ namespace CivilRev.CommandSystem.Editor
                 return CommandResult.Fail("需要 target：ScrollRect 本身或其子节点（可用 runtime.hierarchy 找到列表路径）", data);
             }
 
-            var target = SceneQuery.ResolveTarget(targetSpec);
+            var target = RuntimeSupport.ResolveTarget(targetSpec, data, out var resolveError);
             if (target == null)
             {
-                return CommandResult.Fail(
-                    $"运行时场景里找不到 target：{SceneQueryCommandsUtil.Describe(targetSpec)}", data);
+                return CommandResult.Fail(resolveError, data);
             }
 
             var scroll = RuntimeSupport.FindInChain<ScrollRect>(target);
             if (scroll == null)
             {
                 return CommandResult.Fail(
-                    $"'{SceneQuery.BuildPath(target)}' 及其祖先/子节点上没有 ScrollRect", data);
+                    $"'{RuntimeSupport.Qualified(target)}' 及其祖先/子节点上没有 ScrollRect", data);
             }
 
             var content = scroll.content;
@@ -106,6 +105,7 @@ namespace CivilRev.CommandSystem.Editor
             var before = Normalized(scroll, vertical);
             var desired = Mathf.Clamp01(before - amount);
             data.Set("scrollRect", JsonValue.Of(SceneQuery.BuildPath(scroll.transform)));
+            data.Set("scrollRectQualified", JsonValue.Of(SceneScope.QualifiedPath(scroll.transform)));
             data.Set("content", JsonValue.Of(SceneQuery.BuildPath(content)));
             data.Set("direction", JsonValue.Of(direction));
             data.Set("amount", JsonValue.Of(Mathf.Round(amount * 1000f) / 1000f));

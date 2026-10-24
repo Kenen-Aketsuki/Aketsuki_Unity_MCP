@@ -42,11 +42,10 @@ namespace CivilRev.CommandSystem.Editor
                 return CommandResult.Fail("需要 target：输入框节点（可用 runtime.hierarchy 加 name 过滤找到）", data);
             }
 
-            var target = SceneQuery.ResolveTarget(targetSpec);
+            var target = RuntimeSupport.ResolveTarget(targetSpec, data, out var resolveError);
             if (target == null)
             {
-                return CommandResult.Fail(
-                    $"运行时场景里找不到 target：{SceneQueryCommandsUtil.Describe(targetSpec)}", data);
+                return CommandResult.Fail(resolveError, data);
             }
 
             var text = context.Args.GetString("text", string.Empty) ?? string.Empty;
@@ -66,7 +65,7 @@ namespace CivilRev.CommandSystem.Editor
             }
 
             return CommandResult.Fail(
-                $"'{SceneQuery.BuildPath(target)}' 及其祖先/子节点上没有 TMP_InputField 或 InputField；" +
+                $"'{RuntimeSupport.Qualified(target)}' 及其祖先/子节点上没有 TMP_InputField 或 InputField；" +
                 "如果这是自定义输入组件，请用 component.setField 直接写它的字段。", data);
         }
 
@@ -92,6 +91,7 @@ namespace CivilRev.CommandSystem.Editor
 
             data.Set("fieldType", JsonValue.Of("TMP_InputField"));
             data.Set("path", JsonValue.Of(SceneQuery.BuildPath(field.transform)));
+            data.Set("qualifiedPath", JsonValue.Of(SceneScope.QualifiedPath(field.transform)));
             data.Set("textBefore", JsonValue.Of(before));
             data.Set("textAfter", JsonValue.Of(field.text ?? string.Empty));
             data.Set("appended", JsonValue.Of(append));
@@ -120,6 +120,7 @@ namespace CivilRev.CommandSystem.Editor
 
             data.Set("fieldType", JsonValue.Of("InputField"));
             data.Set("path", JsonValue.Of(SceneQuery.BuildPath(field.transform)));
+            data.Set("qualifiedPath", JsonValue.Of(SceneScope.QualifiedPath(field.transform)));
             data.Set("textBefore", JsonValue.Of(before));
             data.Set("textAfter", JsonValue.Of(field.text ?? string.Empty));
             data.Set("appended", JsonValue.Of(append));

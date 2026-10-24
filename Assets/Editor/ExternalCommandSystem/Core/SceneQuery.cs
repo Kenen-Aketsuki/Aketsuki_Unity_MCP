@@ -38,37 +38,66 @@ namespace CivilRev.CommandSystem
                 return null;
             }
 
+            // 场景作用域：[scene:Level1]UIRoot/BtnStart 或 { "scene": "Level1", "path": "..." }
+            // 没写作用域时 scope 为 null，行为与改造前完全一致（编辑指令不受影响）
+            SceneScope scope;
+            string textSpec;
+            string scopeError;
+            if (!SceneScope.TryExtract(spec, out scope, out textSpec, out scopeError))
+            {
+                return null; // 作用域写错的具体原因由 TryResolveScoped / SceneScope.Error 给出
+            }
+
             if (spec.IsObject)
             {
                 // 实例 ID 消歧（来自 gameobject.find 的 instanceId 字段，同一 Unity 会话内可回喂）
                 if (spec.ContainsKey("instanceId"))
                 {
-                    return FindById((int)spec["instanceId"].AsFloat(0f));
+                    return FindById((int)spec["instanceId"].AsFloat(0f), scope);
                 }
 
                 var typeName = spec["type"].AsString();
                 if (!string.IsNullOrEmpty(typeName))
                 {
                     ParseIndex(spec["index"], out var index, out var last, out _);
-                    var matches = FindAllByType(typeName);
+                    var matches = FindAllByType(typeName, scope);
                     return ResolveByIndex(matches, index, last);
                 }
 
                 var path = spec["path"].AsString();
                 if (!string.IsNullOrEmpty(path))
                 {
-                    return Find(path);
+                    return Find(path, scope);
                 }
 
                 var name = spec["name"].AsString();
-                return string.IsNullOrEmpty(name) ? null : Find(name);
+                return string.IsNullOrEmpty(name) ? null : Find(name, scope);
             }
 
-            return ResolveTarget(spec.AsString());
+            return ResolveText(textSpec, scope);
         }
 
         /// <summary>字符串版查找目标解析</summary>
         public static Transform ResolveTarget(string spec)
+        {
+            if (string.IsNullOrEmpty(spec))
+            {
+                return null;
+            }
+
+            SceneScope scope;
+            string textSpec;
+            string scopeError;
+            if (!SceneScope.TryExtract(JsonValue.Of(spec), out scope, out textSpec, out scopeError))
+            {
+                return null;
+            }
+
+            return ResolveText(textSpec, scope);
+        }
+
+        /// <summary>字符串选择器的主体解析（作用域已剥离）</summary>
+        private static Transform ResolveText(string spec, SceneScope scope)
         {
             var text = (spec ?? string.Empty).Trim();
             if (text.Length == 0)
@@ -79,7 +108,7 @@ namespace CivilRev.CommandSystem
             // id:12345 —— 按实例 ID 精确消歧（find 输出的 instanceId 可直接回喂）
             if (text.StartsWith("id:", StringComparison.OrdinalIgnoreCase))
             {
-                return FindById((int)ParseNumber(text.Substring(3), 0f));
+                return FindById((int)ParseNumber(text.Substring(3), 0f), scope);
             }
 
             // type:Canvas / t:Canvas，可带 #序号 或 #last
@@ -88,7 +117,7 @@ namespace CivilRev.CommandSystem
                               || text.StartsWith("t:", StringComparison.OrdinalIgnoreCase)))
             {
                 ParseTypeSelector(text.Substring(colon + 1).Trim(), out var body, out var index, out var last, out _);
-                var matches = FindAllByType(body);
+                var matches = FindAllByType(body, scope);
                 return ResolveByIndex(matches, index, last);
             }
 
@@ -96,24 +125,24 @@ namespace CivilRev.CommandSystem
             if (text.Equals("@canvas", StringComparison.OrdinalIgnoreCase)
                 || text.Equals("@root", StringComparison.OrdinalIgnoreCase))
             {
-                return FindByType("Canvas", 0);
+                return FindByType("Canvas", 0, scope);
             }
 
-            return Find(text);
+            return Find(text, scope);
         }
 
         /// <summary>
         /// 按实例 ID 在全场景里精确定位节点（同一 Unity 会话内有效）。用于把 <c>gameobject.find</c>
         /// 的结果原样回喂，彻底解决同名兄弟不可回喂的问题（BUG-3）。
         /// </summary>
-        private static Transform FindById(int id)
+        private static Transform FindById(int id, SceneScope scope)
         {
             if (id == 0)
             {
                 return null;
             }
 
-            foreach (var root in SceneRoots())
+            foreach (var root in Roots(scope))
             {
                 if (root.GetInstanceID() == id)
                 {
@@ -150,29 +179,38 @@ namespace CivilRev.CommandSystem
                 return new List<Transform>();
             }
 
+            // 场景作用域（对象形式的 scene 字段 / 字符串形式的 [scene:...] 前缀）
+            SceneScope scope;
+            string textSpec;
+            string scopeError;
+            if (!SceneScope.TryExtract(spec, out scope, out textSpec, out scopeError))
+            {
+                return new List<Transform>();
+            }
+
             if (spec.IsObject)
             {
                 if (spec.ContainsKey("instanceId"))
                 {
-                    var hit = FindById((int)spec["instanceId"].AsFloat(0f));
+                    var hit = FindById((int)spec["instanceId"].AsFloat(0f), scope);
                     return hit != null ? new List<Transform> { hit } : new List<Transform>();
                 }
 
                 var typeName = spec["type"].AsString();
                 if (!string.IsNullOrEmpty(typeName))
                 {
-                    return FindAllByType(typeName);
+                    return FindAllByType(typeName, scope);
                 }
 
                 var path = spec["path"].AsString() ?? spec["name"].AsString();
-                return FindAll(path ?? string.Empty);
+                return FindAll(path ?? string.Empty, scope);
             }
 
-            var text = spec.AsString().Trim();
+            var text = (textSpec ?? string.Empty).Trim();
             var colon = text.IndexOf(':');
             if (text.StartsWith("id:", StringComparison.OrdinalIgnoreCase))
             {
-                var hit = FindById((int)ParseNumber(text.Substring(3), 0f));
+                var hit = FindById((int)ParseNumber(text.Substring(3), 0f), scope);
                 return hit != null ? new List<Transform> { hit } : new List<Transform>();
             }
 
@@ -180,17 +218,18 @@ namespace CivilRev.CommandSystem
                               || text.StartsWith("t:", StringComparison.OrdinalIgnoreCase)))
             {
                 ParseTypeSelector(text.Substring(colon + 1).Trim(), out var body, out _, out _, out _);
-                return FindAllByType(body);
+                return FindAllByType(body, scope);
             }
 
             if (text.Equals("@canvas", StringComparison.OrdinalIgnoreCase)
                 || text.Equals("@root", StringComparison.OrdinalIgnoreCase))
             {
-                return FindAllByType("Canvas");
+                return FindAllByType("Canvas", scope);
             }
 
-            var single = Find(text);
-            return single != null ? new List<Transform> { single } : new List<Transform>();
+            // 全量命中：这里以前只取 Find 的单个最优结果，导致 all:true / 歧义检测对纯路径失效
+            // （多场景叠加时表现为"明明两处都有，却只报一个"）
+            return FindAll(text, scope);
         }
 
         /// <summary>
@@ -253,11 +292,27 @@ namespace CivilRev.CommandSystem
                 return false;
             }
 
+            // 场景作用域（多场景叠加时用来把范围收敛到某一个场景）
+            SceneScope scope;
+            string textSpec;
+            string scopeError;
+            if (!SceneScope.TryExtract(spec, out scope, out textSpec, out scopeError))
+            {
+                error = scopeError;
+                return false;
+            }
+
+            if (scope != null && scope.Error != null)
+            {
+                error = scope.Error;
+                return false;
+            }
+
             if (spec.IsObject)
             {
                 if (spec.ContainsKey("instanceId"))
                 {
-                    var hit = FindById((int)spec["instanceId"].AsFloat(0f));
+                    var hit = FindById((int)spec["instanceId"].AsFloat(0f), scope);
                     if (hit == null)
                     {
                         error = $"instanceId={spec["instanceId"].AsFloat(0f)} 没有对应的场景节点（可能已销毁或跨会话失效）";
@@ -274,7 +329,7 @@ namespace CivilRev.CommandSystem
                 if (!string.IsNullOrEmpty(typeName))
                 {
                     ParseIndex(spec["index"], out var index, out var last, out var hasIndex);
-                    var matches = FindAllByType(typeName);
+                    var matches = FindAllByType(typeName, scope);
                     if (hasIndex)
                     {
                         return ResolveUniqueByIndex(typeName, matches, index, last, out result, out error);
@@ -284,13 +339,13 @@ namespace CivilRev.CommandSystem
                 }
 
                 var path = spec["path"].AsString() ?? spec["name"].AsString();
-                return UniqueFromList(FindAll(path ?? string.Empty), DescribeSpec(spec), out result, out error);
+                return UniqueFromList(FindAll(path ?? string.Empty, scope), DescribeSpec(spec), out result, out error);
             }
 
-            var text = spec.AsString().Trim();
+            var text = (textSpec ?? string.Empty).Trim();
             if (text.StartsWith("id:", StringComparison.OrdinalIgnoreCase))
             {
-                var hit = FindById((int)ParseNumber(text.Substring(3), 0f));
+                var hit = FindById((int)ParseNumber(text.Substring(3), 0f), scope);
                 if (hit == null)
                 {
                     error = $"{text} 没有对应的场景节点（可能已销毁或跨会话失效）";
@@ -308,7 +363,7 @@ namespace CivilRev.CommandSystem
                               || text.StartsWith("t:", StringComparison.OrdinalIgnoreCase)))
             {
                 ParseTypeSelector(text.Substring(colon + 1).Trim(), out var body, out var index, out var last, out var hasIndex);
-                var matches = FindAllByType(body);
+                var matches = FindAllByType(body, scope);
                 if (hasIndex)
                 {
                     return ResolveUniqueByIndex(body, matches, index, last, out result, out error);
@@ -320,10 +375,10 @@ namespace CivilRev.CommandSystem
             if (text.Equals("@canvas", StringComparison.OrdinalIgnoreCase)
                 || text.Equals("@root", StringComparison.OrdinalIgnoreCase))
             {
-                return UniqueFromList(FindAllByType("Canvas"), text, out result, out error);
+                return UniqueFromList(FindAllByType("Canvas", scope), text, out result, out error);
             }
 
-            return UniqueFromList(FindAll(text), text, out result, out error);
+            return UniqueFromList(FindAll(text, scope), text, out result, out error);
         }
 
         /// <summary>从命中列表里取第 index 个（#last 取最后一个），越界报错。</summary>
@@ -377,13 +432,16 @@ namespace CivilRev.CommandSystem
             if (matches.Count > 1)
             {
                 var builder = new StringBuilder();
-                builder.Append($"节点 '{describe}' 命中 {matches.Count} 个，存在歧义，必须显式消歧。可改用下列任一带序号的选择器，或补全层级路径：\n");
+                builder.Append($"节点 '{describe}' 命中 {matches.Count} 个，存在歧义，必须显式消歧。" +
+                               "把下面任一条原样作为 target 重试（多场景叠加时同一路径在每个场景各有一份，靠 [scene:...] 点名）：\n");
                 for (var i = 0; i < matches.Count; i++)
                 {
-                    builder.Append($"  type:{PrimaryComponentName(matches[i])}#{i}  "
-                        + $"{BuildPath(matches[i])}（activeSelf={matches[i].gameObject.activeSelf}）\n");
+                    builder.Append($"  {SceneScope.QualifiedPath(matches[i])}" +
+                                   $"（activeSelf={matches[i].gameObject.activeSelf}, " +
+                                   $"instanceId={matches[i].GetInstanceID()}）\n");
                 }
 
+                builder.Append($"  也可用 type:{PrimaryComponentName(matches[0])}#N 按序号选（N 从 0 起，顺序见上）\n");
                 builder.Append($"（当前已加载场景：{SceneList()}）");
                 error = builder.ToString();
                 return false;
@@ -505,7 +563,7 @@ namespace CivilRev.CommandSystem
         /// 按节点名或层级路径查找
         /// <para>路径为后缀匹配，不必从场景根写起：<c>"HUD/Canvas"</c> 能命中 <c>UIRoot/HUD/Canvas</c>。</para>
         /// </summary>
-        public static Transform Find(string nameOrPath)
+        public static Transform Find(string nameOrPath, SceneScope scope = null)
         {
             var spec = (nameOrPath ?? string.Empty).Trim().Trim('/');
             if (spec.Length == 0)
@@ -522,7 +580,7 @@ namespace CivilRev.CommandSystem
             Transform best = null;
             var bestScore = int.MaxValue;
 
-            foreach (var root in SceneRoots())
+            foreach (var root in Roots(scope))
             {
                 Walk(root, 0, (node, depth) =>
                 {
@@ -548,7 +606,7 @@ namespace CivilRev.CommandSystem
         /// 按节点名或层级路径查找全部命中（排序规则与 <see cref="Find"/> 一致：
         /// 激活优先、层级由浅到深、同层按名字）。
         /// </summary>
-        public static List<Transform> FindAll(string nameOrPath)
+        public static List<Transform> FindAll(string nameOrPath, SceneScope scope = null)
         {
             var spec = (nameOrPath ?? string.Empty).Trim().Trim('/');
             var result = new List<Transform>();
@@ -564,7 +622,7 @@ namespace CivilRev.CommandSystem
             }
 
             var matches = new List<KeyValuePair<int, Transform>>();
-            foreach (var root in SceneRoots())
+            foreach (var root in Roots(scope))
             {
                 Walk(root, 0, (node, depth) =>
                 {
@@ -584,9 +642,13 @@ namespace CivilRev.CommandSystem
                     return activeA.CompareTo(activeB);
                 }
 
-                return a.Key != b.Key
-                    ? a.Key.CompareTo(b.Key)
-                    : string.CompareOrdinal(a.Value.name, b.Value.name);
+                if (a.Key != b.Key)
+                {
+                    return a.Key.CompareTo(b.Key);
+                }
+
+                var byName = string.CompareOrdinal(a.Value.name, b.Value.name);
+                return byName != 0 ? byName : CompareHierarchyOrder(a.Value, b.Value);
             });
 
             foreach (var pair in matches)
@@ -601,7 +663,7 @@ namespace CivilRev.CommandSystem
         /// 按组件类型查找场景节点，支持 "Canvas" / "Image" / "UnityEngine.UI.Image" 等写法
         /// <para>多个命中时按「层级由浅到深、同层按名字」排序，用 index 取第 N 个。</para>
         /// </summary>
-        public static Transform FindByType(string typeName, int index = 0)
+        public static Transform FindByType(string typeName, int index = 0, SceneScope scope = null)
         {
             var type = ResolveComponentType(typeName);
             if (type == null)
@@ -610,7 +672,7 @@ namespace CivilRev.CommandSystem
             }
 
             var matches = new List<KeyValuePair<int, Transform>>();
-            foreach (var root in SceneRoots())
+            foreach (var root in Roots(scope))
             {
                 Walk(root, 0, (node, depth) =>
                 {
@@ -628,7 +690,9 @@ namespace CivilRev.CommandSystem
 
             matches.Sort((a, b) => a.Key != b.Key
                 ? a.Key.CompareTo(b.Key)
-                : string.CompareOrdinal(a.Value.name, b.Value.name));
+                : string.CompareOrdinal(a.Value.name, b.Value.name) != 0
+                    ? string.CompareOrdinal(a.Value.name, b.Value.name)
+                    : CompareHierarchyOrder(a.Value, b.Value));
 
             // BUG-2 修复：越界时返回 null 而非静默钳制到最后一个——否则选择器写错时指令照样
             // 成功却改到另一个节点，比直接报错危险得多。负数下标兜底为 0。
@@ -642,7 +706,7 @@ namespace CivilRev.CommandSystem
         }
 
         /// <summary>按组件类型查找，返回全部命中（按层级由浅到深排序）</summary>
-        public static List<Transform> FindAllByType(string typeName)
+        public static List<Transform> FindAllByType(string typeName, SceneScope scope = null)
         {
             var result = new List<Transform>();
             var type = ResolveComponentType(typeName);
@@ -652,7 +716,7 @@ namespace CivilRev.CommandSystem
             }
 
             var matches = new List<KeyValuePair<int, Transform>>();
-            foreach (var root in SceneRoots())
+            foreach (var root in Roots(scope))
             {
                 Walk(root, 0, (node, depth) =>
                 {
@@ -665,7 +729,9 @@ namespace CivilRev.CommandSystem
 
             matches.Sort((a, b) => a.Key != b.Key
                 ? a.Key.CompareTo(b.Key)
-                : string.CompareOrdinal(a.Value.name, b.Value.name));
+                : string.CompareOrdinal(a.Value.name, b.Value.name) != 0
+                    ? string.CompareOrdinal(a.Value.name, b.Value.name)
+                    : CompareHierarchyOrder(a.Value, b.Value));
 
             foreach (var pair in matches)
             {
@@ -835,6 +901,61 @@ namespace CivilRev.CommandSystem
 
                 yield return t;
             }
+        }
+
+        /// <summary>
+        /// 按场景作用域过滤后的根节点。传 <c>null</c> 时与 <see cref="SceneRoots"/> 完全一致（跨所有已加载场景）。
+        /// <para>作用域解析失败（0 个/多个场景）时返回空集合——具体原因由调用方从
+        /// <see cref="SceneScope.Error"/> 取，避免这里把"找不到节点"和"场景写错"混成一句话。</para>
+        /// </summary>
+        private static IEnumerable<Transform> Roots(SceneScope scope)
+        {
+            if (scope == null)
+            {
+                return SceneRoots();
+            }
+
+            var list = new List<Transform>();
+            foreach (var root in SceneRoots())
+            {
+                if (root != null && scope.Accepts(root.gameObject.scene))
+                {
+                    list.Add(root);
+                }
+            }
+
+            return list;
+        }
+
+        /// <summary>
+        /// 稳定序：先生成场景的加载序，再按同级排序下标。
+        /// <para>
+        /// 为什么必须加：同深度同名节点的比较结果是 0，而 <c>List.Sort</c> 是不稳定排序——
+        /// 多场景叠加时同一个查询两次调用可能给出不同顺序（实测：候选清单里 SceneA/SceneB 会翻面），
+        /// 客户端拿 <c>candidates[0]</c> 当唯一解就点错场景。
+        /// </para>
+        /// </summary>
+        private static int CompareHierarchyOrder(Transform a, Transform b)
+        {
+            var sceneA = a.gameObject.scene;
+            var sceneB = b.gameObject.scene;
+            if (sceneA.handle != sceneB.handle)
+            {
+                var byIndex = sceneA.buildIndex.CompareTo(sceneB.buildIndex);
+                if (byIndex != 0)
+                {
+                    return byIndex;
+                }
+
+                return sceneA.handle.CompareTo(sceneB.handle);
+            }
+
+            if (a.GetSiblingIndex() != b.GetSiblingIndex())
+            {
+                return a.GetSiblingIndex().CompareTo(b.GetSiblingIndex());
+            }
+
+            return a.GetInstanceID().CompareTo(b.GetInstanceID());
         }
 
         private static void Walk(Transform node, int depth, Action<Transform, int> visit)
