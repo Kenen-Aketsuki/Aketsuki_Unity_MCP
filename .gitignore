@@ -112,3 +112,10 @@ InitTestScene*.unity*
 # 都是本机生成物，且含访问令牌，绝不入库
 /.workbuddy/
 .cursor
+
+# 打包产物：Tools/build_unitypackage.py 生成的 .unitypackage / 可分发目录 / 压缩包，
+# 每次打包都能重建，且是几百 KB 的二进制，不入库
+/Tools/UnityPackage/
+/Tools/*.unitypackage
+/Tools/*.zip
+/Tools/__pycache__/

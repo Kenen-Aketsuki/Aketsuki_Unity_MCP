@@ -19,16 +19,26 @@ Python/文档优先从该目录下的 `McpBridge/` 取（本仓库的形态）�
 工程客制化内容（ECS 下 `Project/` 子目录）**强制排除**：收集、目录条目、终检三道关，
 漏排直接报错终止。见 ECS README「工程客制化内容」。
 
+包身份（名称 / 版本 / 作者 / 打包日期）写进包内 `package.json` 资产——Unity 的
+.unitypackage 格式没有任何标准的元数据字段（gzip FNAME 还必须固定为 archtemp.tar，
+见 write_package 的注释），所以只能在包里放一个普通资产当清单。装到工程后它同时
+是"这个工程装的是哪个版本"的唯一凭据。
+
 用法：
     python Tools/build_unitypackage.py
-    python Tools/build_unitypackage.py -o D:/tmp/UnityCommandBridge.unitypackage
+    python Tools/build_unitypackage.py --version 1.1 --built 2026-11-01
+    python Tools/build_unitypackage.py -o D:/tmp/X.unitypackage
+    python Tools/build_unitypackage.py --bundle      # 额外生成可分发目录（含安装器）
     python Tools/build_unitypackage.py --list-only
 """
 
 import argparse
+import datetime
 import gzip
 import io
+import json
 import os
+import shutil
 import sys
 import tarfile
 import uuid
@@ -92,6 +102,14 @@ BRIDGE_SOURCES = resolve_bridge_sources()
 # （MainUIRootBuilder.Ensure）反哺结构定义，见 ECS README「工程结构挂钩」。
 
 DEFAULT_OUTPUT = os.path.join(HERE, "UnityPackage", "UnityCommandBridge.unitypackage")
+
+# 包身份默认值（可用命令行覆盖）
+PKG_NAME = "Aketsuki_Unity_MCP"
+PKG_VERSION = "1.0"
+PKG_AUTHOR = "Aketsuki"
+
+# 包内清单资产（跟着 ECS 一起落到工程，充当版本凭据）
+MANIFEST_REL = "package.json"
 
 # 不需要进包的（本机临时产物）
 EXCLUDE_SUFFIXES = (".tmp", ".bak")
@@ -191,6 +209,10 @@ def collect_csharp(warnings):
                 continue
             if any(name.endswith(s) for s in EXCLUDE_SUFFIXES):
                 continue
+            # package.json 由 build_manifest 虚拟注入。源工程自己装过包的话磁盘上会有一份，
+            # 再不跳过就会和虚拟资产撞成"包内路径重复"。
+            if name == MANIFEST_REL and os.path.normpath(dirpath) == os.path.normpath(CS_SOURCE):
+                continue
 
             full = os.path.join(dirpath, name)
             rel = os.path.relpath(full, CS_SOURCE).replace("\\", "/")
@@ -287,6 +309,122 @@ def collect_folders(file_paths, warnings):
     return assets
 
 
+# ---------------------------------------------------------------- 包清单
+
+def read_unity_version():
+    """源工程的 Unity 版本，写进清单给接收方做兼容性判断。"""
+    path = os.path.join(UNITY_PROJECT, "ProjectSettings", "ProjectVersion.txt")
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("m_EditorVersion:"):
+                    return line.split(":", 1)[1].strip()
+    except OSError:
+        pass
+    return None
+
+
+def stable_guid(path_in_pkg):
+    """清单资产的 GUID 由路径派生：每次打包都一样，重复导入是覆盖不是新增。"""
+    return uuid.uuid5(uuid.NAMESPACE_URL, "aketsuki-unity-mcp/" + path_in_pkg).hex
+
+
+def build_manifest(name, version, author, built, file_count, output_name, warnings):
+    """包内 `package.json`。Unity 的 .unitypackage 没有标准元数据槽位，只能自带清单。"""
+    manifest = {
+        "name": name,
+        "version": version,
+        "author": author,
+        "built": built,
+        "unityVersion": read_unity_version(),
+        "packageFile": output_name,
+        "installRoot": PKG_ROOT,
+        "files": file_count,
+        "entrypoints": {
+            "console": "Tools / 指令系统 / 指令控制台",
+            "httpServer": "Tools / 指令系统 / HTTP 指令服务",
+            "mcpBridge": PKG_ROOT + "/McpBridge/unity_mcp_server.py",
+            "skillDoc": PKG_ROOT + "/McpBridge/SKILL.md",
+        },
+        "requires": ["Unity 2021.3 及以上", "Python 3.8 及以上（仅 MCP 桥需要）"],
+    }
+    text = json.dumps(manifest, ensure_ascii=False, indent=2) + "\n"
+    path_in_pkg = PKG_ROOT + "/" + MANIFEST_REL
+    guid = stable_guid(path_in_pkg)
+    warnings.append("包清单：%s v%s（%s）" % (name, version, built))
+    return Asset(path_in_pkg, text.encode("utf-8"), meta_for(".json")(guid), guid, "<manifest>")
+
+
+# ---------------------------------------------------------------- 分发目录
+
+BUNDLE_DOC = """# {name} v{version} — 部署说明
+
+> 作者：{author}　打包日期：{built}　Unity：{unity}
+> 本文件由 `Tools/build_unitypackage.py --bundle` 自动生成，勿手改（改模板请改脚本）。
+
+## 这个目录是什么
+
+Unity 编辑器指令系统（ExternalCommandSystem）+ MCP 桥的**可分发包**。
+接收方只要有 `{name}-{version}.unitypackage` 和本目录里的 `install.py`，就能装进任意 Unity 工程。
+
+**不要用 `deploy.py`**：它只在本仓库里有意义（从 `Assets/Editor/ExternalCommandSystem`
+同步到本机多个工程）。它在单独拷出去的目录里会直接报错——上一级没有 `Assets/`。
+
+## 装到指定工程
+
+```bash
+python install.py --project D:/路径/到/Unity工程根 --dry-run   # 先看会写入什么
+python install.py --project D:/路径/到/Unity工程根             # 落地
+```
+
+`--project` 指向含 `Assets/` 和 `ProjectSettings/` 的那一层，**不是**含 `ProjectSettings` 的上一级。
+
+它会做两件事：
+
+1. 把包内 {files} 个资产解包到 `<工程>/{installRoot}/`
+2. 把 MCP 桥同步到 `<工程>/.workbuddy/skills/unity-cmd/`（`scripts/send.py`、
+   `scripts/unity_mcp_server.py`、`SKILL.md`）——MCP 客户端拉起的是这一份，不是 Assets 里那份。
+   不需要就加 `--no-skill`。
+
+规则：**只新增/覆盖，绝不删除**；目标工程已有的 `.meta` 一律保留（保住旧 GUID，否则引用会丢）。
+包内文件按 LF 写入，不影响编译；若目标工程的工作区是 CRLF，git 会把这些文件显示成全量改动。
+
+## 装完还要让它生效
+
+1. **让 Unity 刷新**：聚焦 Unity 窗口自动导入，或走桥发 `asset.refresh`。
+2. **确认菜单出现**：Unity 菜单栏 → `Tools / 指令系统 / 指令控制台`。
+3. **开 HTTP 服务**：`Tools / 指令系统 / HTTP 指令服务`，端口默认从 57831 起避让。
+4. **接 MCP**（可选，要用 AI 驱动才需要）：在 `~/.workbuddy/mcp.json` 的 `mcpServers` 里加
+
+```json
+"unity-cmd-你的工程名": {{
+  "command": "python",
+  "args": [
+    "<工程根>/.workbuddy/skills/unity-cmd/scripts/unity_mcp_server.py",
+    "--project-root", "<工程根>"
+  ]
+}}
+```
+
+`--project-root` 必须是绝对路径且指向工程根——桥用它做严格选址，目标对不上会直接失败，
+不会"猜一个"连上去（猜错过一次，`file.write` 改到了别的工程）。
+
+## 自检
+
+```bash
+python <工程根>/.workbuddy/skills/unity-cmd/scripts/send.py status
+```
+
+能看到 `port` / `projectPath` 就通了。之后 `unity_status`、`unity_list_commands` 也可以。
+
+## 装之前确认版本
+
+包内 `{installRoot}/package.json` 是版本凭据。`install.py` 会把它和工程里已有的对比。
+**不要拿旧包覆盖新工程**：本安装器只增不删，旧包会把被改过的文件回退、却留下新增文件，
+结果是编译不过的混合态。
+"""
+
+
 # ---------------------------------------------------------------- 写包
 
 
@@ -359,18 +497,77 @@ def write_package(assets, output, warnings):
     return output
 
 
+def write_bundle(package_path, name, version, author, built, install_root, file_count, warnings):
+    """生成可分发目录：包 + 安装器 + 部署说明 + 清单副本。
+
+    光给一个 .unitypackage 不够——接收方得自己拆 tar（guid 目录 / pathname 文件）、
+    还得知道"目标已有 .meta 不能覆盖"，手写这个的人十有八九会漏。所以安装器得一起给。
+    """
+    dist_dir = os.path.join(os.path.dirname(os.path.abspath(package_path)),
+                            "%s-%s" % (name, version))
+    if os.path.isdir(dist_dir):
+        shutil.rmtree(dist_dir)
+    os.makedirs(dist_dir)
+
+    package_name = os.path.basename(package_path)
+    target_pkg = os.path.join(dist_dir, package_name)
+    shutil.copy2(package_path, target_pkg)
+
+    # 安装器：源码唯一，原样拷贝（它按"同级唯一的 .unitypackage"自动定位，不需要改路径）
+    with open(os.path.join(HERE, "install_unitypackage.py"), "r", encoding="utf-8") as handle:
+        source = handle.read()
+    source = source.replace(
+        '"""把 .unitypackage 直接解包落地到 Unity 工程（不经过 Unity 的导入器）。',
+        '"""把 .unitypackage 直接解包落地到 Unity 工程（不经过 Unity 的导入器）。\n\n'
+        '【分发副本】由 Tools/build_unitypackage.py --bundle 生成，勿在本目录改（改源仓库那份）。',
+        1)
+    with open(os.path.join(dist_dir, "install.py"), "w", encoding="utf-8") as handle:
+        handle.write(source)
+
+    doc = BUNDLE_DOC.format(name=name, version=version, author=author, built=built,
+                            unity=read_unity_version() or "未记录",
+                            files=file_count, installRoot=install_root)
+    with open(os.path.join(dist_dir, "DEPLOY.md"), "w", encoding="utf-8") as handle:
+        handle.write(doc)
+
+    manifest = {
+        "name": name, "version": version, "author": author, "built": built,
+        "unityVersion": read_unity_version(), "packageFile": package_name,
+        "installRoot": install_root, "files": file_count,
+    }
+    with open(os.path.join(dist_dir, "manifest.json"), "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
+
+    warnings.append("分发目录：%s" % dist_dir)
+    return dist_dir
+
+
 # ---------------------------------------------------------------- 入口
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="把 ExternalCommandSystem + MCP 桥打成 .unitypackage")
-    parser.add_argument("-o", "--output", default=DEFAULT_OUTPUT, help="输出文件路径")
+    parser.add_argument("-o", "--output", help="输出文件路径（默认 Tools/UnityPackage/<名称>-<版本>.unitypackage）")
+    parser.add_argument("--name", default=PKG_NAME, help="包名称（默认 %s）" % PKG_NAME)
+    parser.add_argument("--version", default=PKG_VERSION, help="版本号（默认 %s）" % PKG_VERSION)
+    parser.add_argument("--author", default=PKG_AUTHOR, help="作者（默认 %s）" % PKG_AUTHOR)
+    parser.add_argument("--built", default=datetime.date.today().isoformat(),
+                        help="打包日期 YYYY-MM-DD（默认今天）")
+    parser.add_argument("--bundle", action="store_true",
+                        help="额外生成可分发目录（包 + install.py + DEPLOY.md + manifest.json）")
     parser.add_argument("--list-only", action="store_true", help="只列出将要打包的文件，不生成")
     args = parser.parse_args(argv)
+
+    output = args.output or os.path.join(
+        HERE, "UnityPackage", "%s-%s.unitypackage" % (args.name, args.version))
 
     warnings = []
     assets = collect_csharp(warnings)
     assets += collect_bridge(warnings)
+
+    file_count = sum(1 for a in assets if not a.is_folder) + 1   # +1 = 清单自身
+    assets.append(build_manifest(args.name, args.version, args.author, args.built,
+                                 file_count, os.path.basename(output), warnings))
     assets += collect_folders([a.path_in_pkg for a in assets], warnings)
 
     # 按路径排序，输出稳定
@@ -388,17 +585,23 @@ def main(argv=None):
             print("  [警告] " + message)
         return 0
 
-    output = write_package(assets, args.output, warnings)
+    output = write_package(assets, output, warnings)
     size_kb = os.path.getsize(output) / 1024.0
 
     print("已生成：%s" % os.path.abspath(output))
+    print("  %s v%s（%s）作者 %s" % (args.name, args.version, args.built, args.author))
     print("  资产 %d 个（%d 文件 + %d 目录），%.1f KB" % (len(assets), files, folders, size_kb))
+
+    if args.bundle:
+        write_bundle(output, args.name, args.version, args.author, args.built,
+                     PKG_ROOT, file_count, warnings)
+
     for message in warnings:
         print("  [警告] " + message)
 
     print("\n包内结构（部分）：")
     for asset in assets:
-        if not asset.is_folder and not asset.path_in_pkg.endswith((".cs", ".py", ".md")):
+        if not asset.is_folder and not asset.path_in_pkg.endswith((".cs", ".py", ".md", ".json")):
             continue
         print("  " + asset.path_in_pkg)
 
