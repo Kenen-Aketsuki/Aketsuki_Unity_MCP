@@ -18,6 +18,9 @@ namespace CivilRev.CommandSystem.Editor
     /// </summary>
     internal static class RuntimeSupport
     {
+        /// <summary>歧义候选最多列这么多条（场景里同名节点上千时不能全塞进响应体）</summary>
+        internal const int MaxCandidates = 10;
+
         /// <summary>
         /// 取节点在屏幕上的中心点（像素），并回报用的是哪种换算，便于排查"点歪了"。
         /// <paramref name="source"/> 取值：<c>ui-overlay</c> / <c>ui-camera</c> / <c>ui-null-camera</c> /
@@ -83,6 +86,136 @@ namespace CivilRev.CommandSystem.Editor
         internal static string Describe(Transform node)
         {
             return node == null ? "<null>" : SceneQuery.BuildPath(node);
+        }
+
+        /// <summary>
+        /// 节点信息（含 <c>qualifiedPath</c>）：运行时指令回显 target 时统一用它，
+        /// 免得客户端为了消歧还得自己从 path 拼场景前缀。
+        /// </summary>
+        internal static JsonValue NodeJson(Transform node)
+        {
+            var item = SceneQueryCommandsUtil.NodeToJson(node);
+            item.Set("qualifiedPath", JsonValue.Of(SceneScope.QualifiedPath(node)));
+            return item;
+        }
+
+        /// <summary>节点的**带场景限定**路径：<c>[scene:Level1]UIRoot/BtnStart</c>，多场景下才是唯一可回喂的写法</summary>
+        internal static string Qualified(Transform node)
+        {
+            return node == null ? "<null>" : SceneScope.QualifiedPath(node);
+        }
+
+        /// <summary>
+        /// 严格解析运行时 target：<b>0 个命中就报错，多个命中就要求消歧</b>。
+        ///
+        /// <para>
+        /// <b>为什么不用 <see cref="SceneQuery.ResolveTarget"/>：</b>那个是"尽力而为"的语义
+        /// （激活优先、层级浅优先），单场景编辑期没问题；但多场景叠加时同一个 <c>UIRoot/BtnStart</c>
+        /// 在引导场景和关卡场景里各有一份，它照样会挑一个返回——看起来成功，实际点的是另一份。
+        /// 运行时指令有真实副作用，宁可失败也不能猜。
+        /// </para>
+        ///
+        /// <para>
+        /// 歧义时会往 <paramref name="data"/> 里写 <c>candidates</c>（每条带 <c>qualifiedPath</c> /
+        /// <c>instanceId</c>），调用方把它原样回喂给 target 即可。
+        /// </para>
+        /// </summary>
+        internal static Transform ResolveTarget(JsonValue spec, JsonValue data, out string error)
+        {
+            error = null;
+
+            SceneScope scope;
+            string textSpec;
+            string scopeError;
+            if (!SceneScope.TryExtract(spec, out scope, out textSpec, out scopeError))
+            {
+                error = scopeError;
+                return null;
+            }
+
+            if (scope != null)
+            {
+                // 作用域自身的问题（0 个/多个场景）单独报，否则会被"找不到节点"掩盖
+                if (scope.Error != null)
+                {
+                    error = scope.Error;
+                    if (data != null)
+                    {
+                        data.Set("sceneScope", scope.ToJson());
+                    }
+
+                    return null;
+                }
+
+                if (data != null)
+                {
+                    data.Set("sceneScope", scope.ToJson());
+                }
+            }
+
+            var matches = SceneQuery.FindAll(spec);
+            if (matches.Count == 0)
+            {
+                error = $"{DescribeSpecForError(spec)} 在运行时场景里找不到" +
+                        $"（当前已加载场景：{SceneScope.DescribeSceneList(SceneScope.AllLoadedScenes())}）" +
+                        "；可先调 runtime.hierarchy 看实际有哪些节点（多场景叠加时建议带 [scene:场景名] 前缀）";
+                return null;
+            }
+
+            if (matches.Count == 1)
+            {
+                return matches[0];
+            }
+
+            var candidates = JsonValue.NewArray();
+            var lines = new List<string>();
+            for (var i = 0; i < matches.Count; i++)
+            {
+                if (i >= MaxCandidates)
+                {
+                    lines.Add($"  ……另有 {matches.Count - MaxCandidates} 个未列出");
+                    break;
+                }
+
+                var node = matches[i];
+                var item = JsonValue.NewObject();
+                item.Set("qualifiedPath", JsonValue.Of(Qualified(node)));
+                item.Set("path", JsonValue.Of(SceneQuery.BuildPath(node)));
+                item.Set("scene", JsonValue.Of(SceneScope.Label(node.gameObject.scene)));
+                item.Set("instanceId", JsonValue.Of(node.GetInstanceID()));
+                item.Set("activeInHierarchy", JsonValue.Of(node.gameObject.activeInHierarchy));
+                candidates.Add(item);
+
+                lines.Add($"  {Qualified(node)}（activeInHierarchy={node.gameObject.activeInHierarchy}, " +
+                          $"instanceId={node.GetInstanceID()}）");
+            }
+
+            if (data != null)
+            {
+                data.Set("candidates", candidates);
+                data.Set("candidateCount", JsonValue.Of(matches.Count));
+            }
+
+            error = $"{DescribeSpecForError(spec)} 命中 {matches.Count} 个节点，无法确定点哪个——" +
+                    "多场景叠加 / 同名兄弟都会这样，必须显式消歧。把下面任一条原样作为 target 重试：\n" +
+                    string.Join("\n", lines.ToArray());
+            return null;
+        }
+
+        private static string DescribeSpecForError(JsonValue spec)
+        {
+            if (spec == null || spec.IsNull)
+            {
+                return "<空 target>";
+            }
+
+            if (spec.IsString)
+            {
+                return $"'{spec.AsString()}'";
+            }
+
+            var text = spec.ToJson(false);
+            return text.Length > 160 ? text.Substring(0, 160) + "…" : text;
         }
 
         /// <summary>
