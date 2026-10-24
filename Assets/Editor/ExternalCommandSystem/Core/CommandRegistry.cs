@@ -21,6 +21,9 @@ namespace CivilRev.CommandSystem
         /// <summary>是否为仅编辑器指令</summary>
         public bool IsEditorOnly => Attribute != null && Attribute.EditorOnly;
 
+        /// <summary>是否为运行时（Play 模式）指令；受 <see cref="RuntimeCommandGate"/> 门禁约束</summary>
+        public bool IsRuntime => Attribute != null && Attribute.Runtime;
+
         /// <summary>描述文本</summary>
         public string Description => Attribute != null ? Attribute.Description : string.Empty;
 

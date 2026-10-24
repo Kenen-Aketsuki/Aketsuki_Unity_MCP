@@ -17,6 +17,7 @@ namespace CivilRev.CommandSystem.Editor
         private Vector2 _commandScroll;
         private bool _showSettings = true;
         private bool _showCommands;
+        private bool _showRuntimeCommands;
         private bool _captureLogs = true;
 
         private readonly List<string> _logs = new List<string>();
@@ -66,6 +67,8 @@ namespace CivilRev.CommandSystem.Editor
             DrawSettingsSection();
             EditorGUILayout.Space();
             DrawHttpSection();
+            EditorGUILayout.Space();
+            DrawRuntimeSection();
             EditorGUILayout.Space();
             DrawCommandListSection();
             EditorGUILayout.Space();
@@ -322,6 +325,77 @@ namespace CivilRev.CommandSystem.Editor
 
         #endregion
 
+        #region 运行时指令区
+
+        /// <summary>
+        /// 运行时（Play 模式）指令开关与清单。
+        /// <para>
+        /// 与上方"编辑指令"分区的理由：这两类指令的风险等级不同——编辑指令改的是资产，
+        /// 运行时指令改的是**正在跑的游戏状态**（点按钮可能存档、联网、退出）。
+        /// 所以这里默认关闭，并且单独成区、单独说明，不和执行设置混在一起。
+        /// </para>
+        /// </summary>
+        private void DrawRuntimeSection()
+        {
+            EditorGUILayout.LabelField("运行时指令（Play 模式干预）", EditorStyles.boldLabel);
+
+            var enabled = CommandSystemSettings.RuntimeCommandsEnabled;
+            var newEnabled = EditorGUILayout.Toggle(RuntimeCommandGate.ToggleLabel, enabled);
+            if (newEnabled != enabled)
+            {
+                CommandSystemSettings.RuntimeCommandsEnabled = newEnabled;
+                CommandLog.Info(newEnabled
+                    ? "已启用运行时指令：Play 模式下 runtime.* 可以操作正在运行的游戏"
+                    : "已关闭运行时指令：runtime.* 现在一律执行失败");
+            }
+
+            if (newEnabled)
+            {
+                EditorGUILayout.HelpBox(
+                    "已启用。AI 现在可以在 Play 模式下操作正在运行的游戏：点按钮、拖列表、写输入框都可能触发" +
+                    "存档写入、网络请求等真实副作用。请确认当前运行的游戏可被随意操作，用完记得关掉。",
+                    MessageType.Warning);
+            }
+            else
+            {
+                EditorGUILayout.HelpBox(
+                    "默认关闭。关闭时所有 runtime.* 指令（运行时找节点 / 点按钮 / 拖列表 / 写输入框）" +
+                    "一律执行失败，并在错误里提示来这里打开；常规编辑指令不受影响。",
+                    MessageType.None);
+            }
+
+            EditorGUILayout.LabelField("当前状态",
+                EditorApplication.isPlaying ? "Play 模式中（开关打开时即可执行）" : "编辑模式（runtime.* 会失败）",
+                EditorStyles.miniLabel);
+
+            _showRuntimeCommands = EditorGUILayout.Foldout(_showRuntimeCommands, "运行时指令清单", true);
+            if (!_showRuntimeCommands)
+            {
+                return;
+            }
+
+            EditorGUI.indentLevel++;
+            var any = false;
+            foreach (var descriptor in CommandRegistry.Default.All)
+            {
+                if (!descriptor.IsRuntime)
+                {
+                    continue;
+                }
+
+                any = true;
+                EditorGUILayout.LabelField(descriptor.Id, descriptor.Description, EditorStyles.miniLabel);
+            }
+
+            if (!any)
+            {
+                EditorGUILayout.LabelField("（未注册任何运行时指令）", EditorStyles.miniLabel);
+            }
+            EditorGUI.indentLevel--;
+        }
+
+        #endregion
+
         #region 指令列表
 
         private void DrawCommandListSection()
@@ -339,7 +413,11 @@ namespace CivilRev.CommandSystem.Editor
                 EditorGUILayout.BeginHorizontal();
                 EditorGUILayout.LabelField(descriptor.Id, GUILayout.Width(180));
                 EditorGUILayout.LabelField(descriptor.Description, EditorStyles.miniLabel);
-                if (descriptor.IsEditorOnly)
+                if (descriptor.IsRuntime)
+                {
+                    EditorGUILayout.LabelField("[运行时]", EditorStyles.miniLabel, GUILayout.Width(60));
+                }
+                else if (descriptor.IsEditorOnly)
                 {
                     EditorGUILayout.LabelField("[编辑器]", EditorStyles.miniLabel, GUILayout.Width(60));
                 }
