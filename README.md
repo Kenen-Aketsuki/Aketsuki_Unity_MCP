@@ -30,7 +30,7 @@ Aketsuki_Unity_MCP/                     ← Unity 工程根（用 Unity 直接�
 ├── Packages/manifest.json           只留 textmeshpro + ugui
 ├── ProjectSettings/                 Unity 2021.3.16f1c1
 ├── Feedback/                        反馈表：其它工程踩到的 bug / 缺的指令
-│   ├── 未实现/  已实现/              移动文件 = 改状态
+│   ├── 待拍板/  未实现/  已实现/      移动文件 = 改状态（待拍板里由你直接写决策）
 │   └── 索引.md                       由 Tools/feedback_index.py 生成
 └── Tools/
     ├── deploy.py                    把工具同步部署到各工程（Tools/deploy_targets.json 驱动）
@@ -124,6 +124,10 @@ GUID 稳定，重复导入不会产生重复资产（打包器对重复 pathname
 
 在**别的工程**里用出问题，写进 `Feedback/未实现/`，回这里修，修完 `git mv` 到 `Feedback/已实现/`。
 一条一个文件、文件名带编号（`BUG-001-xxx.md`），front-matter 里记 `source`（来源工程）。
+
+**需要你拍板的别塞进 `未实现/`**：那类一律写进 `Feedback/待拍板/`（`status: pending`）——
+你在文件里直接写「用户批注」，我读完执行、验证、部署，再把文件移到 `已实现/`。
+一轮攒了好几条时用决策批件 `待拍板-YYYY-MM-DD.md`，一次列完、你逐条批注，同样归档到 `已实现/`。
 
 ```bash
 python Tools/feedback_index.py           # 重建 Feedback/索引.md，并校验状态/编号/必填字段
