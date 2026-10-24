@@ -319,6 +319,19 @@ namespace CivilRev.CommandSystem
                 return CommandResult.Unknown(entry.Id);
             }
 
+            // 运行时（Play 模式）指令的统一门禁：开关关着 / 不在 Play 一律失败。
+            // 放在 dry-run 之前，是因为这是"这条指令根本不允许执行"，不是"执行了但跳过"——
+            // 空跑同样应该报出来，否则脚本作者体会不到开关没开。
+            if (descriptor.IsRuntime)
+            {
+                var rejection = RuntimeCommandGate.Check(entry.Id);
+                if (!string.IsNullOrEmpty(rejection))
+                {
+                    CommandLog.Warning(rejection);
+                    return CommandResult.Fail(rejection, RuntimeCommandGate.StatusJson(entry.Id));
+                }
+            }
+
             if (DryRun)
             {
                 if (Verbose)

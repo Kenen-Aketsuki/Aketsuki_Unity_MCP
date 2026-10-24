@@ -228,7 +228,8 @@ namespace CivilRev.CommandSystem.Editor
                         Id = descriptor.Id,
                         Description = descriptor.Description,
                         Usage = descriptor.Usage,
-                        EditorOnly = descriptor.IsEditorOnly
+                        EditorOnly = descriptor.IsEditorOnly,
+                        Runtime = descriptor.IsRuntime
                     });
                 }
 
@@ -261,6 +262,26 @@ namespace CivilRev.CommandSystem.Editor
         JsonValue IHttpEnvironment.CompileSummary
         {
             get { return CommandCompileMonitor.Last.ToJson(false); }
+        }
+
+        /// <summary>
+        /// 运行时指令开关摘要：开关按工程存放在 EditorPrefs，主线程与后台线程都只读，无竞态。
+        /// </summary>
+        JsonValue IHttpEnvironment.RuntimeCommands
+        {
+            get
+            {
+                var count = 0;
+                foreach (var descriptor in CommandRegistry.Default.All)
+                {
+                    if (descriptor.IsRuntime)
+                    {
+                        count++;
+                    }
+                }
+
+                return RuntimeCommandGate.SummaryJson(count);
+            }
         }
 
         JsonValue IHttpEnvironment.TryGetCachedReport(string requestId)

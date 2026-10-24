@@ -178,6 +178,12 @@ namespace CivilRev.CommandSystem
         /// <summary>参数说明；供 MCP 工具 schema 与 help 输出使用</summary>
         public string Usage;
         public bool EditorOnly;
+
+        /// <summary>
+        /// 是否属于运行时（Play 模式）指令：受控制台开关与 Play 模式双重门禁。
+        /// <para>客户端可据此在开关关闭时直接跳过，不必先吃一次失败。</para>
+        /// </summary>
+        public bool Runtime;
     }
 
     /// <summary><c>/v1/ping</c> 与 <c>/v1/status</c> 响应里身份块的字段名</summary>
@@ -270,6 +276,15 @@ namespace CivilRev.CommandSystem
         /// <para>供 /v1/status 一眼看出"上次编译有没有过"，完整明细走 asset.compileReport 指令。</para>
         /// </summary>
         JsonValue CompileSummary { get; }
+
+        /// <summary>
+        /// 运行时（Play 模式）指令的启用状态摘要（enabled / playing / commandCount）。
+        /// <para>
+        /// 供 <c>/v1/status</c> 一眼看出"我的 runtime.* 为什么调不动"——
+        /// 是开关没开，还是编辑器没进 Play。省得客户端只能从失败文案里猜。
+        /// </para>
+        /// </summary>
+        JsonValue RuntimeCommands { get; }
 
         /// <summary>把一段指令文本交给执行器（由主线程调用）</summary>
         CommandRunReport RunFromText(string text, bool dryRun);
@@ -485,6 +500,13 @@ namespace CivilRev.CommandSystem
                 payload.Set("lastCompile", compile);
             }
 
+            // 运行时指令开关：默认关闭，关着时 runtime.* 全部失败，客户端据此提前判定
+            var runtime = env.RuntimeCommands;
+            if (runtime != null)
+            {
+                payload.Set("runtimeCommands", runtime);
+            }
+
             WriteIdentity(payload, env);
             return HttpResponse.Ok(payload);
         }
@@ -516,6 +538,7 @@ namespace CivilRev.CommandSystem
                     item.Set("description", JsonValue.Of(info.Description ?? string.Empty));
                     item.Set("usage", JsonValue.Of(info.Usage ?? string.Empty));
                     item.Set("editorOnly", JsonValue.Of(info.EditorOnly));
+                    item.Set("runtime", JsonValue.Of(info.Runtime));
                     items.Add(item);
                 }
             }

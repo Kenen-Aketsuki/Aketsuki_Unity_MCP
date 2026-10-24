@@ -40,6 +40,20 @@ namespace CivilRev.CommandSystem
         /// </summary>
         public bool EditorOnly { get; set; }
 
+        /// <summary>
+        /// 标记该指令属于「运行时（Play 模式）指令」，与常规编辑指令分开。
+        /// <para>
+        /// 带本标记的指令受两道门禁约束（见 <see cref="RuntimeCommandGate"/>）：
+        /// ① 控制台开关「启用运行时指令」默认关闭，关闭时一律执行失败并说明原因；
+        /// ② 必须处于 Play 模式，编辑模式下一律失败。
+        /// </para>
+        /// <para>
+        /// 之所以要有独立开关：这类指令会**改变正在运行的游戏状态**（点按钮、拖列表、触发钩子），
+        /// 误调一次可能写存档、发网络请求、甚至退出游戏，因此不能跟只读的编辑指令共用一套默认放行策略。
+        /// </para>
+        /// </summary>
+        public bool Runtime { get; set; }
+
         /// <summary>参数说明，用于 help 输出</summary>
         public string Usage { get; set; } = string.Empty;
 

@@ -36,6 +36,7 @@ namespace CivilRev.CommandSystem.Editor
         private const string KeyHttpToken = Prefix + "HttpToken";
         private const string KeyFileAccessRoots = Prefix + "FileAccessRoots";
         private const string KeyWatchdogSeconds = Prefix + "WatchdogSeconds";
+        private const string KeyRuntimeCommandsEnabled = Prefix + "RuntimeCommandsEnabled";
 
         /// <summary>记录"全局旧值已被哪个工程继承"，保证迁移只发生一次</summary>
         private const string KeyLegacyOwner = Prefix + "LegacyPrefsOwner";
@@ -196,10 +197,34 @@ namespace CivilRev.CommandSystem.Editor
             }
         }
 
-        /// <summary>取得实际生效的指令目录（未配置时返回默认值）</summary>
-        public static string EffectiveWatchDirectory
+        /// <summary>
+        /// 是否允许执行运行时（Play 模式）指令，<b>默认关闭</b>，按工程隔离。
+        /// <para>
+        /// 这类指令会改变正在运行的游戏状态（点按钮、拖列表、写输入框），误调可能写存档或发请求，
+        /// 所以默认必须由人在控制台里显式打开；关着时 <see cref="RuntimeCommandGate"/> 会让所有
+        /// <c>Runtime = true</c> 的指令直接失败并说明去哪儿打开。
+        /// </para>
+        /// <para>
+        /// 关掉开关<b>不需要</b>退出 Play 模式，下一次执行立即失效（每次执行都实时读这里，不做缓存）。
+        /// </para>
+        /// </summary>
+        public static bool RuntimeCommandsEnabled
         {
             get
+            {
+                MigrateLegacyOnce();
+                return EditorPrefs.GetBool(Scoped(KeyRuntimeCommandsEnabled), false);
+            }
+            set
+            {
+                MigrateLegacyOnce();
+                EditorPrefs.SetBool(Scoped(KeyRuntimeCommandsEnabled), value);
+            }
+        }
+
+        /// <summary>取得实际生效的指令目录（未配置时返回默认值）</summary>
+        public static string EffectiveWatchDirectory
+        {            get
             {
                 var dir = WatchDirectory;
                 return string.IsNullOrWhiteSpace(dir) ? CommandPathUtil.DefaultCommandDirectory : dir.Trim();
@@ -266,6 +291,7 @@ namespace CivilRev.CommandSystem.Editor
             EditorPrefs.DeleteKey(Scoped(KeyHttpPort));
             EditorPrefs.DeleteKey(Scoped(KeyHttpToken));
             EditorPrefs.DeleteKey(Scoped(KeyFileAccessRoots));
+            EditorPrefs.DeleteKey(Scoped(KeyRuntimeCommandsEnabled));
 
             EditorPrefs.DeleteKey(KeyVerbose);
             EditorPrefs.DeleteKey(KeyArchive);
