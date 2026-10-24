@@ -52,7 +52,8 @@ proposal: false
 - 顺序取 `SceneManager` 的加载序（不再用 `FindObjectsOfType` 的返回序，那个在运行时不保证稳定）；
   `DontDestroyOnLoad` 单独成组排最后。
 - 每组带 `label` / `selector` / `handle` / `buildIndex` / `active` / `dontDestroyOnLoad` / `rootCount`；
-  同名场景自动变成 `Level1#0`、`Level1#1`。
+  两个不同资产的场景重名时，**每个**都带序号（`C2#0`、`C2#1`）——只给后几个加序号的话，
+  第一个的 label `C2` 作为选择器会命中 2 个场景、直接报歧义，等于不可用（实测后改的）。
 - 每个节点带 `qualifiedPath`（`[scene:Level1]UIRoot/BtnStart`），可直接回喂。
 - 新增 `scene` 参数只看某个场景。
 
@@ -82,6 +83,7 @@ proposal: false
 | `runtime.input` 分别打 A / B | A 的输入框保持 `A-marker`，B 变 `hitB`；不给作用域则报 2 个候选 |
 | `runtime.scroll` 分别打 A / B | 各自 `1.000→0.500` / `1.000→0.750`，互不影响 |
 | 常驻对象 | `runtime.hierarchy` 归到 `DontDestroyOnLoad` 组（handle=-12, buildIndex=-1），`[scene:DontDestroyOnLoad]GlobalRoot/GlobalService` 可解析 |
+| 同名场景叠加（C2 / Sub/C2） | 分组为 `C2#0` / `C2#1`；`[scene:C2#1]UIRoot` 精确命中；只写 `C2` 则失败并列出两个候选 |
 | 编辑指令带前缀 | `gameobject.setProperty target="[scene:SceneA]UIRoot"` 成功，脏标记只落在 SceneA |
 
 临时场景与临时指令已全部删除（`Assets/__RuntimeTest` 与 `__TempMultiSceneSmoke.cs`）。

@@ -228,7 +228,7 @@ Unity 没启动时 `tools/list` 仍会在半秒内返回那 5 个元工具，调
 | 写法 | 含义 |
 | --- | --- |
 | `Level1` | 场景名（大小写不敏感，须完整匹配） |
-| `Level1#1` / `Level1#last` | 同名场景的第 N 个（同一个场景被叠加加载两次时） |
+| `Level1#0` / `Level1#1` / `Level1#last` | 同名场景的第 N 个（两个不同资产的场景重名时会这样；同名时**每个**都带序号，含 `#0`） |
 | `handle:-5270` | 场景 handle（直接从 `runtime.hierarchy` 抄） |
 | `path:Assets/Scenes/Level1.unity` | 资产路径，也接受后缀 / 文件名 |
 | `active` | 当前激活场景 |
