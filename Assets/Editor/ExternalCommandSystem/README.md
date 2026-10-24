@@ -6,11 +6,12 @@
 > **⚠️ 判成败只看一件事：`ok` 字段（DOC-001）。**
 > **HTTP 200 ≠ 指令成功**：业务逻辑失败时服务端**照样返回 200**，失败信息在 body 的 `ok` 与
 > `records[].status`（`Success`/`Failed`/`Skipped`/`UnknownCommand`）里。
-> 判据顺序：**先看 `body.ok`，批量再看 `succeeded`/`failed`**，HTTP 状态码只用来识别网络与协议层错误。
+> 判据顺序：**先看 `body.ok`，再读 `summary`（一句话结论，失败时 `⚠` 开头）和 `failures`
+> （只含失败项，排在 `records` 前）**，最后才翻 `records`；HTTP 状态码只用来识别网络与协议层错误。
 > 典型坑：Play 模式下 `asset.compile` 被拒，返回 `200 + ok:false`，只盯状态码会误判成"编译过了"。
 > 这种"请求被拒、根本没编译"的情况，可查 `/v1/status` 的 `lastCompile.requestedUtc` 与
 > `lastCompile.rejectedReason`——`requestedUtc` 比 `finishedUtc` 新就是没编译成。
-> 例外：单条执行（非 batch）失败时的**非 2xx 返回**属于协议变更，仍在征求使用方意见（见 `Feedback/`）。
+> 状态码本身**不会**用于表达业务失败（不做 409），需要"看状态码即失败"的客户端请在本地把 `ok:false` 转成异常。
 
 - Unity 版本：2021.3（仅依赖 `System.IO` / `UnityEngine` / `UnityEditor`，无第三方库）
 - 命名空间：`CivilRev.CommandSystem`（编辑器扩展为 `CivilRev.CommandSystem.Editor`）
@@ -164,7 +165,24 @@ HTTP 状态码只表示"请求是否被处理"，**业务结果看 body 里的 `
 | 状态码 | 含义 |
 | --- | --- |
 | 200 + `ok:true` | 全部指令成功 |
-| 200 + `ok:false` | 有指令失败，看 `records` 里非 `Success` 的条目 |
+| 200 + `ok:false` | 有指令失败，先看 `summary` 与 `failures`（都排在 `records` 之前） |
+
+响应体形状（失败时）：
+
+```json
+{"ok": false,
+ "summary": "⚠ 1/2 条指令失败：#1 asset.compile（明细见 failures，逐条见 records）",
+ "dryRun": false, "source": "<memory>",
+ "total": 2, "succeeded": 1, "failed": 1, "skipped": 0, "elapsedMs": 12.3,
+ "failures": [{"index": 1, "id": "asset.compile", "status": "Failed",
+               "message": "编辑器正处于预览状态，不允许编译与刷新"}],
+ "records": [ ... ]}
+```
+
+`summary` / `failures` 是 DOC-001 后续加的：`ok` 是布尔值，混在几十行 JSON 里容易被调用方（尤其 LLM）
+忽略，所以额外给一句话结论和只含失败项的精简数组，且都排在 `records` 前——按顺序读就先看到失败。
+`batch` 的 `data` 也是同样的结构化报告（不再是类型名字符串）。
+
 | 400 `bad_json` | body 不是合法指令 JSON（报错带行列号） |
 | 401 `unauthorized` | 令牌缺失或错误 |
 | 404 / 405 / 413 | 路径错 / 方法错 / body 超 4 MB |
@@ -344,9 +362,9 @@ CommandRegistry.Default.RegisterInstance("my.cmd", new MyCommand(dependency));
 | `scene.hierarchy` | 列出某节点子树（含组件类型、激活状态、`layer`/`layerName`/`tag`/`isStatic`）；不给 `target` 列出所有场景根 | `target`, `maxDepth` |
 | `component.setField` | 给任意组件的字段/属性赋值（含 `[SerializeField]` 私有字段）；解析失败**绝不静默置零**。`field` 支持 **`m_` 前缀自动兼容**（写 `m_Enabled` 或 `enabled` 等价）与 **`A.B.C` 嵌套路径**（如 `m_Colors.m_PressedColor`）。`value` 支持：节点/类型选择器/ `asset:` 引用、数字/布尔/字符串/枚举/向量（`[x,y,z]` 或 `{"x":1,"y":1}`）、颜色（`#RRGGBB` / `[r,g,b,a]`）；**结构体整体赋值**（`Color`/`Vector*`/`Rect`/ `ColorBlock`/`SpriteState`/`Navigation`/`AnimationTriggers` 等，传对象按子字段名逐个灌，失败信息会列出可写子字段）。**反射写不进的只读属性**（典型：`ParticleSystem` 的 `main`/`shape`/`emission` 等模块）会自动退到 **SerializedObject 写入通道**，可直接写 `main.startSize.scalar`、`shape.radius` 这类"模块名 + 属性路径"（`component.get` 读回来的 `InitialModule.startSize.scalar` 这类原生序列化路径同样可用）。 | `target`(必填；Prefab 模式下空串=Prefab 根), `component`(必填), `field`(必填), `value`, `prefab` |
 | `component.get` | 读取组件字段当前值（与 setField 对称）；`field` 省略返回全部可序列化字段；`field` 支持**点号嵌套路径**（`m_Colors.normalColor`，也自动补 `m_` 前缀，写 `colors.normalColor` 同样命中）与旧口径的尾段名；引用返回 `{path,name,type}`；**Play 模式运行时值也读得到** | `target`(必填), `component`(必填), `field`, `prefab` |
-| `component.setFields` | 一次写入同组件多个字段（原子：先全部解析/校验，**任一失败整体不生效**，不会留半成品）；成功返回各字段旧值便于复核，**注意 `data` 回显的是"修改前的旧值"**（消息里也带这句提示），不要拿它当写后的值核对。字段语法与 `component.setField` 完全一致（支持 `m_` 前缀、`A.B.C` 嵌套、结构体整体赋值、只读模块属性的序列化兜底） | `target`(必填；Prefab 模式下空串=Prefab 根), `component`(必填), `fields`(必填, 对象: 字段名→值), `prefab` |
+| `component.setFields` | 一次写入同组件多个字段（原子：先全部解析/校验，**任一失败整体不生效**，不会留半成品）；`data` 是 `{"old": {...}, "new": {...}}`，两侧都按 `component.get` 的口径给结构化值（Color / Vector / 数组 / 枚举可直接比对），**写入前后都在同一个返回里**，不必再发一条 `component.get`。字段语法与 `component.setField` 完全一致（支持 `m_` 前缀、`A.B.C` 嵌套、结构体整体赋值、只读模块属性的序列化兜底） | `target`(必填；Prefab 模式下空串=Prefab 根), `component`(必填), `fields`(必填, 对象: 字段名→值), `prefab` |
 | `scene.inspect` | 目标节点全组件快照（每个组件的全部可序列化字段），UI/运行时盲调的解药 | `target`(必填) |
-| `component.add` | 给节点挂组件（场景或 Prefab 资产，类型名反射解析，已存在时幂等跳过）。**Prefab 模式下 `target` 可写空串表示根节点** | `target`(必填；Prefab 模式下空串=Prefab 根), `component`(必填), `prefab`, `require`(默认 false) |
+| `component.add` | 给节点挂组件（场景或 Prefab 资产，类型名反射解析，已存在时幂等跳过）。**Prefab 模式下 `target` 可写空串表示根节点**。注意：Prefab 模式的目标解析已统一到 `setField`/`remove` 那套（同名节点**报歧义**而不是静默取第一个），旧 JSON 里靠重名蒙混的写法会失败 | `target`(必填；Prefab 模式下空串=Prefab 根), `component`(必填), `prefab`, `require`(默认 false) |
 | `component.remove` | 从节点移除组件（场景走 `Undo.DestroyObjectImmediate`；Prefab 走 `LoadPrefabContents` 生命周期）。类型名按反射解析，缺失报错。**Prefab 模式下 `target` 可写空串表示根节点** | `target`(必填；Prefab 模式下空串=Prefab 根), `component`(必填), `prefab` |
 | `prefab.addNode` | 往 Prefab 资产里添加节点（可选复制源节点组件、按类型名追加组件）。`copyFrom` 支持**跨 Prefab**：写 `Assets/.../Other.prefab/节点/路径`（省略节点路径取该 Prefab 根）；跨 Prefab 只搬组件数据，对象引用需另行重指（结果里带 `warning`） | `prefab`(必填), `name`(必填), `parent`(默认根), `copyFrom`, `components`, `active` |
 | `prefab.duplicateNode` | 在 Prefab 资产内复制节点（**默认含子树与组件**，引用不重映射）。返回 `childCount` / `subtreeCount` / `subtreePaths` 便于核对层级；`includeChildren:false` 只要节点自身 | `prefab`(必填), `target`(必填), `name`, `parent`, `active`, `includeChildren`(默认 true) |

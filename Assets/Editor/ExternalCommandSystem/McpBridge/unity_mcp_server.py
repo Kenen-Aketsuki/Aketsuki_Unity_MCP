@@ -394,14 +394,29 @@ def _summarize_execute(payload):
     elapsed = payload.get("elapsedMs", 0)
 
     # dry-run 必须显眼：否则模型会误以为副作用已经发生
-    head = "执行成功" if ok else "执行有失败"
+    head = "执行成功" if ok else "⚠ 执行失败"
     if dry_run:
         head = "dry-run（未真正执行，仅校验）"
 
     lines = [
-        "%s 共 %s 条：成功 %s / 失败 %s / 跳过 %s，耗时 %s ms"
+        "**%s** 共 %s 条：成功 %s / 失败 %s / 跳过 %s，耗时 %s ms"
         % (head, total, succeeded, failed, skipped, elapsed)
     ]
+
+    summary = payload.get("summary")
+    if summary and not dry_run:
+        lines.append("结论：%s" % summary)
+
+    # DOC-001 后续：失败清单放在逐条记录之前。records 一长，ok:false 很容易被上下文淹没
+    if not ok:
+        failures = payload.get("failures") or []
+        if failures:
+            lines.append("")
+            lines.append("**失败的指令（修完再重试）：**")
+            for item in failures:
+                lines.append("  ✗ #%s %s [%s] %s" % (
+                    item.get("index"), item.get("id"), item.get("status"), item.get("message", "")))
+        lines.append("")
 
     for record in payload.get("records") or []:
         status = record.get("status")

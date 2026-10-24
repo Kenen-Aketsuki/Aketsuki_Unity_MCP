@@ -9,7 +9,8 @@ description: 向本项目的 Unity 编辑器下发 JSON 指令、查询编辑器
 本 Skill 是它的**客户端半边**：负责探活、发送、把执行报告读成人能看懂的样子。
 
 > **⚠️ HTTP 200 ≠ 指令成功（DOC-001）。** 业务失败时服务端照样返回 200，
-> 成败只在 body 的 `ok` / `records[].status` 里。**先看 `body.ok`，再看 `succeeded`/`failed`**。
+> 成败只在 body 的 `ok` / `records[].status` 里。**先看 `body.ok`，失败就立刻读 `summary` 与 `failures`**
+> ——这两个字段是专门为避免"`ok:false` 被长上下文淹没"加的，都排在 `records` 之前。
 > 想确认"这次是不是真的编译了"，查 `/v1/status` 的 `lastCompile.requestedUtc` 与 `rejectedReason`
 > （被拒时 `rejectedReason` 非空，且 `requestedUtc` 会比 `finishedUtc` 新）。
 
@@ -190,7 +191,7 @@ HTTP 状态码只表示"请求是否被处理"，**业务结果看 body 里的 `
 | 状态码 | 含义 | 该怎么办 |
 | --- | --- | --- |
 | 200 且 `ok:true` | 全部指令成功 | 完事 |
-| 200 且 `ok:false` | 有指令失败 | 读 `records` 里 `status` 非 `Success` 的条目，按下面的自愈流程走 |
+| 200 且 `ok:false` | 有指令失败 | 先读 `summary`（一句话结论）与 `failures`（只含失败项），再按下面的自愈流程走 |
 | 400 `bad_json` | body 不是合法指令 JSON | 修 JSON；报错带行列号 |
 | 401 `unauthorized` | 令牌缺失或错误 | 重新读 `.http-info`，别手改令牌 |
 | 404 `not_found` | 路径写错 | 只应打上表五个路径 |
@@ -203,11 +204,17 @@ HTTP 状态码只表示"请求是否被处理"，**业务结果看 body 里的 `
 `status` 取值：`Success` / `Failed` / `Skipped` / `UnknownCommand`。
 `UnknownCommand` 说明指令 ID 拼错或未注册，用 `commands` 子命令核对。
 
+> **失败时先读 `summary` 和 `failures`。** `summary` 是一句话结论
+> （如 `⚠ 1/2 条指令失败：#1 asset.compile（明细见 failures，逐条见 records）`），
+> `failures` 是只含失败项的精简数组（`index` / `id` / `status` / `message`，不含 `data`）。
+> 两者都排在 `records` 之前，就是为了让"有东西失败了"这件事不可能被忽略——
+> 别跳过它们直接翻 `records`，records 可能有几十条。
+
 ## 自愈流程（本 Skill 的核心价值）
 
 拿到失败报告后，按这个顺序走，**不要直接把报错丢回给用户**：
 
-1. 定位 `records` 里第一个非 `Success` 的条目，读它的 `message`
+1. 读 `summary` 拿到失败条数，再读 `failures` 逐条看 `message`（没有这两个字段的旧服务端，退回翻 `records`）
 2. 常见成因与对策：
    - `找不到父节点 'X'` → 把 `parent` 改成 `type:Canvas` 或 `type:节点所在类型`；
      也可能该父节点还没创建，把创建它的指令移到前面

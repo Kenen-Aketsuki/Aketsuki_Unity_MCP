@@ -1357,6 +1357,35 @@ namespace CivilRev.CommandSystem
             var unityObject = value as UnityEngine.Object;
             return unityObject != null ? unityObject.name : Convert.ToString(value, CultureInfo.InvariantCulture);
         }
+
+        /// <summary>
+        /// 把一个字段读成 JSON（与 <c>component.get</c> 同一口径），供 <c>component.setFields</c>
+        /// 回显 old/new（IMPR-004 方案 2）。
+        /// <para>
+        /// 优先走 <see cref="SerializedObject"/>：这样 Color / Vector / 数组 / 枚举都拿到结构化值，
+        /// 调用方可以直接比对，不必再发一条 <c>component.get</c>。读不到（非序列化的可写属性）
+        /// 才退到反射值的字符串形态，与旧版 data 的表达保持一致。
+        /// </para>
+        /// </summary>
+        internal static JsonValue ReadFieldJson(Component component, string fieldName, object reflectionValue)
+        {
+#if UNITY_EDITOR
+            try
+            {
+                var so = new UnityEditor.SerializedObject(component);
+                var property = CivilRev.CommandSystem.Editor.ComponentGetCommands.ResolveProperty(so, fieldName);
+                if (property != null)
+                {
+                    return CivilRev.CommandSystem.Editor.ComponentGetCommands.SerializeProperty(property, 0);
+                }
+            }
+            catch (Exception)
+            {
+                // SerializedObject 读不了（脚本未刷新、字段不属于序列化图）时继续走反射值
+            }
+#endif
+            return JsonValue.Of(Describe(reflectionValue));
+        }
     }
 
     /// <summary>
@@ -1439,13 +1468,19 @@ namespace CivilRev.CommandSystem
     /// </para>
     /// </summary>
     [Command("component.setFields",
-        Description = "一次写入一个组件上的多个字段（原子：任一失败整体不生效）；data 回显各字段修改前的旧值",
+        Description = "一次写入一个组件上的多个字段（原子：任一失败整体不生效）；data 同时回显写入前后的值（old / new）",
         Usage = "target: string（Prefab 模式下空串=根）, component: string, fields: object, prefab: string",
         EditorOnly = true)]
     public sealed class SetComponentFieldsCommand : ICommand
     {
-        /// <summary>IMPR-004：消息里写明 data 是旧值，免得调用方把它当"写后的当前值"。</summary>
-        private const string OldValuesNote = "（data 为各字段修改前的旧值，用于复核；写后的值请再看消息或 component.get）";
+        /// <summary>
+        /// IMPR-004 方案 2：data 直接给 <c>old</c> / <c>new</c> 两份。
+        /// <para>
+        /// 调用方是 LLM，一次给全比"回显旧值 + 再发一条 component.get"更省往返，
+        /// 也不会因为它把旧值误当新值而误判成写入失败。
+        /// </para>
+        /// </summary>
+        private const string ValuesNote = "（data.old / data.new 为各字段写入前后的值）";
 
         public CommandResult Execute(CommandContext context)
         {
@@ -1475,17 +1510,20 @@ namespace CivilRev.CommandSystem
             var component = SetComponentFieldCommand.RequireComponent(target, typeName, context);
             // 先全部解析/校验（任一失败直接抛错，此时尚未落盘 —— 原子性保证）
             var ops = ResolveAll(component, fieldsSpec, context, null);
+            // 旧值必须在 Apply 之前读
+            var oldValues = BuildValues(ops, true);
 
 #if UNITY_EDITOR
             UnityEditor.Undo.RecordObject(component, "CommandSystem.SetComponentFields");
 #endif
-            ApplyAll(ops, true);
+            var applied = ApplyAll(ops, true);
+            var newValues = BuildValues(ops, false, applied);
 
-            // IMPR-004：data 里是"修改前的旧值"，此前消息没说明，调用方会拿它当写后值核对、误判成写入失败
+            // IMPR-004 方案 2：data = {"old": {...}, "new": {...}}
             return CommandResult.Ok(
                 $"已批量设置 {SceneQuery.BuildPath(target)} 上 {component.GetType().Name} 的 {ops.Count} 个字段" +
-                OldValuesNote,
-                BuildOldValues(ops));
+                ValuesNote,
+                BuildData(oldValues, newValues));
         }
 
         private static CommandResult ExecuteOnPrefab(CommandContext context, string prefabPath, string targetSpec,
@@ -1498,12 +1536,14 @@ namespace CivilRev.CommandSystem
                 var node = SetComponentFieldCommand.ResolvePrefabTarget(root, targetSpec, context);
                 var component = SetComponentFieldCommand.RequireComponent(node, typeName, context);
                 var ops = ResolveAll(component, fieldsSpec, context, path => SetComponentFieldCommand.FindInPrefab(root, path));
-                ApplyAll(ops, false);
+                var oldValues = BuildValues(ops, true);
+                var applied = ApplyAll(ops, false);
+                var newValues = BuildValues(ops, false, applied);
                 UnityEditor.PrefabUtility.SaveAsPrefabAsset(root, normalized);
                 return CommandResult.Ok(
                     $"已批量设置 Prefab '{normalized}' 的 {node.name}.{component.GetType().Name} 的 {ops.Count} 个字段" +
-                    OldValuesNote,
-                    BuildOldValues(ops));
+                    ValuesNote,
+                    BuildData(oldValues, newValues));
             });
 #else
             throw new CommandException($"指令 '{context.CommandId}' 只能在编辑器内执行");
@@ -1523,24 +1563,44 @@ namespace CivilRev.CommandSystem
             return ops;
         }
 
-        private static void ApplyAll(List<SetComponentFieldCommand.FieldOp> ops, bool recordUndo)
+        /// <summary>逐条写入，并收集每条 ApplyField 回传的新值（序列化通道读不回来时用得上）</summary>
+        private static List<object> ApplyAll(List<SetComponentFieldCommand.FieldOp> ops, bool recordUndo)
         {
+            var applied = new List<object>(ops.Count);
             foreach (var op in ops)
             {
-                SetComponentFieldCommand.ApplyField(op, recordUndo);
+                applied.Add(SetComponentFieldCommand.ApplyField(op, recordUndo));
             }
+
+            return applied;
         }
 
-        /// <summary>把每个字段修改前的旧值汇总成对象，供复核</summary>
-        private static JsonValue BuildOldValues(List<SetComponentFieldCommand.FieldOp> ops)
+        /// <summary>
+        /// 把每个字段读成 JSON：<paramref name="useOld"/> 为真取写入前的值，否则取写入后的值。
+        /// <para>读取优先走 SerializedObject（结构化、与 component.get 同口径），读不到才用传入的反射值兜底。</para>
+        /// </summary>
+        private static JsonValue BuildValues(List<SetComponentFieldCommand.FieldOp> ops, bool useOld,
+            List<object> applied = null)
         {
             var obj = JsonValue.NewObject();
-            foreach (var op in ops)
+            for (var i = 0; i < ops.Count; i++)
             {
-                obj.Set(op.fieldName, JsonValue.Of(SetComponentFieldCommand.Describe(op.oldValue)));
+                var op = ops[i];
+                var fallback = useOld || applied == null ? op.oldValue : applied[i];
+                obj.Set(op.fieldName,
+                    SetComponentFieldCommand.ReadFieldJson(op.componentHolder, op.fieldName, fallback));
             }
 
             return obj;
+        }
+
+        /// <summary>data = {"old": {...}, "new": {...}}（IMPR-004 方案 2）</summary>
+        private static JsonValue BuildData(JsonValue oldValues, JsonValue newValues)
+        {
+            var data = JsonValue.NewObject();
+            data.Set("old", oldValues);
+            data.Set("new", newValues);
+            return data;
         }
     }
 }
