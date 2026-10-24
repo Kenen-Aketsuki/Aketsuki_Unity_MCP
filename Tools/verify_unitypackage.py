@@ -33,7 +33,7 @@ import tarfile
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_PKG = os.path.join(HERE, "UnityPackage", "UnityCommandBridge.unitypackage")
+DEFAULT_PKG = os.path.join(HERE, "UnityPackage", "Aketsuki_Unity_MCP-1.0.unitypackage")
 
 # Unity 没有统一的"最新版"入口，按目录名倒序挑最高版本
 UNITY_HUB_DIRS = [
