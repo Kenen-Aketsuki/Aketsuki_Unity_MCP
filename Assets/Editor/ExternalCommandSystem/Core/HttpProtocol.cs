@@ -666,6 +666,12 @@ namespace CivilRev.CommandSystem
         /// <c>ok</c> 表示业务结果（无失败项），与 HTTP 状态码分工：状态码只反映"请求是否被处理"。
         /// 客户端应先判断 HTTP 200，再读 <c>ok</c> 与逐条 <c>records</c>。
         /// </para>
+        /// <para>
+        /// DOC-001 后续：<c>ok</c> 是布尔值，混在几十行 JSON 里很容易被调用方（尤其是 LLM）
+        /// 忽略，于是额外给出 <c>summary</c>（一句话结论，失败时带 ⚠ 前缀）和 <c>failures</c>
+        /// （只含失败项的精简数组），两者都排在 <c>records</c> 之前——先读到结论，再决定要不要翻明细。
+        /// 状态码仍统一 200：业务失败不改变 HTTP 语义，<c>batch</c> 与单条保持一致。
+        /// </para>
         /// </summary>
         public static JsonValue ToJson(CommandRunReport report, bool dryRun = false)
         {
@@ -674,10 +680,12 @@ namespace CivilRev.CommandSystem
             {
                 payload.Set("ok", JsonValue.Of(false));
                 payload.Set("error", JsonValue.Of("no_report"));
+                payload.Set("summary", JsonValue.Of("⚠ 没有拿到执行报告（no_report）"));
                 return payload;
             }
 
             payload.Set("ok", JsonValue.Of(!report.HasError));
+            payload.Set("summary", JsonValue.Of(BuildSummary(report, dryRun)));
             payload.Set("dryRun", JsonValue.Of(dryRun));
             payload.Set("source", JsonValue.Of(report.SourcePath ?? "<memory>"));
             payload.Set("total", JsonValue.Of(report.Total));
@@ -687,13 +695,79 @@ namespace CivilRev.CommandSystem
             payload.Set("elapsedMs", JsonValue.Of(Math.Round(report.ElapsedMs, 2)));
 
             var records = new List<JsonValue>();
+            var failures = new List<JsonValue>();
             for (var i = 0; i < report.Records.Count; i++)
             {
-                records.Add(RecordToJson(report.Records[i]));
+                var record = report.Records[i];
+                records.Add(RecordToJson(record));
+                if (record != null && !IsNonFailure(record.Status))
+                {
+                    failures.Add(FailureToJson(record));
+                }
+            }
+
+            // 失败清单排在 records 前面：调用方按顺序读就能先看到失败原因
+            if (failures.Count > 0)
+            {
+                payload.Set("failures", JsonValue.FromArray(failures));
             }
 
             payload.Set("records", JsonValue.FromArray(records));
             return payload;
+        }
+
+        /// <summary>成功与跳过都不算失败；其余（Failed / UnknownCommand / 任何新状态）一律算</summary>
+        private static bool IsNonFailure(CommandStatus status)
+        {
+            return status == CommandStatus.Success || status == CommandStatus.Skipped;
+        }
+
+        /// <summary>
+        /// 一句话结论，放在响应最前面。失败时以 ⚠ 开头并点名失败的指令，
+        /// 不让调用方靠"扫 records 找 status"来发现失败（DOC-001 后续）。
+        /// </summary>
+        private static string BuildSummary(CommandRunReport report, bool dryRun)
+        {
+            if (dryRun)
+            {
+                return $"dry-run：共 {report.Total} 条（通过 {report.Succeeded} / 失败 {report.Failed} / 跳过 {report.Skipped}），未真正执行";
+            }
+
+            if (!report.HasError)
+            {
+                return report.Skipped > 0
+                    ? $"{report.Total} 条指令全部成功（其中 {report.Skipped} 条跳过）"
+                    : $"{report.Total} 条指令全部成功";
+            }
+
+            var names = new List<string>();
+            foreach (var record in report.Records)
+            {
+                if (record == null || IsNonFailure(record.Status))
+                {
+                    continue;
+                }
+
+                names.Add($"#{record.Index} {record.CommandId}");
+                if (names.Count >= 3)
+                {
+                    break;
+                }
+            }
+
+            var suffix = report.Failed > names.Count ? " 等" : string.Empty;
+            return $"⚠ {report.Failed}/{report.Total} 条指令失败：{string.Join("、", names)}{suffix}（明细见 failures，逐条见 records）";
+        }
+
+        /// <summary>失败项精简视图：只留定位与原因，不含可能很大的 data</summary>
+        private static JsonValue FailureToJson(CommandRecord record)
+        {
+            var item = JsonValue.NewObject();
+            item.Set("index", JsonValue.Of(record.Index));
+            item.Set("id", JsonValue.Of(record.CommandId ?? string.Empty));
+            item.Set("status", JsonValue.Of(record.Status.ToString()));
+            item.Set("message", JsonValue.Of(record.Message ?? string.Empty));
+            return item;
         }
 
         /// <summary>单条执行记录转 JSON</summary>
@@ -731,6 +805,13 @@ namespace CivilRev.CommandSystem
             if (data is JsonValue jsonValue)
             {
                 return jsonValue;
+            }
+
+            // batch 这类复合指令的 Data 就是嵌套执行报告：结构化嵌入。
+            // 否则 ToString 只给类型名，嵌套批次里哪条失败了完全看不到。
+            if (data is CommandRunReport nestedReport)
+            {
+                return ToJson(nestedReport);
             }
 
             if (data is string s)

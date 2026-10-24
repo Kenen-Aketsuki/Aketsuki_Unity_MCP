@@ -198,7 +198,7 @@ namespace CivilRev.CommandSystem.Editor
         /// 与 <c>component.setField</c> 的 <c>A.B.C</c> 写入侧对齐（IMPR-001）。
         /// </para>
         /// </summary>
-        private static SerializedProperty ResolveProperty(SerializedObject so, string field)
+        internal static SerializedProperty ResolveProperty(SerializedObject so, string field)
         {
             var direct = so.FindProperty(field);
             if (direct != null)

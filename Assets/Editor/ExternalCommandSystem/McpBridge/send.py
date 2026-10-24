@@ -610,6 +610,24 @@ def print_report(payload, as_json=False):
               "skipped": payload.get("skipped", 0),
               "elapsedMs": payload.get("elapsedMs", 0),
           })
+    summary = payload.get("summary")
+    if summary:
+        print("  结论 %s" % summary)
+
+    # DOC-001 后续：失败块顶到 records 之前。records 一长，末尾那句提示就淹没在输出里了
+    if not payload.get("ok"):
+        failures = payload.get("failures") or []
+        print()
+        print("⚠ 本次有 %s 条指令失败，先看这里：" % payload.get("failed", len(failures)))
+        for item in failures:
+            print("  ✗ #%s %-24s [%s] %s" % (
+                item.get("index", "?"),
+                item.get("id", "?"),
+                item.get("status", "?"),
+                item.get("message", ""),
+            ))
+        print("  修完再重试；自愈流程见 SKILL.md")
+        print()
 
     records = payload.get("records") or []
     for record in records:
@@ -625,10 +643,6 @@ def print_report(payload, as_json=False):
         data = record.get("data")
         if data not in (None, ""):
             print("        data: %s" % json.dumps(data, ensure_ascii=False))
-
-    if not payload.get("ok"):
-        print()
-        print("有指令失败。先看上面标 [失败] 的行，按 SKILL.md 的自愈流程处理。")
 
 
 def print_error(status, payload, raw):
