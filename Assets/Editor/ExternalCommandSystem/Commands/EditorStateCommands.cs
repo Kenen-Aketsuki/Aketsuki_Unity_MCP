@@ -87,6 +87,12 @@ namespace CivilRev.CommandSystem.Editor
     /// </summary>
     internal static class EditorPlayState
     {
+        /// <summary>当前是否处于 Play 模式（运行时指令与场景指令共用这一判断口径）</summary>
+        internal static bool IsPlayingNow
+        {
+            get { return UnityEditor.EditorApplication.isPlaying; }
+        }
+
         /// <summary>
         /// 若编辑器正处于 Play 模式（含暂停），抛出 <see cref="CommandException"/>。
         /// </summary>

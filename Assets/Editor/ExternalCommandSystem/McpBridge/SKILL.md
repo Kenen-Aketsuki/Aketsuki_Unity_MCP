@@ -153,6 +153,74 @@ Unity 没启动时 `tools/list` 仍会在半秒内返回那 5 个元工具，调
 > 已知限制：编译**失败**时不会发生域重载，服务仍然存活、能正常回答"错在哪"——这是闭环成立的前提。
 > 编译**成功**会重载域，内存里的完整消息列表会清空，但摘要存在 `SessionState` 里，`lastCompile` 仍可查。
 
+## 运行时指令（Play 模式干预，默认关闭）
+
+`runtime.*` 这一组指令操作的是**正在运行的游戏**：找运行时节点、点按钮、拖列表、写输入框。
+它和 `asset.*` / `scene.*` / `gameobject.*` 这类改资产的编辑指令**分开管**，原因很直接——
+点错一个按钮可能写存档、发网络请求、甚至退出游戏，不能跟只读指令共用一个默认放行策略。
+
+### 两道门禁，顺序固定
+
+1. **控制台开关**：Unity 菜单 `工具 / 指令系统 / 指令控制台` →「运行时指令（Play 模式）」→
+   勾选「启用运行时指令」。**默认关闭**，按工程保存（换工程要各自打开）。
+2. **必须在 Play 模式**：开关打开但编辑器不在 Play，一样失败。
+
+先判开关再判 Play：开关没开是配置问题，这时报"不在 Play"会把人带偏。
+
+失败时**HTTP 仍是 200**（与 DOC-001 同一类坑），看这三处：
+
+| 信号 | 含义 |
+| --- | --- |
+| `records[].message` / `failures[]` | 「运行时指令未启用：…」或「只能在 Play 模式执行：…」 |
+| `data.runtime` / `data.enabled` / `data.playing` | 机器可读的同一事实，不必解析中文 |
+| `/v1/status` 的 `runtimeCommands` | `enabled` / `playing` / `commandCount`，一眼看出为什么调不动 |
+| `commands`（`/v1/commands`）的 `runtime: true` | 该指令属于这一组，可提前跳过 |
+
+### 四条指令
+
+| 指令 | 用途 | 关键参数 |
+| --- | --- | --- |
+| `runtime.hierarchy` | 运行时层级快照（**含运行时 Instantiate 出来的对象与 DontDestroyOnLoad**） | `root` / `name` / `depth` / `includeInactive` / `limit` |
+| `runtime.click` | EventSystem 注入点击 | `target` 或 `position` / `button` / `clicks` / `direct` |
+| `runtime.scroll` | 向 ScrollRect 注入拖拽序列 | `target` / `direction` / `amount` / `mode` / `steps` |
+| `runtime.input` | 写 TMP/UGUI 输入框并触发提交回调 | `target` / `text` / `append` / `submit` |
+
+```json
+{"commands":[
+  {"id":"runtime.hierarchy","params":{"name":"BtnStart","limit":50}},
+  {"id":"runtime.click","params":{"target":"UIRoot/HUD/Canvas/BtnStart"}},
+  {"id":"runtime.scroll","params":{"target":"UIRoot/ShopPanel/List","direction":"vertical","amount":0.5}},
+  {"id":"runtime.input","params":{"target":"LoginPanel/InputAccount","text":"tester01","submit":true}}
+]}
+```
+
+`runtime.hierarchy` 给的 `selectPath`（带 `#序号` 消歧）可以原样回喂给另外三条的 `target`。
+
+两条容易搞错的语义：
+
+- `runtime.scroll` 的 `amount` 是 **normalizedPosition 的位移量**（`1` = 从头滚到尾，`0.5` = 滚一半），
+  正数往后翻、负数往回翻；它不是"像素"也不是"几屏"。
+- `runtime.click` 的 `position` 是**屏幕像素**（左下角原点），与 `target` 二选一；
+  两个都给时以 `position` 为准，`target` 只用来做遮挡比对。
+
+### 三条硬边界（别硬扛）
+
+1. **没有跨帧等待**。一条指令只占一帧，所以"点一下 → 等动画 → 再点"要**客户端自己控节奏**
+   （两次 HTTP 之间 sleep，或轮询 `runtime.hierarchy` 观察状态变化）。`runtime.scroll` 也因此**没有松手惯性**。
+2. **拿不到键盘/摇杆的硬输入**。游戏代码里 `Input.GetKeyDown`、新 Input System 直接读设备的部分，
+   EventSystem 注入碰不到——这属于要改项目输入抽象才能解决的事，不是指令能绕过的。
+3. **点击有真实副作用**。开开关前的确认、用完关掉，都是纪律问题不是技术问题。
+
+### 排查"点了没反应"
+
+按顺序看 `runtime.click` 的返回：
+
+- `raycast.hitCount = 0` → 坐标上根本没有可交互元素（Canvas 缺 GraphicRaycaster / `raycastTarget=false`）
+- `raycast.hits[0]` 不是你的目标 → 被挡住了，返回里 `warning` 会直说命中者和目标不在同一分支
+- `dispatch.pointerClick` 为空 → 按到了但没人实现 `IPointerClickHandler`（纯装饰节点）
+- `button.listenerCount = 0` → 按钮存在但没绑回调
+- 被透明层挡住却确实要点 → `direct: true`，跳过射线直接对目标触发点击
+
 ## 端点与语义
 
 | 方法 | 路径 | 用途 |
