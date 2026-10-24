@@ -184,6 +184,12 @@ namespace CivilRev.CommandSystem
         /// <para>客户端可据此在开关关闭时直接跳过，不必先吃一次失败。</para>
         /// </summary>
         public bool Runtime;
+
+        /// <summary>
+        /// 运行时指令要求的 Play 状态："Play 模式" / "编辑模式" / "任意"。
+        /// <para>客户端据此提前判断——例如 <c>runtime.play</c> 只能在编辑模式调用。</para>
+        /// </summary>
+        public string PlayState;
     }
 
     /// <summary><c>/v1/ping</c> 与 <c>/v1/status</c> 响应里身份块的字段名</summary>
@@ -539,6 +545,10 @@ namespace CivilRev.CommandSystem
                     item.Set("usage", JsonValue.Of(info.Usage ?? string.Empty));
                     item.Set("editorOnly", JsonValue.Of(info.EditorOnly));
                     item.Set("runtime", JsonValue.Of(info.Runtime));
+                    if (info.Runtime)
+                    {
+                        item.Set("playState", JsonValue.Of(info.PlayState ?? string.Empty));
+                    }
                     items.Add(item);
                 }
             }

@@ -155,46 +155,100 @@ Unity 没启动时 `tools/list` 仍会在半秒内返回那 5 个元工具，调
 
 ## 运行时指令（Play 模式干预，默认关闭）
 
-`runtime.*` 这一组指令操作的是**正在运行的游戏**：找运行时节点、点按钮、拖列表、写输入框。
+`runtime.*` 这一组指令操作的是**正在运行的游戏**：进/出 Play、找运行时节点、点按钮、拖列表、写输入框。
 它和 `asset.*` / `scene.*` / `gameobject.*` 这类改资产的编辑指令**分开管**，原因很直接——
 点错一个按钮可能写存档、发网络请求、甚至退出游戏，不能跟只读指令共用一个默认放行策略。
 
 ### 两道门禁，顺序固定
 
-1. **控制台开关**：Unity 菜单 `工具 / 指令系统 / 指令控制台` →「运行时指令（Play 模式）」→
+1. **控制台开关**：Unity 菜单 `工具 / 指令系统 / 指令控制台` →「运行时指令（Play 模式干预）」→
    勾选「启用运行时指令」。**默认关闭**，按工程保存（换工程要各自打开）。
-2. **必须在 Play 模式**：开关打开但编辑器不在 Play，一样失败。
+   关着时**这一组全部失败**，包括 `runtime.play` / `runtime.stop`。
+2. **Play 状态**（每条指令各自声明，见 `playState` 字段）：
+   `runtime.play` 要求**编辑模式**，`runtime.stop` **任意状态**（幂等），其余 `Play 模式`。
 
 先判开关再判 Play：开关没开是配置问题，这时报"不在 Play"会把人带偏。
+开关是**实时读**的，同一条请求里"先关开关、再调 runtime.*"也会立刻失败，不会拖到下一帧。
 
-失败时**HTTP 仍是 200**（与 DOC-001 同一类坑），看这三处：
+失败时**HTTP 仍是 200**（与 DOC-001 同一类坑），看这几处：
 
 | 信号 | 含义 |
 | --- | --- |
-| `records[].message` / `failures[]` | 「运行时指令未启用：…」或「只能在 Play 模式执行：…」 |
-| `data.runtime` / `data.enabled` / `data.playing` | 机器可读的同一事实，不必解析中文 |
+| `records[].message` / `failures[]` | 「运行时指令未启用：…」/「只能在 Play 模式执行：…」/「只能从编辑模式执行：…」 |
+| `data.runtime` / `data.enabled` / `data.playing` / `data.requiredPhase` | 机器可读的同一事实，不必解析中文 |
 | `/v1/status` 的 `runtimeCommands` | `enabled` / `playing` / `commandCount`，一眼看出为什么调不动 |
-| `commands`（`/v1/commands`）的 `runtime: true` | 该指令属于这一组，可提前跳过 |
+| `commands`（`/v1/commands`）的 `runtime: true` + `playState` | 该指令属于这一组，且需要哪种 Play 状态，可提前跳过 |
 
-### 四条指令
+> 常规指令 `editor.play` / `editor.stop` **不受开关影响**，任何时候都能用——
+> 它是"关掉开关后怎么把游戏停下来"的逃生口。
+
+### 六条指令
 
 | 指令 | 用途 | 关键参数 |
 | --- | --- | --- |
-| `runtime.hierarchy` | 运行时层级快照（**含运行时 Instantiate 出来的对象与 DontDestroyOnLoad**） | `root` / `name` / `depth` / `includeInactive` / `limit` |
+| `runtime.play` | 进入 Play（受开关约束；会触发域重载） | `onDirty`: `abort`（默认）/ `save` |
+| `runtime.stop` | 退出 Play（受开关约束；编辑模式下幂等返回成功） | — |
+| `runtime.hierarchy` | 运行时层级快照（**含运行时实例、inactive、DontDestroyOnLoad**） | `root` / `scene` / `name` / `depth` / `includeInactive` / `limit` |
 | `runtime.click` | EventSystem 注入点击 | `target` 或 `position` / `button` / `clicks` / `direct` |
 | `runtime.scroll` | 向 ScrollRect 注入拖拽序列 | `target` / `direction` / `amount` / `mode` / `steps` |
 | `runtime.input` | 写 TMP/UGUI 输入框并触发提交回调 | `target` / `text` / `append` / `submit` |
 
 ```json
 {"commands":[
+  {"id":"runtime.play","params":{}},
   {"id":"runtime.hierarchy","params":{"name":"BtnStart","limit":50}},
-  {"id":"runtime.click","params":{"target":"UIRoot/HUD/Canvas/BtnStart"}},
-  {"id":"runtime.scroll","params":{"target":"UIRoot/ShopPanel/List","direction":"vertical","amount":0.5}},
-  {"id":"runtime.input","params":{"target":"LoginPanel/InputAccount","text":"tester01","submit":true}}
+  {"id":"runtime.click","params":{"target":"[scene:Level1]UIRoot/HUD/Canvas/BtnStart"}},
+  {"id":"runtime.scroll","params":{"target":"[scene:Level1]UIRoot/ShopPanel/List","direction":"vertical","amount":0.5}},
+  {"id":"runtime.input","params":{"target":"[scene:UIRoot]LoginPanel/InputAccount","text":"tester01","submit":true}},
+  {"id":"runtime.stop","params":{}}
 ]}
 ```
 
-`runtime.hierarchy` 给的 `selectPath`（带 `#序号` 消歧）可以原样回喂给另外三条的 `target`。
+`runtime.hierarchy` 给的 `qualifiedPath` 可以原样回喂给另外三条的 `target`（跨场景也唯一）。
+
+### 多场景叠加：必须点名场景
+
+叠加加载下「常驻引导 + 关卡 + UI」各会有一份 `UIRoot` / `Canvas` / `BtnStart`。
+`runtime.hierarchy` 会按场景分组（每组带 `label` / `selector` / `handle` / `buildIndex` / `active`），
+节点带 `qualifiedPath`：
+
+```
+[scene:Level1]UIRoot/BtnStart
+```
+
+两种等价写法：
+
+| 形式 | 例子 |
+| --- | --- |
+| 字符串前缀 | `[scene:Level1]UIRoot/BtnStart` |
+| 对象字段 | `{"scene":"Level1","path":"UIRoot/BtnStart"}` |
+
+选择器语法（都写在 `[scene:...]` 的括号里）：
+
+| 写法 | 含义 |
+| --- | --- |
+| `Level1` | 场景名（大小写不敏感，须完整匹配） |
+| `Level1#1` / `Level1#last` | 同名场景的第 N 个（同一个场景被叠加加载两次时） |
+| `handle:-5270` | 场景 handle（直接从 `runtime.hierarchy` 抄） |
+| `path:Assets/Scenes/Level1.unity` | 资产路径，也接受后缀 / 文件名 |
+| `active` | 当前激活场景 |
+| `DontDestroyOnLoad` | 常驻对象所在的合成场景（它不在 `SceneManager` 列表里，但可以点名） |
+
+**不给场景时，多命中一律失败**，不给"猜一个"的机会：
+
+```json
+{"failures":[{"message":"'UIRoot/BtnStart' 命中 2 个节点，无法确定点哪个……把下面任一条原样作为 target 重试：
+  [scene:SceneA]UIRoot/BtnStart（…instanceId=-5346）
+  [scene:SceneB]UIRoot/BtnStart（…instanceId=-5544）"}],
+ "data":{"candidates":[...],"candidateCount":2}}
+```
+
+改 `target` 时就抄 `candidates[].qualifiedPath`。候选顺序是**稳定**的（场景加载序 → 同名兄弟序），
+不要拿 `candidates[0]` 当唯一解——那正是要避免的"猜"。
+
+> `runtime.click` 用 `position` 时**没有场景概念**：叠加场景的同屏 UI 会按渲染顺序叠在一起，
+> 命中谁取决于谁在上面（返回里的 `warning` 会指出"命中的不在目标分支上"）。
+> 要精确定位就用 `target`，别用坐标。
 
 两条容易搞错的语义：
 

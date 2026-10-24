@@ -66,7 +66,7 @@ namespace CivilRev.CommandSystem
 
         /// <summary>
         /// 开关当前是否打开（按工程保存，见 <see cref="CommandSystemSettings.RuntimeCommandsEnabled"/>）。
-        /// <para>读的是主线程快照，可在任意线程安全调用。</para>
+        /// <para>读的是主线程快照，可在任意线程安全调用；**快照最多滞后一帧**，所以门禁判定不用它。</para>
         /// </summary>
         internal static bool Enabled
         {
@@ -80,18 +80,67 @@ namespace CivilRev.CommandSystem
         }
 
         /// <summary>
+        /// 实时读取开关。<b>只能在主线程调用</b>——执行器（<c>CommandRunner.ExecuteEntry</c>）与
+        /// <c>/v1/execute</c> 的响应用它。
+        /// <para>
+        /// 为什么不能直接用快照：同一条请求里"关开关 + 调 runtime.*"是同一帧内的两个指令，
+        /// 快照还没刷新，第二句会带着旧值放行（实测踩过：关掉开关后 runtime.stop 仍然成功）。
+        /// </para>
+        /// </summary>
+        internal static bool EnabledLive
+        {
+            get { return CommandSystemSettings.RuntimeCommandsEnabled; }
+        }
+
+        /// <summary>实时读取 Play 状态（主线程专用，理由同 <see cref="EnabledLive"/>）</summary>
+        internal static bool IsPlayingLive
+        {
+            get { return EditorApplication.isPlaying; }
+        }
+
+        /// <summary>
         /// 检查能否执行；返回 <c>null</c> 表示放行，否则返回给调用方看的中文原因。
+        /// <para>
+        /// 只判 <see cref="RuntimePhase.Playing"/>（绝大多数运行时指令的要求）。
+        /// 需要别的 Play 状态（如 <c>runtime.play</c> 要求编辑模式）时用带 phase 的重载。
+        /// </para>
         /// </summary>
         internal static string Check(string commandId)
         {
-            if (!Enabled)
+            return Check(commandId, RuntimePhase.Playing);
+        }
+
+        /// <summary>
+        /// 按指令声明的 Play 状态校验。开关判定永远在第一位：
+        /// 开关没开是配置问题，此时报"不在 Play"会把人带偏。
+        /// </summary>
+        internal static string Check(string commandId, RuntimePhase phase)
+        {
+            // 主线程路径：读实时值而不是快照（同一帧内改开关再调用也能立刻生效）
+            if (!EnabledLive)
             {
                 return DisabledMessage(commandId);
             }
 
-            if (!IsPlaying)
+            var playing = IsPlayingLive;
+            switch (phase)
             {
-                return NotPlayingMessage(commandId);
+                case RuntimePhase.NotPlaying:
+                    if (playing)
+                    {
+                        return AlreadyPlayingMessage(commandId);
+                    }
+
+                    break;
+                case RuntimePhase.Any:
+                    break;
+                default:
+                    if (!playing)
+                    {
+                        return NotPlayingMessage(commandId);
+                    }
+
+                    break;
             }
 
             return null;
@@ -101,7 +150,7 @@ namespace CivilRev.CommandSystem
         internal static string DisabledMessage(string commandId)
         {
             return $"运行时指令未启用：'{commandId}' 属于 Play 模式干预指令，默认关闭。" +
-                   $"请在 Unity 菜单 {ConsoleMenuPath} →「运行时指令（Play 模式）」勾选「{ToggleLabel}」后重试。";
+                   $"请在 Unity 菜单 {ConsoleMenuPath} →「运行时指令（Play 模式干预）」勾选「{ToggleLabel}」后重试。";
         }
 
         /// <summary>开关已开但不在 Play 模式时的失败原因</summary>
@@ -111,16 +160,38 @@ namespace CivilRev.CommandSystem
                    "先用 editor.play 进入 Play 模式（或手动点 Play）再重试。";
         }
 
+        /// <summary>要求编辑模式却在 Play 中时的失败原因</summary>
+        internal static string AlreadyPlayingMessage(string commandId)
+        {
+            return $"'{commandId}' 只能从编辑模式执行：它的作用就是进入 Play 模式，而当前已经在 Play 里了。" +
+                   "要退出请用 runtime.stop（或常规指令 editor.stop）。";
+        }
+
+        /// <summary>phase 的可读名，写进失败结果与控制台清单</summary>
+        internal static string DescribePhase(RuntimePhase phase)
+        {
+            switch (phase)
+            {
+                case RuntimePhase.NotPlaying:
+                    return "编辑模式";
+                case RuntimePhase.Any:
+                    return "任意";
+                default:
+                    return "Play 模式";
+            }
+        }
+
         /// <summary>
         /// 失败结果附带的结构化状态，供客户端机器判定（不必解析中文文案）。
         /// </summary>
-        internal static JsonValue StatusJson(string commandId)
+        internal static JsonValue StatusJson(string commandId, RuntimePhase phase = RuntimePhase.Playing)
         {
             var data = JsonValue.NewObject();
             data.Set("runtime", JsonValue.Of(true));
             data.Set("commandId", JsonValue.Of(commandId ?? string.Empty));
-            data.Set("enabled", JsonValue.Of(Enabled));
-            data.Set("playing", JsonValue.Of(IsPlaying));
+            data.Set("enabled", JsonValue.Of(EnabledLive));
+            data.Set("playing", JsonValue.Of(IsPlayingLive));
+            data.Set("requiredPhase", JsonValue.Of(DescribePhase(phase)));
             data.Set("toggle", JsonValue.Of(ToggleLabel));
             data.Set("menu", JsonValue.Of(ConsoleMenuPath));
             return data;

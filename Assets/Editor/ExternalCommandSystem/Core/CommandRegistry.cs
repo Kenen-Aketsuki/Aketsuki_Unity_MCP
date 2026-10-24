@@ -24,6 +24,9 @@ namespace CivilRev.CommandSystem
         /// <summary>是否为运行时（Play 模式）指令；受 <see cref="RuntimeCommandGate"/> 门禁约束</summary>
         public bool IsRuntime => Attribute != null && Attribute.Runtime;
 
+        /// <summary>运行时指令要求的 Play 状态（非运行时指令无意义，恒为 <see cref="RuntimePhase.Playing"/>）</summary>
+        public RuntimePhase RuntimePhase => Attribute != null ? Attribute.RuntimePhase : RuntimePhase.Playing;
+
         /// <summary>描述文本</summary>
         public string Description => Attribute != null ? Attribute.Description : string.Empty;
 
