@@ -477,11 +477,15 @@ namespace CivilRev.CommandSystem
                 return DontDestroySceneName;
             }
 
-            var all = AllLoadedScenes();
+            // 只在 SceneManager 列表里数同名场景，**不要**调 AllLoadedScenes()：
+            // 那个为了找 DontDestroyOnLoad 会做一次 FindObjectsOfType 全场景扫描，
+            // 而 Label 会被每个节点的 QualifiedPath 调用（上限 400 次/次快照），
+            // 真工程里就是几百次全扫描。DDOL 场景走上面的早返回，不需要参与计数。
             var ordinal = 0;
-            var duplicate = false;
-            foreach (var other in all)
+            var count = 0;
+            for (var i = 0; i < SceneManager.sceneCount; i++)
             {
+                var other = SceneManager.GetSceneAt(i);
                 if (!string.Equals(other.name, scene.name, StringComparison.Ordinal))
                 {
                     continue;
@@ -489,15 +493,15 @@ namespace CivilRev.CommandSystem
 
                 if (other.handle == scene.handle)
                 {
-                    duplicate = duplicate || ordinal > 0;
-                    break;
+                    ordinal = count;
                 }
 
-                ordinal++;
-                duplicate = true;
+                count++;
             }
 
-            return duplicate ? name + "#" + ordinal : name;
+            // 同名场景**每一个**都带序号（含 #0）：只给后几个加序号的话，
+            // 第一个的 label 就是 "C2"，而这个选择器实际会命中 2 个场景 → 报歧义，等于不可用
+            return count > 1 ? name + "#" + ordinal : name;
         }
 
         /// <summary>可直接写进 <c>[scene:...]</c> 的选择器（名字里有 <c>]</c> 时退回 handle）</summary>
