@@ -2,10 +2,10 @@
 id: BUG-004
 type: bug
 title: asset.compile 被拒后，asset.compileReport 的摘要仍宣称「最近一次编译成功」
-status: open
+status: done
 source: Aketsuki_Unity_MCP
 created: 2026-10-24
-updated: 2026-10-24
+updated: 2026-10-25
 files: Commands/DiagnosticsCommands.cs
 proposal: false
 ---
@@ -81,3 +81,29 @@ else                       { ... 原逻辑 ... }
 只有「摘要行」这一处；`/v1/status`、`data` 字段、`asset.compile` 自身的失败返回都正确。
 `send.py` 打印的是 `结论/✗ 失败行` 来源于指令结果，被拒时本来就显示失败，不受影响——
 真正会踩坑的是直接读 `compileReport` 摘要文本的调用方（人和 AI 都会）。
+
+## 执行结果（2026-10-25）
+
+按上面的建议改法落地，另做了两处收口：
+
+1. `RejectedReason` 判定提到最前面，措辞改成
+   「这一次编译请求被拒，代码没有被编译：{原因}；最近一次真正完成的编译在 {本地时间}（ok=…）」。
+   比建议稿多了「代码没有被编译」——原稿只说"请求被拒"，仍可能被读成"编译过但结果没采纳"。
+2. 时间戳走 `DateTime.TryParse(..., RoundtripKind).ToLocalTime()` 转成 `yyyy-MM-dd HH:mm:ss`。
+   原始串是 `2026-10-24T16:08:43.7044169Z`，直接接在"完成于"后面既吵又是 UTC，会和本地日志对不上时间。
+
+实测（project_island_back 编辑器，Unity 2022.3.62f2c1，2026-10-25 00:11）：
+
+| 步骤 | 结果 |
+| --- | --- |
+| `editor.play` → `status` | `playing: true` |
+| `asset.compile` | 失败：`编辑器正处于预览状态，不允许编译与刷新`（本就正确） |
+| `asset.compileReport` | `这一次编译请求被拒，代码没有被编译：编辑器正处于预览状态，不允许编译与刷新；最近一次真正完成的编译在 2026-10-25 00:08:43（ok=True）` |
+| 同请求 `data` | `requestedUtc` 比 `finishedUtc` 新 2 分 17 秒、`rejectedReason` 非空（结构未变） |
+| `editor.stop` → 真实 `compile --force` | 摘要恢复成 `最近一次编译成功（0 个警告，69ms）`，`rejectedReason` 清空 |
+
+最后一行的意义：**被拒状态不会粘住**——真编译一次就回到原措辞，不会把后续正常的编译也报成"被拒"。
+
+本仓库编辑器当时没开，所以上面的 Play 模式路径是在 `project_island_back` 上跑的；
+同时补上了上一轮遗留的"RecordRejected 的 Play 模式路径未实测"。
+本仓库侧用离线编译器验过 `Assembly-CSharp-Editor`（60 文件）编译通过。

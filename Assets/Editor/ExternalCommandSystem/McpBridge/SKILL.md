@@ -141,6 +141,12 @@ Unity 没启动时 `tools/list` 仍会在半秒内返回那 5 个元工具，调
 | `asset.compileReport` 指令 | 最近一次编译的完整列表（assembly / file / line / column / message） | 需要明细或单独复查 |
 | `/v1/status` 的 `lastCompile` | 摘要：`ok` / `errorCount` / `warningCount` / `durationMs` | 一眼看"上次编译过没过" |
 
+**"上一次编译成功"不等于"你这次的改动编译过了"**：Play 模式下发 `asset.compile` 会被拒
+（编辑器不允许在预览状态编译），此时 `ok` / `finishedUtc` 仍然是**上一次**的值。
+`asset.compileReport` 的摘要在这种情况下会明确写成「这一次编译请求被拒，代码没有被编译：…」，
+并附上"最近一次真正完成的编译在何时"；`data.rejectedReason` 非空 / `requestedUtc` 比
+`finishedUtc` 新，是同一件事的机读判据。**摘要说"成功"而 `rejectedReason` 非空时，以被拒为准。**
+
 **编译错误 vs 运行时错误**：上面管的是"编不编得过"。若编译通过但跑起来异常
 （NullReferenceException、资源缺失等），用 `console.read`：
 
