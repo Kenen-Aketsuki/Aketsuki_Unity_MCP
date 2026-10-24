@@ -1,3 +1,4 @@
+using System;
 using UnityEditor;
 
 namespace CivilRev.CommandSystem.Editor
@@ -39,8 +40,18 @@ namespace CivilRev.CommandSystem.Editor
                 payload.Set("totalMessages", JsonValue.Of(report.Messages.Count));
             }
 
+            // BUG-004：被拒的判定必须排在最前面。
+            // 被拒时 Finished / Ok 描述的都是**上一次**的编译，先判它们会把"这次压根没编译"
+            // 说成"最近一次编译成功"——闭环的最后一步就是这个摘要，看错会以为改完的代码过了。
             string message;
-            if (!report.Finished)
+            if (!string.IsNullOrEmpty(report.RejectedReason))
+            {
+                var lastReal = report.Finished
+                    ? $"最近一次真正完成的编译在 {FormatUtc(report.FinishedUtc)}（ok={report.Ok}）"
+                    : "本次会话还没有完成过任何编译";
+                message = $"这一次编译请求被拒，代码没有被编译：{report.RejectedReason}；{lastReal}";
+            }
+            else if (!report.Finished)
             {
                 message = CommandCompileMonitor.IsCompiling
                     ? "正在编译中，暂无结果"
@@ -56,6 +67,29 @@ namespace CivilRev.CommandSystem.Editor
             }
 
             return CommandResult.Ok(message, payload);
+        }
+
+        /// <summary>
+        /// 把 <c>DateTime.ToString("o")</c> 的 UTC 串显示成本地时间的短格式。
+        /// <para>
+        /// 摘要是给人/AI 直接读的，原始串带 7 位小数和时区后缀（<c>2026-10-24T02:50:03.5906584Z</c>），
+        /// 放在"最近一次完成于…"里既吵又容易和本地时间对不上。解析失败就原样返回，不做猜测。
+        /// </para>
+        /// </summary>
+        private static string FormatUtc(string utc)
+        {
+            if (string.IsNullOrEmpty(utc))
+            {
+                return "（未知时间）";
+            }
+
+            DateTime parsed;
+            if (!DateTime.TryParse(utc, null, System.Globalization.DateTimeStyles.RoundtripKind, out parsed))
+            {
+                return utc;
+            }
+
+            return parsed.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss");
         }
 
         private static JsonValue MessageToJson(CompileMessage message)
