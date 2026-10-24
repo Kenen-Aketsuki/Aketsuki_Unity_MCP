@@ -20,9 +20,13 @@ FEEDBACK = os.path.join(os.path.dirname(HERE), "Feedback")
 
 # 目录 -> 该目录允许的 status。状态与目录不一致 = 有人改了 front-matter 没移文件（或反过来）
 DIR_STATUS = {
+    "待拍板": ("pending",),
     "未实现": ("open", "wontfix"),
     "已实现": ("done",),
 }
+
+# 决策批件：一次列出多条待拍的文档，不带 front-matter、不参与编号校验（用户 2026-10-24 定）
+BATCH_PREFIXES = ("待拍板-", "已拍板-")
 
 REQUIRED = ("id", "type", "title", "status", "source", "created")
 
@@ -34,6 +38,7 @@ TYPES = {
 }
 
 STATUS_LABEL = {
+    "pending": "待拍板",
     "open": "待处理",
     "wontfix": "不做",
     "done": "已实现",
@@ -72,6 +77,7 @@ def parse_front_matter(path):
 
 def collect():
     entries = []
+    batches = []
     problems = []
 
     for folder, allowed in DIR_STATUS.items():
@@ -86,8 +92,13 @@ def collect():
             if name in SKIP_NAMES or name.startswith(SKIP_PREFIX):
                 continue
 
-            path = os.path.join(full, name)
             rel = "Feedback/%s/%s" % (folder, name)
+            if name.startswith(BATCH_PREFIXES):
+                # 决策批件：一段时间的拍板清单，正文由用户直接批注，故不校验 front-matter
+                batches.append({"folder": folder, "name": name, "rel": rel})
+                continue
+
+            path = os.path.join(full, name)
             meta, _body, error = parse_front_matter(path)
             if error:
                 problems.append("%s：%s" % (rel, error))
@@ -127,6 +138,7 @@ def collect():
                 "source": meta.get("source", ""),
                 "created": meta.get("created", ""),
                 "updated": meta.get("updated", ""),
+                "proposal": meta.get("proposal", "").lower() in ("true", "yes", "1"),
                 "folder": folder,
                 "rel": rel,
             })
@@ -140,7 +152,7 @@ def collect():
         else:
             seen[key] = entry["rel"]
 
-    return entries, problems
+    return entries, batches, problems
 
 
 def next_ids(entries):
@@ -160,9 +172,14 @@ def next_ids(entries):
     return result
 
 
-def render(entries, problems, ids):
-    open_count = sum(1 for e in entries if e["status"] in ("open", "wontfix"))
-    done_count = sum(1 for e in entries if e["status"] == "done")
+def render(entries, batches, problems, ids):
+    def count(statuses):
+        return sum(1 for e in entries if e["status"] in statuses)
+
+    pending_count = count(("pending",))
+    open_count = count(("open", "wontfix"))
+    done_count = count(("done",))
+    proposal_count = sum(1 for e in entries if e["proposal"])
 
     lines = [
         "# 反馈索引",
@@ -170,36 +187,60 @@ def render(entries, problems, ids):
         "> 本文件由 `python Tools/feedback_index.py` 生成，**手改会被覆盖**。",
         "> 规则见 [README.md](README.md)，新建一条从 [_模板.md](_模板.md) 复制。",
         "",
-        "未实现 **%d** 条 · 已实现 **%d** 条 · 合计 %d 条" % (open_count, done_count, len(entries)),
+        "待拍板 **%d** 条 · 未实现 **%d** 条 · 已实现 **%d** 条 · 合计 %d 条"
+        % (pending_count, open_count, done_count, len(entries)),
         "",
         "下一个可用编号：%s" % " · ".join("%s" % v for v in sorted(ids.values())),
         "",
     ]
+
+    if proposal_count:
+        lines += ["其中标 `proposal: true` 的「建议扩展」共 **%d** 条" % proposal_count, ""]
+        if proposal_count >= 3:
+            lines += ["> ⚠ 建议扩展积到 %d 条了。按 IMPR-005 的拍板口径，这类提议偏多时"
+                      "应该停下来找替代方案，而不是继续往下堆。" % proposal_count, ""]
 
     if problems:
         lines += ["## ⚠ 校验未通过", ""]
         lines += ["- " + item for item in problems]
         lines += [""]
 
-    for folder in ("未实现", "已实现"):
+    titles = {
+        "待拍板": "## 待拍板（%d）\n\n> 等你拍板。**直接在文件里写决策**，AI 执行完把文件移到 `已实现/`。",
+        "未实现": "## 未实现（%d）",
+        "已实现": "## 已实现（%d）",
+    }
+
+    for folder in ("待拍板", "未实现", "已实现"):
         group = [e for e in entries if e["folder"] == folder]
-        lines += ["## %s（%d）" % (folder, len(group)), ""]
+        lines += [(titles[folder] % len(group)), ""]
+        group_batches = [b for b in batches if b["folder"] == folder]
+
         if not group:
-            lines += ["_（空）_", ""]
-            continue
-        lines += ["| 编号 | 类型 | 标题 | 来源工程 | 状态 | 更新 |",
-                  "|---|---|---|---|---|---|"]
-        for entry in sorted(group, key=lambda e: (e["type"], e["id"])):
-            lines.append("| [%s](%s) | %s | %s | %s | %s | %s |" % (
-                entry["id"],
-                entry["rel"].replace("Feedback/", ""),
-                entry["type"],
-                entry["title"].replace("|", "\\|"),
-                entry["source"],
-                STATUS_LABEL.get(entry["status"], entry["status"]),
-                entry["updated"] or entry["created"],
-            ))
-        lines += [""]
+            lines += ["_（无单条反馈）_", ""]
+        else:
+            lines += ["| 编号 | 类型 | 标题 | 来源工程 | 状态 | 更新 |",
+                      "|---|---|---|---|---|---|"]
+            for entry in sorted(group, key=lambda e: (e["type"], e["id"])):
+                title = entry["title"].replace("|", "\\|")
+                if entry["proposal"]:
+                    title += " *(建议扩展)*"
+                lines.append("| [%s](%s) | %s | %s | %s | %s | %s |" % (
+                    entry["id"],
+                    entry["rel"].replace("Feedback/", ""),
+                    entry["type"],
+                    title,
+                    entry["source"],
+                    STATUS_LABEL.get(entry["status"], entry["status"]),
+                    entry["updated"] or entry["created"],
+                ))
+            lines += [""]
+
+        if group_batches:
+            lines += ["决策批件（批量清单，不参与编号）：", ""]
+            for batch in group_batches:
+                lines.append("- [%s](%s)" % (batch["name"], batch["rel"].replace("Feedback/", "")))
+            lines += [""]
 
     return "\n".join(lines)
 
@@ -212,17 +253,20 @@ def main(argv=None):
     if not os.path.isdir(FEEDBACK):
         raise SystemExit("找不到 Feedback 目录：%s" % FEEDBACK)
 
-    entries, problems = collect()
+    entries, batches, problems = collect()
     ids = next_ids(entries)
 
     if not args.check:
         os.makedirs(FEEDBACK, exist_ok=True)
         with open(os.path.join(FEEDBACK, "索引.md"), "w", encoding="utf-8", newline="\n") as handle:
-            handle.write(render(entries, problems, ids))
+            handle.write(render(entries, batches, problems, ids))
 
-    open_count = sum(1 for e in entries if e["status"] in ("open", "wontfix"))
-    done_count = sum(1 for e in entries if e["status"] == "done")
-    print("反馈 %d 条（未实现 %d / 已实现 %d）" % (len(entries), open_count, done_count))
+    def count(statuses):
+        return sum(1 for e in entries if e["status"] in statuses)
+
+    print("反馈 %d 条（待拍板 %d / 未实现 %d / 已实现 %d），决策批件 %d 份"
+          % (len(entries), count(("pending",)), count(("open", "wontfix")),
+             count(("done",)), len(batches)))
     print("下一个编号：%s" % "  ".join(sorted(ids.values())))
     if not args.check:
         print("已更新：%s" % os.path.join(FEEDBACK, "索引.md"))
