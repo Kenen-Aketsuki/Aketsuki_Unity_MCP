@@ -3,6 +3,12 @@
   "source": "Assets/Editor/ExternalCommandSystem",
   "targets": [
     {
+      "name": "project_island",
+      "root": "D:/Wrok_proj/project_island",
+      "unity": "2022.3.62f2c1",
+      "note": "工作区根与工程根同一层"
+    },
+    {
       "name": "project_island_back",
       "root": "D:/Wrok_proj/project_island_back",
       "unity": "2022.3.62f2c1",
