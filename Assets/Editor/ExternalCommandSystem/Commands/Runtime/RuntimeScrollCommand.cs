@@ -103,7 +103,11 @@ namespace CivilRev.CommandSystem.Editor
             }
 
             var before = Normalized(scroll, vertical);
-            var desired = Mathf.Clamp01(before - amount);
+            // 两个方向的 normalizedPosition 定义相反，别写成同一个表达式：
+            // 纵向 1=顶 / 0=底，「往后看」是数值变小；横向 0=左 / 1=右，「往后看」是数值变大。
+            // 写反时 mode=position 与两条回落路径都会往回滚，而拖拽主路径（stepVector 按方向分开算）
+            // 反而是对的——症状只在回落时出现，一次性冒烟很难发现。
+            var desired = vertical ? Mathf.Clamp01(before - amount) : Mathf.Clamp01(before + amount);
             data.Set("scrollRect", JsonValue.Of(SceneQuery.BuildPath(scroll.transform)));
             data.Set("scrollRectQualified", JsonValue.Of(SceneScope.QualifiedPath(scroll.transform)));
             data.Set("content", JsonValue.Of(SceneQuery.BuildPath(content)));
