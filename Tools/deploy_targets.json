@@ -24,7 +24,8 @@
       "name": "CivelRev",
       "root": "D:/Wrok_proj/CivelRev/Demo/CivilizationRevival",
       "unity": "2021.3.16f1c1",
-      "note": "工作区根是 CivelRev/Demo，工程根比它低一层"
+      "note": "工作区根是 CivelRev/Demo，工程根比它低一层",
+      "skill_root": "D:/Wrok_proj/CivelRev/Demo"
     }
   ]
 }

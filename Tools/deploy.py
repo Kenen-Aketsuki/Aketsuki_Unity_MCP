@@ -29,6 +29,12 @@
 
 5. **孤儿文件默认只报告不删**。指令文件在仓库里被删除后，目标侧会留下编译不通过的旧类；
    确认后用 --prune 清理。
+
+6. **`.workbuddy/skills/unity-cmd/` 也是部署对象**（IMPR-007，2026-10-25 拍板）。
+   MCP 客户端真正拉起的是那份 `unity_mcp_server.py`，不是 `Assets/` 里那一份；
+   以前只同步 Assets → 各工程的 SKILL.md 常年停在旧版（AI 读到的指令说明是过期的）。
+   默认开，`--no-skill` 可关。**目标那份若比仓库新（mtime 更晚）且内容不同，不覆盖**：
+   那通常意味着有人在工程里改过桥脚本，覆盖等于吃掉他的改动；报冲突，`--force-skill` 才硬写。
 """
 
 from __future__ import print_function
@@ -48,6 +54,16 @@ REPO = os.path.dirname(HERE)                                   # 仓库根 = Too
 SRC_REL = "Assets/Editor/ExternalCommandSystem"
 SRC_ROOT = os.path.join(REPO, *SRC_REL.split("/"))
 CONFIG_PATH = os.path.join(HERE, "deploy_targets.json")
+
+# MCP 桥副本：MCP 客户端拉起的是 <工程>/.workbuddy/skills/unity-cmd/scripts/unity_mcp_server.py，
+# 与 Assets/ 里那份是两回事，必须一起同步（否则 AI 读到的 SKILL.md 是上一代）。
+BRIDGE_ROOT = os.path.join(SRC_ROOT, "McpBridge")
+SKILL_DIR_REL = ".workbuddy/skills/unity-cmd"
+SKILL_FILES = [
+    ("SKILL.md", "SKILL.md"),
+    ("send.py", "scripts/send.py"),
+    ("unity_mcp_server.py", "scripts/unity_mcp_server.py"),
+]
 
 PROJECT_DIR_NAME = "Project"        # 工程专属，不参与内容同步
 SKIP_DIR_NAMES = {"__pycache__", ".git", ".vs", ".idea"}
@@ -289,6 +305,90 @@ def apply_plan(plan, dest_root, root, dry_run=False):
         for rel, _ in plan.update:
             print("      M %s" % rel)
     return written
+
+
+# ---------------------------------------------------------------- MCP 桥（skills 副本）
+
+class SkillPlan(object):
+    """`.workbuddy/skills/unity-cmd/` 的差异。"""
+
+    def __init__(self):
+        self.create = []        # (rel, src_abs)
+        self.update = []        # (rel, src_abs)
+        self.same = []          # rel
+        self.conflict = []      # (rel, 目标 mtime, 仓库 mtime)
+
+    @property
+    def dirty(self):
+        return bool(self.create or self.update or self.conflict)
+
+
+def _ts(stamp):
+    return time.strftime("%m-%d %H:%M", time.localtime(stamp))
+
+
+def build_skill_plan(root, force=False, skill_root=None):
+    """目标侧 mtime 比仓库新且内容不同 → 判冲突，不覆盖（可能是人在工程里改的）。
+
+    skill_root 默认等于工程根；CivelRev 这种工作区根比工程根高一层的，
+    配置里用 "skill_root" 单独指定（MCP 的 argv 指向工作区根那份）。
+    """
+    plan = SkillPlan()
+    base = os.path.join(skill_root or root, *SKILL_DIR_REL.split("/"))
+    for name, rel in SKILL_FILES:
+        src_abs = os.path.join(BRIDGE_ROOT, name)
+        if not os.path.isfile(src_abs):
+            continue
+        dst_abs = os.path.join(base, *rel.split("/"))
+        if not os.path.isfile(dst_abs):
+            plan.create.append((rel, src_abs))
+            continue
+        if norm(read_bytes(src_abs)) == norm(read_bytes(dst_abs)):
+            plan.same.append(rel)
+            continue
+        if not force and os.path.getmtime(dst_abs) > os.path.getmtime(src_abs):
+            plan.conflict.append((rel, os.path.getmtime(dst_abs), os.path.getmtime(src_abs)))
+            continue
+        plan.update.append((rel, src_abs))
+    return plan
+
+
+def report_skill(plan):
+    head = "    MCP 桥 %s" % SKILL_DIR_REL
+    if not plan.dirty:
+        print("%s：✓ 已同步（%d 个文件）" % (head, len(plan.same)))
+        return
+    bits = []
+    if plan.create:
+        bits.append("新建 %d" % len(plan.create))
+    if plan.update:
+        bits.append("更新 %d" % len(plan.update))
+    if plan.conflict:
+        bits.append("冲突 %d" % len(plan.conflict))
+    print("%s：%s" % (head, " · ".join(bits)))
+    for rel, _ in plan.create:
+        print("      + %s" % rel)
+    for rel, _ in plan.update:
+        print("      M %s" % rel)
+    for rel, tgt, src in plan.conflict:
+        print("      ! %s 目标那边更晚（%s > %s），不覆盖；--force-skill 才硬写"
+              % (rel, _ts(tgt), _ts(src)))
+
+
+def apply_skill_plan(plan, root, dry_run=False, skill_root=None):
+    entries = plan.create + plan.update
+    if not entries:
+        return 0
+    eol = detect_eol(root)
+    base = os.path.join(skill_root or root, *SKILL_DIR_REL.split("/"))
+    if not dry_run:
+        for rel, src_abs in entries:
+            write_atomic(os.path.join(base, *rel.split("/")), to_eol(read_bytes(src_abs), eol))
+    print("      %s %d 个文件（行尾 %s）%s"
+          % ("将写入" if dry_run else "已写入", len(entries),
+             "CRLF" if eol == b"\r\n" else "LF",
+             "：新建 %d / 更新 %d" % (len(plan.create), len(plan.update)) if plan.create else ""))
+    return len(entries)
 
 
 def install_fresh(plan, dest_root, root, dry_run=False):
@@ -656,6 +756,10 @@ def main(argv=None):
     parser.add_argument("--force-refresh", action="store_true",
                         help="编辑器不响应时，把它提到前台并按 Ctrl+R 触发导入（Windows）")
     parser.add_argument("--no-project", action="store_true", help="不处理 Project/ 客制化目录")
+    parser.add_argument("--no-skill", action="store_true",
+                        help="不同步 .workbuddy/skills/unity-cmd/（MCP 桥副本）")
+    parser.add_argument("--force-skill", action="store_true",
+                        help="MCP 桥副本即使目标侧更晚也强行覆盖")
     args = parser.parse_args(argv)
 
     if not os.path.isdir(SRC_ROOT):
@@ -675,6 +779,12 @@ def main(argv=None):
 
         plan = build_plan(dest_root)
         report_target(target, plan, True, problems)
+
+        skill_root = target.get("skill_root") or target["root"]
+        skill_plan = None if args.no_skill else build_skill_plan(
+            target["root"], force=args.force_skill, skill_root=skill_root)
+        if skill_plan is not None:
+            report_skill(skill_plan)
 
         if check_only:
             continue
@@ -704,6 +814,24 @@ def main(argv=None):
             else:
                 print("    ✓ 内容校验通过（%d 个文件与仓库一致）"
                       % (len(after.same) + len(after.meta_kept)))
+
+        if skill_plan is not None:
+            apply_skill_plan(skill_plan, target["root"], dry_run=dry_run,
+                             skill_root=skill_root)
+            if not dry_run:
+                after_skill = build_skill_plan(target["root"], force=args.force_skill,
+                                               skill_root=skill_root)
+                if after_skill.create or after_skill.update:
+                    print("    ✗ MCP 桥仍有 %d 个文件没对上：%s"
+                          % (len(after_skill.create) + len(after_skill.update),
+                             ", ".join(rel for rel, _ in
+                                       (after_skill.create + after_skill.update)[:5])))
+                    failures += 1
+                elif after_skill.conflict:
+                    print("    ! MCP 桥 %d 个文件因目标侧更晚未覆盖（见上）"
+                          % len(after_skill.conflict))
+                else:
+                    print("    ✓ MCP 桥校验通过（%d 个文件与仓库一致）" % len(after_skill.same))
 
         if args.verify:
             if run_verify(target, dest_root, force=args.force_refresh) is False:
