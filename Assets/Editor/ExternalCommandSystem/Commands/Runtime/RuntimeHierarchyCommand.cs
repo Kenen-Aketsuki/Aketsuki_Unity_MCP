@@ -35,7 +35,7 @@ namespace CivilRev.CommandSystem.Editor
     /// </summary>
     [Command("runtime.hierarchy",
         Description = "运行时层级快照：按场景分组遍历已加载场景（含运行时实例与 DontDestroyOnLoad）",
-        Usage = "root: target, scene: string, name: string, depth: int, includeInactive: bool, limit: int",
+        Usage = "root: string|object, scene: string, name: string, depth: int, includeInactive: bool, limit: int",
         EditorOnly = true, Runtime = true)]
     public sealed class RuntimeHierarchyCommand : ICommand
     {

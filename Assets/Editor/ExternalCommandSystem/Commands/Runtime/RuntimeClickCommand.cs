@@ -33,7 +33,7 @@ namespace CivilRev.CommandSystem.Editor
     /// </summary>
     [Command("runtime.click",
         Description = "模拟点击：EventSystem 注入 pointerDown/Up/Click，可按节点或屏幕坐标",
-        Usage = "target: target, position: [x,y], button: left|right|middle, clicks: int, direct: bool",
+        Usage = "target: string|object, position: [x,y], button: left|right|middle, clicks: int, direct: bool",
         EditorOnly = true, Runtime = true)]
     public sealed class RuntimeClickCommand : ICommand
     {

@@ -28,7 +28,7 @@ namespace CivilRev.CommandSystem.Editor
     /// </summary>
     [Command("runtime.input",
         Description = "给运行时输入框写值（TMP_InputField / InputField），可触发提交回调",
-        Usage = "target: target, text: string, append: bool, submit: bool",
+        Usage = "target: string|object, text: string, append: bool, submit: bool",
         EditorOnly = true, Runtime = true)]
     public sealed class RuntimeInputCommand : ICommand
     {

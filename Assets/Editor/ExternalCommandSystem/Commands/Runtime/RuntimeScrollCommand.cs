@@ -33,7 +33,7 @@ namespace CivilRev.CommandSystem.Editor
     /// </summary>
     [Command("runtime.scroll",
         Description = "模拟滚动/拖动列表：向 ScrollRect 注入拖拽事件（可回落为直接设位置）",
-        Usage = "target: target, direction: vertical|horizontal, amount: float, mode: drag|position, steps: int",
+        Usage = "target: string|object, direction: vertical|horizontal, amount: float, mode: drag|position, steps: int",
         EditorOnly = true, Runtime = true)]
     public sealed class RuntimeScrollCommand : ICommand
     {
