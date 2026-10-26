@@ -222,7 +222,9 @@ namespace CivilRev.CommandSystem.Editor
     /// </para>
     /// </summary>
     [Command("ui.image", Description = "创建一个 Image 节点（切图或纯色）",
-        Usage = "name, parent, sprite, nativeSize, type, color, size:[w,h], anchoredPosition:[x,y], polar:[r,deg]",
+        Usage = "name: string, parent: string, sprite: string, nativeSize: bool, type: string, "
+                + "color: string|array, size:[w,h], anchoredPosition:[x,y], polar:[r,deg], "
+                + "preserveAspect: bool, raycastTarget: bool, select: bool",
         EditorOnly = true)]
     public sealed class CreateImageCommand : ICommand
     {
@@ -271,7 +273,8 @@ namespace CivilRev.CommandSystem.Editor
     /// <para>参数：name、parent/canvas、布局、select。用来给一组子节点做统一的缩放/位移锚点。</para>
     /// </summary>
     [Command("ui.node", Description = "创建一个空容器节点（RectTransform，无图形组件）",
-        Usage = "name, parent, size:[w,h], anchoredPosition:[x,y], scale", EditorOnly = true)]
+        Usage = "name: string, parent: string, size:[w,h], anchoredPosition:[x,y], scale: number|array, select: bool",
+        EditorOnly = true)]
     public sealed class CreateNodeCommand : ICommand
     {
         public CommandResult Execute(CommandContext context)
@@ -292,7 +295,9 @@ namespace CivilRev.CommandSystem.Editor
     /// <para>参数：name、parent/canvas、text、fontSize、color、align（left/center/right/top/bottom）、bold、布局</para>
     /// </summary>
     [Command("ui.text", Description = "创建一个 Text 节点",
-        Usage = "name, parent, text, fontSize, color, align, bold, font", EditorOnly = true)]
+        Usage = "name: string, parent: string, text: string, fontSize: int, color: string|array, "
+                + "align: string, bold: bool, font: string, raycastTarget: bool, select: bool",
+        EditorOnly = true)]
     public sealed class CreateTextCommand : ICommand
     {
         public CommandResult Execute(CommandContext context)
@@ -337,7 +342,9 @@ namespace CivilRev.CommandSystem.Editor
     /// </para>
     /// </summary>
     [Command("ui.button", Description = "创建一个 Button 节点（仅结构，不接逻辑）",
-        Usage = "name, parent, label, size:[w,h], anchoredPosition:[x,y], color, textColor, fontSize, tmp, tmpFont",
+        Usage = "name: string, parent: string, label: string, size:[w,h], anchoredPosition:[x,y], "
+                + "color: string|array, textColor: string|array, fontSize: int, bold: bool, "
+                + "tmp: bool, tmpFont: string, font: string, select: bool",
         EditorOnly = true)]
     public sealed class CreateButtonCommand : ICommand
     {

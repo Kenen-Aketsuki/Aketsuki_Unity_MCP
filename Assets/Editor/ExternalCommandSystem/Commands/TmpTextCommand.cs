@@ -20,7 +20,9 @@ namespace CivilRev.CommandSystem.Editor
     /// </para>
     /// </summary>
     [Command("ui.tmpText", Description = "创建/更新一个 TextMeshPro 文本节点（同名已存在则改属性）",
-        Usage = "name, parent, text, fontSize, color, align, font, bold, wrap", EditorOnly = true)]
+        Usage = "name: string, parent: string, text: string, fontSize: number, color: string|array, "
+                + "align: string, font: string, bold: bool, wrap: bool, select: bool",
+        EditorOnly = true)]
     public sealed class CreateTmpTextCommand : ICommand
     {
         /// <summary>默认字体资源所在目录</summary>

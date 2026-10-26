@@ -457,7 +457,7 @@ namespace CivilRev.CommandSystem
     /// </para>
     /// </summary>
     [Command("gameobject.instantiate", Description = "实例化 Prefab 到场景（保留 Prefab 连接）",
-        Usage = "asset: string, parent: string, name: string, size:[w,h], anchoredPosition:[x,y], scale, select: bool",
+        Usage = "asset: string, parent: string, name: string, size:[w,h], anchoredPosition:[x,y], scale: number|array, select: bool",
         EditorOnly = true)]
     public sealed class InstantiatePrefabCommand : ICommand
     {

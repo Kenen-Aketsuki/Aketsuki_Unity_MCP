@@ -300,27 +300,57 @@ def _split_top_level(text, sep=","):
     return parts
 
 
+_TYPE_ALIASES = {
+    "bool": "boolean",
+    "boolean": "boolean",
+    "int": "integer",
+    "integer": "integer",
+    "long": "integer",
+    "float": "number",
+    "double": "number",
+    "number": "number",
+    "string": "string",
+    "str": "string",
+    "object": "object",
+    "dict": "object",
+}
+
+
+def _split_type_token(text):
+    """把类型片段拆成「类型名」+「其余说明」。
+
+    usage 里的类型名后面经常挂着中文括注（`string（Prefab 模式下空串=根）`），
+    也可能写成多候选（`int|string`）。拿整段去比对类型名的话这两种都会失配，
+    后果是**最常见的 `target: string` 退化成"任意 JSON 值"**——typed 工具因此
+    丢掉了本该有的参数类型。这里只取开头的 ASCII 标识符当类型名，后面原样保留。
+    """
+    i = 0
+    while i < len(text) and text[i].isascii() and (text[i].isalnum() or text[i] == "_"):
+        i += 1
+    return text[:i], text[i:]
+
+
 def _type_to_schema(type_text):
     text = (type_text or "").strip()
-    lowered = text.lower()
 
     if "[" in text:
         # [x,y,z] / [...] / [w,h] —— 一律当数组；元素类型无法从 usage 精确得知
         return {"type": "array", "description": text}
-    if lowered in ("bool", "boolean"):
-        return {"type": "boolean"}
-    if lowered in ("int", "integer", "long"):
-        return {"type": "integer"}
-    if lowered in ("float", "double", "number"):
-        return {"type": "number"}
-    if lowered in ("string", "str"):
-        return {"type": "string"}
-    if lowered in ("object", "dict"):
-        return {"type": "object"}
-    if lowered in ("any", ""):
-        return {"description": text or "任意 JSON 值"}
-    # 未知类型：不限制，只把原文写进描述
-    return {"description": text}
+
+    name, rest = _split_type_token(text)
+    schema_type = _TYPE_ALIASES.get(name.lower())
+
+    if schema_type is None:
+        # 未知类型（target / vertical|horizontal / any / 空）：不限制，把原文写进描述
+        if not text:
+            return {"description": "任意 JSON 值"}
+        return {"description": text if name.lower() != "any" else text + "（任意 JSON 值）"}
+
+    if not rest:
+        return {"type": schema_type}
+
+    # 多候选（int|string）与中文括注都保留进描述，别把调用方要的信息丢掉
+    return {"type": schema_type, "description": text}
 
 
 def usage_to_schema(usage):
