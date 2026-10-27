@@ -2,7 +2,7 @@ using System;
 using System.IO;
 using UnityEditor;
 
-namespace CivilRev.CommandSystem.Editor
+namespace CivilRev.AdbDebugger
 {
     /// <summary>
     /// 找 <c>adb</c> 可执行文件的位置。
@@ -41,7 +41,7 @@ namespace CivilRev.CommandSystem.Editor
             source = string.Empty;
 
             // 1) 控制台里手填的路径。允许填目录（省得记文件名），自动补 adb.exe
-            var configured = (CommandSystemSettings.AdbPath ?? string.Empty).Trim();
+            var configured = (AdbDebuggerSettings.AdbPath ?? string.Empty).Trim();
             if (configured.Length > 0)
             {
                 var candidate = Directory.Exists(configured)

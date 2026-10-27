@@ -80,10 +80,13 @@ BRIDGE_NAMES = [
     ("SKILL.md", "SKILL.md"),
 ]
 
+# 技能目录名（.workbuddy/skills/<这个名字>/）：老布局下桥脚本落在这里
+SKILL_NAME = "unity-cmd"
+
 
 def resolve_bridge_sources():
     asset_bridge = os.path.join(CS_SOURCE, BRIDGE_DIR_IN_PKG)
-    skill_dir = os.path.join(UNITY_PROJECT, ".workbuddy", "skills", "unity-cmd")
+    skill_dir = os.path.join(UNITY_PROJECT, ".workbuddy", "skills", SKILL_NAME)
     resolved = []
     for name, skill_rel in BRIDGE_NAMES:
         candidates = [
@@ -96,6 +99,95 @@ def resolve_bridge_sources():
 
 
 BRIDGE_SOURCES = resolve_bridge_sources()
+
+
+def apply_module(name):
+    """切换要打包的模块：mcp（默认）或 adb。
+
+    两个工具是并列关系，各有自己的源码根、桥脚本、技能目录与包名。
+    """
+    global PKG_ROOT, CS_SOURCE, BRIDGE_DIR_IN_PKG, BRIDGE_NAMES, SKILL_NAME
+    global PROJECT_COUPLED_IN_PKG, PROJECT_COUPLED_DIR_NAME, BRIDGE_SOURCES
+    global PKG_NAME, DEFAULT_OUTPUT, ACTIVE_MODULE, SERVER_SCRIPT
+    global SKILL_FILES, ENTRY_CONSOLE, ENTRY_HTTP, REQUIRES
+
+    if name == "adb":
+        ACTIVE_MODULE = "adb"
+        PKG_ROOT = "Assets/Editor/AdbDebugger"
+        CS_SOURCE = os.path.join(UNITY_PROJECT, "Assets", "Editor", "AdbDebugger")
+        BRIDGE_DIR_IN_PKG = "AdbBridge"
+        BRIDGE_NAMES = [
+            ("adb_mcp_server.py", "scripts/adb_mcp_server.py"),
+            ("adb_cli.py", "scripts/adb_cli.py"),
+            ("install_bridge.py", "scripts/install_bridge.py"),
+            ("SKILL.md", "SKILL.md"),
+        ]
+        # 装到 <工程>/.workbuddy/skills/adb-cmd/ 的是这几份 —— (包内桥目录里的相对路径, 技能目录里的路径)。
+        # **两边路径不一样**：桥在 Assets 里是平铺的（Unity 只把它当 DefaultAsset），
+        # 技能目录要求 python 落在 scripts/ 下。install_bridge.py 不进技能目录：
+        # 它是"装"这个动作本身，装完留在桥目录即可，技能目录里放它纯属噪声。
+        SKILL_FILES = [
+            ("adb_mcp_server.py", "scripts/adb_mcp_server.py"),
+            ("adb_cli.py", "scripts/adb_cli.py"),
+            ("SKILL.md", "SKILL.md"),
+        ]
+        SKILL_NAME = "adb-cmd"
+        SERVER_SCRIPT = "adb_mcp_server.py"
+        ENTRY_CONSOLE = "Tools / ADB 调试 / ADB 调试台"
+        ENTRY_HTTP = "Tools / ADB 调试 / ADB 调试台（服务段，含令牌与端口）"
+        REQUIRES = [
+            "Unity 2021.3 及以上",
+            "adb 可执行文件（Android SDK platform-tools，可在设置里填完整路径）",
+            "Python 3.8 及以上（仅 MCP 桥 / 命令行客户端需要）",
+        ]
+        # ADB 工具没有工程客制化目录；指向一个不存在的路径，终检自然恒过
+        PROJECT_COUPLED_IN_PKG = PKG_ROOT + "/Project"
+        PROJECT_COUPLED_DIR_NAME = "Project"
+        PKG_NAME = "Aketsuki_AdbDebugger"
+        DEFAULT_OUTPUT = os.path.join(HERE, "UnityPackage", PKG_NAME + "-" + PKG_VERSION + ".unitypackage")
+    else:
+        ACTIVE_MODULE = "mcp"
+        PKG_ROOT = "Assets/Editor/ExternalCommandSystem"
+        CS_SOURCE = os.path.join(UNITY_PROJECT, "Assets", "Editor", "ExternalCommandSystem")
+        BRIDGE_DIR_IN_PKG = "McpBridge"
+        BRIDGE_NAMES = [
+            ("send.py", "scripts/send.py"),
+            ("unity_mcp_server.py", "scripts/unity_mcp_server.py"),
+            ("SKILL.md", "SKILL.md"),
+        ]
+        SKILL_NAME = "unity-cmd"
+        SERVER_SCRIPT = "unity_mcp_server.py"
+        SKILL_FILES = [
+            ("send.py", "scripts/send.py"),
+            ("unity_mcp_server.py", "scripts/unity_mcp_server.py"),
+            ("SKILL.md", "SKILL.md"),
+        ]
+        ENTRY_CONSOLE = "Tools / 指令系统 / 指令控制台"
+        ENTRY_HTTP = "Tools / 指令系统 / HTTP 指令服务"
+        REQUIRES = ["Unity 2021.3 及以上", "Python 3.8 及以上（仅 MCP 桥需要）"]
+        PROJECT_COUPLED_IN_PKG = PKG_ROOT + "/Project"
+        PROJECT_COUPLED_DIR_NAME = "Project"
+        PKG_NAME = "Aketsuki_Unity_MCP"
+        DEFAULT_OUTPUT = os.path.join(HERE, "UnityPackage", "UnityCommandBridge.unitypackage")
+
+    BRIDGE_SOURCES = resolve_bridge_sources()
+
+
+ACTIVE_MODULE = "mcp"
+SERVER_SCRIPT = "unity_mcp_server.py"
+
+# 装到 `<工程>/.workbuddy/skills/<SKILL_NAME>/` 的文件，形如 (包内桥目录里的相对路径, 技能目录里的路径)——
+# **两者常不一样**（桥在 Assets 里平铺，技能目录要求 python 落在 scripts/ 下）。
+# 以及清单里记的菜单入口与依赖说明。这些都是**按模块变**的，由 apply_module 覆盖——
+# install_unitypackage.py 读清单里的 skillName / skillFiles 决定往哪写，不再硬编码。
+SKILL_FILES = [
+    ("send.py", "scripts/send.py"),
+    ("unity_mcp_server.py", "scripts/unity_mcp_server.py"),
+    ("SKILL.md", "SKILL.md"),
+]
+ENTRY_CONSOLE = "Tools / 指令系统 / 指令控制台"
+ENTRY_HTTP = "Tools / 指令系统 / HTTP 指令服务"
+REQUIRES = ["Unity 2021.3 及以上", "Python 3.8 及以上（仅 MCP 桥需要）"]
 
 # 包内只允许出现这两类内容：ECS（编辑器侧）+ McpBridge（桥脚本）。
 # **绝不收工程运行期代码**——MCP 与工程完全解耦，工程可选地通过反射约定
@@ -298,8 +390,8 @@ def collect_folders(file_paths, warnings):
             with open(disk_meta, "r", encoding="utf-8") as handle:
                 meta_text = handle.read()
         else:
-            # 虚拟目录（McpBridge）：磁盘上没有，生成新 guid
-            if not folder.endswith("/McpBridge"):
+            # 虚拟目录（桥脚本）：磁盘上没有，生成新 guid
+            if not folder.endswith("/" + BRIDGE_DIR_IN_PKG):
                 warnings.append("目录缺 .meta，已生成新 GUID：%s" % folder)
             guid = uuid.uuid4().hex
             meta_text = folder_meta(guid)
@@ -336,17 +428,23 @@ def build_manifest(name, version, author, built, file_count, output_name, warnin
         "version": version,
         "author": author,
         "built": built,
+        # 哪个工具的包：安装器据此选技能目录 / 兜底布局，比按文件名猜稳
+        "module": ACTIVE_MODULE,
         "unityVersion": read_unity_version(),
         "packageFile": output_name,
         "installRoot": PKG_ROOT,
         "files": file_count,
         "entrypoints": {
-            "console": "Tools / 指令系统 / 指令控制台",
-            "httpServer": "Tools / 指令系统 / HTTP 指令服务",
-            "mcpBridge": PKG_ROOT + "/McpBridge/unity_mcp_server.py",
-            "skillDoc": PKG_ROOT + "/McpBridge/SKILL.md",
+            "console": ENTRY_CONSOLE,
+            "httpServer": ENTRY_HTTP,
+            "mcpBridge": PKG_ROOT + "/" + BRIDGE_DIR_IN_PKG + "/" + SERVER_SCRIPT,
+            "skillDoc": PKG_ROOT + "/" + BRIDGE_DIR_IN_PKG + "/SKILL.md",
         },
-        "requires": ["Unity 2021.3 及以上", "Python 3.8 及以上（仅 MCP 桥需要）"],
+        # 安装器据此决定把桥同步到 `.workbuddy/skills/<skillName>/` 的哪几份文件、各叫什么路径。
+        # 老包（v1.0）没有这几个字段，安装器有回落规则，不是必需的。
+        "skillName": SKILL_NAME,
+        "skillFiles": [{"from": src, "to": dst} for src, dst in SKILL_FILES],
+        "requires": list(REQUIRES),
     }
     text = json.dumps(manifest, ensure_ascii=False, indent=2) + "\n"
     path_in_pkg = PKG_ROOT + "/" + MANIFEST_REL
@@ -422,6 +520,82 @@ python <工程根>/.workbuddy/skills/unity-cmd/scripts/send.py status
 包内 `{installRoot}/package.json` 是版本凭据。`install.py` 会把它和工程里已有的对比。
 **不要拿旧包覆盖新工程**：本安装器只增不删，旧包会把被改过的文件回退、却留下新增文件，
 结果是编译不过的混合态。
+"""
+
+
+BUNDLE_DOC_ADB = """# {name} v{version} — 部署说明
+
+> 作者：{author}　打包日期：{built}　Unity：{unity}
+> 本文件由 `Tools/build_unitypackage.py --module adb --bundle` 自动生成，勿手改。
+
+## 这个目录是什么
+
+**ADB 调试工具**的可分包。它与「Unity MCP 指令系统」（`Aketsuki_Unity_MCP`）是**两个独立的工具**：
+同一台机器、同一个 Unity 工程里可以两个都装，也可以只装这一个。两者不共享任何代码。
+
+接收方只要有 `{name}-{version}.unitypackage` 和本目录里的 `install.py` 就能装。
+
+## 装到指定工程
+
+```bash
+python install.py --project D:/路径/到/Unity工程根 --dry-run   # 先看会写入什么
+python install.py --project D:/路径/到/Unity工程根             # 落地
+```
+
+`--project` 指向含 `Assets/` 和 `ProjectSettings/` 的那一层。
+
+它会做两件事：
+
+1. 把包内 {files} 个资产解包到 `<工程>/{installRoot}/`
+2. 把 MCP 桥同步到 `<工程>/.workbuddy/skills/{skillName}/`（`scripts/adb_mcp_server.py`、
+   `scripts/adb_cli.py`、`SKILL.md`——`install_bridge.py` 不进技能目录，它的活已经干完了）。
+   不需要就加 `--no-skill`。
+
+规则：**只新增/覆盖，绝不删除**；目标工程已有的 `.meta` 一律保留（保住旧 GUID）。
+
+## 装完还要让它生效
+
+1. **让 Unity 刷新**：聚焦 Unity 窗口自动导入。
+2. **开调试服务**：菜单 `Tools / ADB 调试 / ADB 调试台`，勾「启用调试服务」（端口默认 57841 起避让）。
+3. **接 MCP（可选）**：菜单 `Tools / ADB 调试 / 安装 MCP 桥（写入 mcp.json）`，
+   它会调用 `install_bridge.py` 把条目写进 `~/.workbuddy/mcp.json`：
+
+```json
+"adb-debug-你的工程名": {{
+  "command": "python",
+  "args": [
+    "<工程根>/.workbuddy/skills/{skillName}/scripts/adb_mcp_server.py",
+    "--project-root", "<工程根>"
+  ],
+  "env": {{ "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1" }}
+}}
+```
+
+写完到连接器管理页对 `adb-debug-你的工程名` 点信任。
+
+## 自检
+
+```bash
+python <工程根>/.workbuddy/skills/{skillName}/scripts/adb_cli.py status
+```
+
+能看到端口与抓取状态就通了。AI 侧只有两个工具：`adb_status`、`adb_logcat`。
+
+## 和指令系统的关系
+
+| | Unity MCP 指令系统 | 本工具 |
+| --- | --- | --- |
+| 默认端口 | 57831 | 57841 |
+| 信息文件 | `.workbuddy/UnityEditCommand/.http-info.*` | `.workbuddy/AdbDebug/.adb-info.*` |
+| 技能目录 | `.workbuddy/skills/unity-cmd/` | `.workbuddy/skills/{skillName}/` |
+
+两者唯一的交集在 Unity 控制台：本工具把设备日志以 `[ADB] ` 前缀打进控制台，
+装了指令系统时 AI 可以用 `console.read` 读到；没装时人在 Console 里照样看得到。
+
+## 版本
+
+包内 `{installRoot}/package.json` 是版本凭据。**不要拿旧包覆盖新工程**：
+安装器只增不删，旧包会把改过的文件回退、却留下新增文件，结果可能是编译不过的混合态。
 """
 
 
@@ -513,7 +687,8 @@ def write_bundle(package_path, name, version, author, built, install_root, file_
     target_pkg = os.path.join(dist_dir, package_name)
     shutil.copy2(package_path, target_pkg)
 
-    # 安装器：源码唯一，原样拷贝（它按"同级唯一的 .unitypackage"自动定位，不需要改路径）
+    # 安装器：源码唯一，原样拷贝。它从包内 package.json 读 installRoot / skillName / skillFiles，
+    # 不写死路径，所以两个工具的包共用这一份；同目录有多个包时靠 --module / -p 指定。
     with open(os.path.join(HERE, "install_unitypackage.py"), "r", encoding="utf-8") as handle:
         source = handle.read()
     source = source.replace(
@@ -524,9 +699,11 @@ def write_bundle(package_path, name, version, author, built, install_root, file_
     with open(os.path.join(dist_dir, "install.py"), "w", encoding="utf-8") as handle:
         handle.write(source)
 
-    doc = BUNDLE_DOC.format(name=name, version=version, author=author, built=built,
-                            unity=read_unity_version() or "未记录",
-                            files=file_count, installRoot=install_root)
+    template = BUNDLE_DOC_ADB if ACTIVE_MODULE == "adb" else BUNDLE_DOC
+    doc = template.format(name=name, version=version, author=author, built=built,
+                          unity=read_unity_version() or "未记录",
+                          files=file_count, installRoot=install_root,
+                          skillName=SKILL_NAME)
     with open(os.path.join(dist_dir, "DEPLOY.md"), "w", encoding="utf-8") as handle:
         handle.write(doc)
 
@@ -548,7 +725,9 @@ def write_bundle(package_path, name, version, author, built, install_root, file_
 def main(argv=None):
     parser = argparse.ArgumentParser(description="把 ExternalCommandSystem + MCP 桥打成 .unitypackage")
     parser.add_argument("-o", "--output", help="输出文件路径（默认 Tools/UnityPackage/<名称>-<版本>.unitypackage）")
-    parser.add_argument("--name", default=PKG_NAME, help="包名称（默认 %s）" % PKG_NAME)
+    parser.add_argument("--module", choices=("mcp", "adb"), default="mcp",
+                        help="打包哪个工具：mcp（默认，ExternalCommandSystem）或 adb（AdbDebugger）")
+    parser.add_argument("--name", default=None, help="包名称（默认按模块自动取）")
     parser.add_argument("--version", default=PKG_VERSION, help="版本号（默认 %s）" % PKG_VERSION)
     parser.add_argument("--author", default=PKG_AUTHOR, help="作者（默认 %s）" % PKG_AUTHOR)
     parser.add_argument("--built", default=datetime.date.today().isoformat(),
@@ -558,15 +737,19 @@ def main(argv=None):
     parser.add_argument("--list-only", action="store_true", help="只列出将要打包的文件，不生成")
     args = parser.parse_args(argv)
 
+    apply_module(args.module)
+    name = args.name or PKG_NAME
+    print("模块：%s（%s）" % (args.module, CS_SOURCE))
+
     output = args.output or os.path.join(
-        HERE, "UnityPackage", "%s-%s.unitypackage" % (args.name, args.version))
+        HERE, "UnityPackage", "%s-%s.unitypackage" % (name, args.version))
 
     warnings = []
     assets = collect_csharp(warnings)
     assets += collect_bridge(warnings)
 
     file_count = sum(1 for a in assets if not a.is_folder) + 1   # +1 = 清单自身
-    assets.append(build_manifest(args.name, args.version, args.author, args.built,
+    assets.append(build_manifest(name, args.version, args.author, args.built,
                                  file_count, os.path.basename(output), warnings))
     assets += collect_folders([a.path_in_pkg for a in assets], warnings)
 
@@ -589,11 +772,11 @@ def main(argv=None):
     size_kb = os.path.getsize(output) / 1024.0
 
     print("已生成：%s" % os.path.abspath(output))
-    print("  %s v%s（%s）作者 %s" % (args.name, args.version, args.built, args.author))
+    print("  %s v%s（%s）作者 %s" % (name, args.version, args.built, args.author))
     print("  资产 %d 个（%d 文件 + %d 目录），%.1f KB" % (len(assets), files, folders, size_kb))
 
     if args.bundle:
-        write_bundle(output, args.name, args.version, args.author, args.built,
+        write_bundle(output, name, args.version, args.author, args.built,
                      PKG_ROOT, file_count, warnings)
 
     for message in warnings:

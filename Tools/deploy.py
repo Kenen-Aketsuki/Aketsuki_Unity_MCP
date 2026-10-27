@@ -51,19 +51,72 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)                                   # 仓库根 = Tools/ 的上一级
-SRC_REL = "Assets/Editor/ExternalCommandSystem"
-SRC_ROOT = os.path.join(REPO, *SRC_REL.split("/"))
 CONFIG_PATH = os.path.join(HERE, "deploy_targets.json")
 
-# MCP 桥副本：MCP 客户端拉起的是 <工程>/.workbuddy/skills/unity-cmd/scripts/unity_mcp_server.py，
-# 与 Assets/ 里那份是两回事，必须一起同步（否则 AI 读到的 SKILL.md 是上一代）。
-BRIDGE_ROOT = os.path.join(SRC_ROOT, "McpBridge")
-SKILL_DIR_REL = ".workbuddy/skills/unity-cmd"
-SKILL_FILES = [
-    ("SKILL.md", "SKILL.md"),
-    ("send.py", "scripts/send.py"),
-    ("unity_mcp_server.py", "scripts/unity_mcp_server.py"),
-]
+# 两个并列的工具，各有自己的源码根、MCP 桥副本、技能目录与程序集。
+# 它们共用同一批目标工程，但互不依赖：可以只部署其中一个（--module adb）。
+MODULES = {
+    "mcp": {
+        "title": "Unity MCP 指令系统",
+        "src_rel": "Assets/Editor/ExternalCommandSystem",
+        "bridge": "McpBridge",
+        "skill_dir_rel": ".workbuddy/skills/unity-cmd",
+        "skill_files": [
+            ("SKILL.md", "SKILL.md"),
+            ("send.py", "scripts/send.py"),
+            ("unity_mcp_server.py", "scripts/unity_mcp_server.py"),
+        ],
+        "assembly": "Assembly-CSharp-Editor",
+        "has_project_dir": True,
+    },
+    "adb": {
+        "title": "ADB 调试",
+        "src_rel": "Assets/Editor/AdbDebugger",
+        "bridge": "AdbBridge",
+        "skill_dir_rel": ".workbuddy/skills/adb-cmd",
+        "skill_files": [
+            ("SKILL.md", "SKILL.md"),
+            ("adb_mcp_server.py", "scripts/adb_mcp_server.py"),
+            ("adb_cli.py", "scripts/adb_cli.py"),
+        ],
+        # 本工具带 asmdef，不并入 Assembly-CSharp-Editor，编译校验必须点名
+        "assembly": "CivilRev.AdbDebugger.Editor",
+        "has_project_dir": False,
+    },
+}
+
+ACTIVE_MODULE = "mcp"
+
+# 下面这几个由 apply_module() 按当前模块填；保留模块级变量是为了让各函数不必层层传参
+SRC_REL = ""
+SRC_ROOT = ""
+BRIDGE_ROOT = ""
+SKILL_DIR_REL = ""
+SKILL_FILES = []
+ASSEMBLY = ""
+HAS_PROJECT_DIR = True
+
+
+def apply_module(name):
+    """切换当前部署的模块（mcp / adb）"""
+    global ACTIVE_MODULE, SRC_REL, SRC_ROOT, BRIDGE_ROOT
+    global SKILL_DIR_REL, SKILL_FILES, ASSEMBLY, HAS_PROJECT_DIR
+
+    if name not in MODULES:
+        raise SystemExit("未知模块：%s（可选：%s）" % (name, "、".join(MODULES)))
+
+    module = MODULES[name]
+    ACTIVE_MODULE = name
+    SRC_REL = module["src_rel"]
+    SRC_ROOT = os.path.join(REPO, *SRC_REL.split("/"))
+    BRIDGE_ROOT = os.path.join(SRC_ROOT, module["bridge"])
+    SKILL_DIR_REL = module["skill_dir_rel"]
+    SKILL_FILES = module["skill_files"]
+    ASSEMBLY = module["assembly"]
+    HAS_PROJECT_DIR = module["has_project_dir"]
+
+
+apply_module("mcp")
 
 PROJECT_DIR_NAME = "Project"        # 工程专属，不参与内容同步
 SKIP_DIR_NAMES = {"__pycache__", ".git", ".vs", ".idea"}
@@ -216,7 +269,8 @@ def probe_target(target):
         problems.append("不是 Unity 工程（缺 Assets/）")
     elif not os.path.isdir(os.path.join(root, "ProjectSettings")):
         problems.append("不是 Unity 工程（缺 ProjectSettings/）")
-    dest = os.path.join(root, "Assets", "Editor", "ExternalCommandSystem")
+    # 目标路径与源码路径一一对应：两个工具分别是 Assets/Editor/ExternalCommandSystem 与 .../AdbDebugger
+    dest = os.path.join(root, *SRC_REL.split("/"))
     return dest, problems
 
 
@@ -433,6 +487,10 @@ def install_fresh(plan, dest_root, root, dry_run=False):
 
 def ensure_project_dir(dest_root, dry_run=False):
     """确保目标工程有自己的 Project/（工程专属目录 + 占位说明）。"""
+    if not HAS_PROJECT_DIR:
+        # ADB 调试工具没有工程客制化目录，别给它凭空造一个
+        return
+
     proj = os.path.join(dest_root, PROJECT_DIR_NAME)
     readme = os.path.join(proj, "README.md")
     created = []
@@ -519,15 +577,24 @@ def run_offline_compile(target):
     比 HTTP compile 可靠：不依赖编辑器在跑、不吃域重载、2~4 秒出结论。
     代价是只验证"能编译"，不验证导入结果与资源引用。
     """
-    compiler = find_offline_compiler()
-    if not compiler:
-        print("    ! 没找到离线编译工具（unity_offline_compile.py），跳过")
-        return None
-    print("    离线编译校验（Assembly-CSharp-Editor）……")
+    if ACTIVE_MODULE == "adb":
+        # asmdef 程序集没有 Unity 生成的 csproj 时，通用工具认不出来，走专用脚本
+        print("    离线编译校验（%s，asmdef 程序集）……" % ASSEMBLY)
+        script = os.path.join(HERE, "compile_adb.py")
+        if not os.path.isfile(script):
+            print("    ! 找不到 Tools/compile_adb.py，跳过")
+            return None
+        command = [sys.executable, script, "--project", target["root"]]
+    else:
+        compiler = find_offline_compiler()
+        if not compiler:
+            print("    ! 没找到离线编译工具（unity_offline_compile.py），跳过")
+            return None
+        print("    离线编译校验（%s）……" % ASSEMBLY)
+        command = [sys.executable, compiler, "--project", target["root"], ASSEMBLY]
+
     try:
-        proc = subprocess.run([sys.executable, compiler, "--project", target["root"],
-                               "Assembly-CSharp-Editor"],
-                              capture_output=True, text=True, timeout=600)
+        proc = subprocess.run(command, capture_output=True, text=True, timeout=600)
     except subprocess.TimeoutExpired:
         print("    ! 离线编译超时")
         return False
@@ -743,9 +810,12 @@ def main(argv=None):
     _utf8_stdout()
     parser = argparse.ArgumentParser(
         prog="deploy.py",
-        description="把 Assets/Editor/ExternalCommandSystem 同步部署到配置里的 Unity 工程",
+        description="把指定模块（Unity MCP 指令系统 / ADB 调试）同步部署到配置里的 Unity 工程",
     )
     parser.add_argument("targets", nargs="*", help="目标名字（支持子串匹配）；省略=全部")
+    parser.add_argument("--module", choices=sorted(MODULES), default="mcp",
+                        help="部署哪个工具：mcp（默认，Assets/Editor/ExternalCommandSystem）"
+                             " 或 adb（Assets/Editor/AdbDebugger）")
     parser.add_argument("--list", action="store_true", help="只列出目标与状态")
     parser.add_argument("--check", action="store_true", help="只报告差异，不写文件")
     parser.add_argument("--dry-run", action="store_true", help="显示将写入哪些文件，不动磁盘")
@@ -761,6 +831,9 @@ def main(argv=None):
     parser.add_argument("--force-skill", action="store_true",
                         help="MCP 桥副本即使目标侧更晚也强行覆盖")
     args = parser.parse_args(argv)
+
+    apply_module(args.module)
+    print("模块：%s（%s）" % (MODULES[ACTIVE_MODULE]["title"], SRC_REL))
 
     if not os.path.isdir(SRC_ROOT):
         raise SystemExit("源目录不存在：%s" % SRC_ROOT)

@@ -8,13 +8,13 @@ using UnityEditor;
 using UnityEngine;
 using Debug = UnityEngine.Debug;
 
-namespace CivilRev.CommandSystem.Editor
+namespace CivilRev.AdbDebugger
 {
     /// <summary>
     /// ADB logcat 抓取服务：把 Android 真机 / 模拟器的日志**逐条**打进 Unity 控制台。
     ///
     /// <para>
-    /// <b>开关默认关闭，按工程保存</b>（<see cref="CommandSystemSettings.AdbLogcatEnabled"/>）。
+    /// <b>开关默认关闭，按工程保存</b>（<see cref="AdbDebuggerSettings.LogcatEnabled"/>）。
     /// 关着的时候一个进程都不起；打开才去拉起 <c>adb logcat</c>。
     /// 开关状态就是"要不要起进程"这一个事实的唯一来源，控制台、菜单、<c>adb.logcat</c> 指令
     /// 改的都是它，没有第二份状态。
@@ -47,7 +47,7 @@ namespace CivilRev.CommandSystem.Editor
         /// <summary>菜单项（与 HTTP 指令服务同级，方便找）</summary>
         internal const string MenuPath = "Tools/指令系统/ADB Logcat 日志";
 
-        /// <summary>控制台里的开关显示名（与 <see cref="CommandSystemSettings.AdbLogcatEnabled"/> 同一件事）</summary>
+        /// <summary>控制台里的开关显示名（与 <see cref="AdbDebuggerSettings.LogcatEnabled"/> 同一件事）</summary>
         internal const string ToggleLabel = "启用 ADB logcat";
 
         /// <summary>每帧最多打印多少条：翻一屏 20 条够看，又不至于在洪流里卡住编辑器</summary>
@@ -146,15 +146,15 @@ namespace CivilRev.CommandSystem.Editor
         private static int _minLevelRank = 2; // I
 
         /// <summary>
-        /// <see cref="CommandSystemSettings.AdbLogcatStackLines"/> 的缓存。
+        /// <see cref="AdbDebuggerSettings.StackLines"/> 的缓存。
         /// <para>
         /// 热路径（每行都要判定）绝不能直接读设置：getter 背后是 <c>EditorPrefs.GetInt</c>，
         /// 真机洪流下就是每秒几百次读注册表。改设置后由 <see cref="RefreshFilters"/> 刷新。
         /// </para>
         /// </summary>
-        private static int _stackLines = CommandSystemSettings.DefaultAdbStackLines;
+        private static int _stackLines = AdbDebuggerSettings.DefaultStackLines;
 
-        /// <summary><see cref="CommandSystemSettings.AdbSuppressStack"/> 的缓存，同 <see cref="_stackLines"/></summary>
+        /// <summary><see cref="AdbDebuggerSettings.SuppressStack"/> 的缓存，同 <see cref="_stackLines"/></summary>
         private static bool _suppressStack = true;
 
         /// <summary>老 adb 不认 <c>-T</c> 时的一次性降级标记</summary>
@@ -208,16 +208,10 @@ namespace CivilRev.CommandSystem.Editor
         {
             // 资源导入工作进程 / batchmode 也会执行静态构造，但它们没有主循环：
             // 在那里起 adb 会得到一个没人消费输出的孤儿进程。
-            try
+            // 这里不询问指令系统的 HttpIdentity，只看 Unity 自己的 batchmode 标志。
+            if (Application.isBatchMode)
             {
-                if (!HttpIdentity.Build().Interactive)
-                {
-                    return;
-                }
-            }
-            catch (Exception)
-            {
-                // 拿不到命令行时按交互式编辑器处理，保持可用
+                return;
             }
 
             EditorApplication.update += Tick;
@@ -326,34 +320,16 @@ namespace CivilRev.CommandSystem.Editor
             Interlocked.Exchange(ref _coalesced, 0);
         }
 
-        /// <summary>
-        /// 结构化状态，给 <c>adb.logcat status</c> 与报错结果用。
-        /// <para>只在主线程拼（会读 EditorPrefs），不要塞进 <c>/v1/status</c> 的后台拼装路径。</para>
-        /// </summary>
-        internal static JsonValue StatusJson()
+        /// <summary>被并进前一条日志的堆栈续行数</summary>
+        internal static long CoalescedCount
         {
-            var data = JsonValue.NewObject();
-            data.Set("enabled", JsonValue.Of(CommandSystemSettings.AdbLogcatEnabled));
-            data.Set("running", JsonValue.Of(IsRunning));
-            data.Set("state", JsonValue.Of(_state));
-            data.Set("adb", JsonValue.Of(_adbPath ?? string.Empty));
-            data.Set("adbSource", JsonValue.Of(_adbSource ?? string.Empty));
-            data.Set("command", JsonValue.Of(_lastCommand ?? string.Empty));
-            data.Set("serial", JsonValue.Of(CommandSystemSettings.AdbLogcatSerial ?? string.Empty));
-            data.Set("tag", JsonValue.Of(CommandSystemSettings.AdbLogcatTag ?? string.Empty));
-            data.Set("level", JsonValue.Of(CommandSystemSettings.AdbLogcatLevel ?? "I"));
-            data.Set("backfill", JsonValue.Of(CommandSystemSettings.AdbLogcatBackfill));
-            data.Set("stackLines", JsonValue.Of(CommandSystemSettings.AdbLogcatStackLines));
-            data.Set("suppressStack", JsonValue.Of(CommandSystemSettings.AdbSuppressStack));
-            data.Set("received", JsonValue.Of(ReceivedCount));
-            data.Set("printed", JsonValue.Of(PrintedCount));
-            data.Set("filtered", JsonValue.Of(FilteredCount));
-            data.Set("dropped", JsonValue.Of(DroppedCount));
-            data.Set("coalesced", JsonValue.Of(Interlocked.Read(ref _coalesced)));
-            data.Set("lastError", JsonValue.Of(_lastError ?? string.Empty));
-            data.Set("notice", JsonValue.Of(_notice ?? string.Empty));
-            data.Set("prefix", JsonValue.Of(Prefix));
-            return data;
+            get { return Interlocked.Read(ref _coalesced); }
+        }
+
+        /// <summary>adb 自己吐在 stderr 上"当前卡在哪"（典型：<c>- waiting for device -</c>）</summary>
+        internal static string Notice
+        {
+            get { return _notice; }
         }
 
         #endregion
@@ -363,25 +339,25 @@ namespace CivilRev.CommandSystem.Editor
         /// <summary>按设置恢复：开关开着才拉进程（域重载 / 编辑器启动时走这里）</summary>
         internal static void RestoreFromSettings()
         {
-            if (!CommandSystemSettings.AdbLogcatEnabled)
+            if (!AdbDebuggerSettings.LogcatEnabled)
             {
                 return;
             }
 
             if (!Start(out var error) && !string.IsNullOrEmpty(error))
             {
-                CommandLog.Error(Prefix + error);
+                AdbLog.Error(error);
             }
         }
 
         /// <summary>重新读取 tag / 级别 / 堆栈合并设置（改设置后必须调，否则要重启才生效）</summary>
         internal static void RefreshFilters()
         {
-            _tagFilter = (CommandSystemSettings.AdbLogcatTag ?? string.Empty).Trim();
-            _minLevelRank = RankOf(CommandSystemSettings.AdbLogcatLevel);
-            _stackLines = CommandSystemSettings.AdbLogcatStackLines;
+            _tagFilter = (AdbDebuggerSettings.Tag ?? string.Empty).Trim();
+            _minLevelRank = RankOf(AdbDebuggerSettings.Level);
+            _stackLines = AdbDebuggerSettings.StackLines;
 
-            var suppress = CommandSystemSettings.AdbSuppressStack;
+            var suppress = AdbDebuggerSettings.SuppressStack;
             if (_suppressStack && !suppress)
             {
                 // 刚被关掉：立刻还原，不要让用户等到下一个抑制窗口到期
@@ -392,7 +368,7 @@ namespace CivilRev.CommandSystem.Editor
         }
 
         /// <summary>
-        /// 启动抓取。成功会把 <see cref="CommandSystemSettings.AdbLogcatEnabled"/> 置为 true，
+        /// 启动抓取。成功会把 <see cref="AdbDebuggerSettings.LogcatEnabled"/> 置为 true，
         /// 让开关与"真的有进程在跑"保持一致。
         /// </summary>
         /// <param name="error">失败原因（已含怎么修）；成功时为 null</param>
@@ -480,8 +456,8 @@ namespace CivilRev.CommandSystem.Editor
             _startedAt = DateTime.Now;
             _lastError = string.Empty;
 
-            CommandSystemSettings.AdbLogcatEnabled = true;
-            CommandLog.Info(Prefix + "已启动：" + _lastCommand + "（adb 来源：" + source + "）");
+            AdbDebuggerSettings.LogcatEnabled = true;
+            AdbLog.Info("已启动：" + _lastCommand + "（adb 来源：" + source + "）");
             return true;
         }
 
@@ -547,12 +523,12 @@ namespace CivilRev.CommandSystem.Editor
 
             if (clearSetting)
             {
-                CommandSystemSettings.AdbLogcatEnabled = false;
+                AdbDebuggerSettings.LogcatEnabled = false;
             }
 
             if (!string.IsNullOrEmpty(reason))
             {
-                CommandLog.Info(Prefix + reason);
+                AdbLog.Info(reason);
             }
         }
 
@@ -561,7 +537,7 @@ namespace CivilRev.CommandSystem.Editor
         {
             var builder = new StringBuilder();
 
-            var serial = (CommandSystemSettings.AdbLogcatSerial ?? string.Empty).Trim();
+            var serial = (AdbDebuggerSettings.Serial ?? string.Empty).Trim();
             if (serial.Length > 0)
             {
                 // 序列号形如 127.0.0.1:7555，含冒号，加引号避免被当成分隔符
@@ -572,7 +548,7 @@ namespace CivilRev.CommandSystem.Editor
 
             // -T N：先补 N 行历史再跟随。0 会退化成"整个缓冲区倒出来"（可能上万行），
             // 所以 <=0 时不传这个参数交给用户自己决定，并在控制台里写明后果
-            var backfill = CommandSystemSettings.AdbLogcatBackfill;
+            var backfill = AdbDebuggerSettings.Backfill;
             if (backfill > 0 && !_legacyRetry)
             {
                 builder.Append(" -T ").Append(backfill);
@@ -590,7 +566,7 @@ namespace CivilRev.CommandSystem.Editor
             if (_noticePending)
             {
                 _noticePending = false;
-                CommandLog.Warning(Prefix + "adb 卡住了：" + _notice +
+                AdbLog.Warning("adb 卡住了：" + _notice +
                                    "。设备没连上或序列号填错时 adb 不会退出，会一直等——所以这里一条日志也不会有。");
             }
 
@@ -707,7 +683,7 @@ namespace CivilRev.CommandSystem.Editor
         /// 把一条堆栈续行并进当前日志。
         /// <para>
         /// 三种情况直接丢：① 当前没有可归属的首行（首行被过滤掉或还没到）；
-        /// ② <see cref="CommandSystemSettings.AdbLogcatStackLines"/> 为 0（用户选择完全不打印调用栈）；
+        /// ② <see cref="AdbDebuggerSettings.StackLines"/> 为 0（用户选择完全不打印调用栈）；
         /// ③ 已达合并上限。丢弃计进 <c>filtered</c>，不冒充"打印"。
         /// </para>
         /// </summary>
@@ -984,7 +960,7 @@ namespace CivilRev.CommandSystem.Editor
             if (!_legacyRetry && LooksLikeUnknownOption(stderr))
             {
                 _legacyRetry = true;
-                CommandLog.Warning(Prefix + "当前 adb 不支持 -T 参数，已改为不回溯历史缓冲重试");
+                AdbLog.Warning("当前 adb 不支持 -T 参数，已改为不回溯历史缓冲重试");
                 if (Start(out var retryError))
                 {
                     return;
@@ -992,7 +968,7 @@ namespace CivilRev.CommandSystem.Editor
 
                 _lastError = retryError;
                 _state = StateFailed;
-                CommandLog.Error(Prefix + _lastError);
+                AdbLog.Error(_lastError);
                 return;
             }
 
@@ -1002,14 +978,14 @@ namespace CivilRev.CommandSystem.Editor
                 _lastError += "：" + stderr;
             }
 
-            CommandLog.Error(Prefix + _lastError +
+            AdbLog.Error(_lastError +
                              "。常见原因：没连设备、开了多个设备但没填序列号、adb server 版本不匹配。");
 
             // 开关必须跟着现实走：进程没了还显示"已启用"是最容易误导人的状态
-            if (CommandSystemSettings.AdbLogcatEnabled)
+            if (AdbDebuggerSettings.LogcatEnabled)
             {
-                CommandSystemSettings.AdbLogcatEnabled = false;
-                CommandLog.Warning(Prefix + "已自动关闭开关，修好后重新勾选即可");
+                AdbDebuggerSettings.LogcatEnabled = false;
+                AdbLog.Warning("已自动关闭开关，修好后重新勾选即可");
             }
         }
 
@@ -1126,7 +1102,7 @@ namespace CivilRev.CommandSystem.Editor
                 Start(out var error);
                 if (!string.IsNullOrEmpty(error))
                 {
-                    CommandLog.Error(Prefix + error);
+                    AdbLog.Error(error);
                 }
             }
         }
