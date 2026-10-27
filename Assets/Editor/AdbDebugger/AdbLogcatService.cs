@@ -138,13 +138,21 @@ namespace CivilRev.AdbDebugger
         /// 只按 <c>at </c> / <c>Caused by:</c> 判定必然漏——一条 <c>Debug.Log</c> 会被拆成「正文 + N 条栈帧」。
         /// </para>
         /// <para>
+        /// <b>方法名那段必须覆盖编译器生成的写法</b>：栈里只要有一帧认不出来，合并就断在这一行，
+        /// 一条日志照样被拆成两条——正是这个正则要解决的问题。Unity 真机上会出现的非字母开头写法有
+        /// <c>Foo:.ctor()</c> / <c>Foo:.cctor()</c>（构造 / 静态构造）、<c>Foo:&lt;Start&gt;b__0_0()</c>
+        /// （lambda）、<c>Foo:&lt;Bar&gt;g__Local|5_0()</c>（本地函数）。
+        /// <c>.ctor</c> 是**精确列举**而不是"方法名允许点开头"：一旦放开，
+        /// <c>Error: .5 (units)</c> 这种正文就会被吞进上一条。
+        /// </para>
+        /// <para>
         /// 保守取舍：类型名不许空白、方法名不许空白，于是 <c>Note: see foo()</c>、<c>Time: 12:30 (x)</c>
         /// 这类正文不会被误判；代价是「用户自己打了一条恰好形如 <c>Foo:Bar()</c> 的正文、且紧跟上一条」
         /// 会被并进去（内容不丢，展开仍可见）。
         /// </para>
         /// </summary>
         private static readonly Regex UnityStackFrame = new Regex(
-            @"^[A-Za-z_][A-Za-z0-9_.`<>+]*\s*:\s*[A-Za-z_][A-Za-z0-9_<>]*\s*\([^()]*\)$",
+            @"^[A-Za-z_][A-Za-z0-9_.`<>+]*\s*:\s*(?:\.c?ctor|[A-Za-z_<][A-Za-z0-9_<>`.|]*)\s*\([^()]*\)$",
             RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
         private static readonly ConcurrentQueue<string> Lines = new ConcurrentQueue<string>();
