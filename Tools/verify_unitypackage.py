@@ -33,7 +33,9 @@ import tarfile
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_PKG = os.path.join(HERE, "UnityPackage", "Aketsuki_Unity_MCP-1.0.unitypackage")
+# 包产物目录。**不要写死包文件名**：版本号会变，写死的那份一删脚本就指向不存在的路径
+# （之前就是这样：默认指向 1.0，删掉 1.0 后 --module adb 也解析到它）。
+PKG_DIR = os.path.join(HERE, "UnityPackage")
 
 # Unity 没有统一的"最新版"入口，按目录名倒序挑最高版本
 UNITY_HUB_DIRS = [
@@ -71,14 +73,14 @@ def package_module(package):
 
 def default_package(module=None):
     """脚本同级目录里的 .unitypackage；两个包共存时必须点名。"""
-    found = sorted(glob.glob(os.path.join(HERE, "*.unitypackage")))
+    found = sorted(glob.glob(os.path.join(PKG_DIR, "*.unitypackage")))
     if module:
         found = [f for f in found if os.path.basename(f).startswith(MODULE_HINTS[module]["prefix"])]
     if len(found) == 1:
         return found[0]
     if len(found) > 1:
         raise SystemExit("有多个包，请用 -p 或 --module 指定：" + "".join(chr(10) + "  " + f for f in found))
-    return DEFAULT_PKG
+    raise SystemExit("在 %s 下没找到 .unitypackage：用 -p 指定，或先跑 build_unitypackage.py" % PKG_DIR)
 
 
 def read_manifest(package):
