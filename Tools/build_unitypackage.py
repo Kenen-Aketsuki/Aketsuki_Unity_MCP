@@ -115,30 +115,19 @@ def apply_module(name):
         ACTIVE_MODULE = "adb"
         PKG_ROOT = "Assets/Editor/AdbDebugger"
         CS_SOURCE = os.path.join(UNITY_PROJECT, "Assets", "Editor", "AdbDebugger")
-        BRIDGE_DIR_IN_PKG = "AdbBridge"
-        BRIDGE_NAMES = [
-            ("adb_mcp_server.py", "scripts/adb_mcp_server.py"),
-            ("adb_cli.py", "scripts/adb_cli.py"),
-            ("install_bridge.py", "scripts/install_bridge.py"),
-            ("SKILL.md", "SKILL.md"),
-        ]
-        # 装到 <工程>/.workbuddy/skills/adb-cmd/ 的是这几份 —— (包内桥目录里的相对路径, 技能目录里的路径)。
-        # **两边路径不一样**：桥在 Assets 里是平铺的（Unity 只把它当 DefaultAsset），
-        # 技能目录要求 python 落在 scripts/ 下。install_bridge.py 不进技能目录：
-        # 它是"装"这个动作本身，装完留在桥目录即可，技能目录里放它纯属噪声。
-        SKILL_FILES = [
-            ("adb_mcp_server.py", "scripts/adb_mcp_server.py"),
-            ("adb_cli.py", "scripts/adb_cli.py"),
-            ("SKILL.md", "SKILL.md"),
-        ]
-        SKILL_NAME = "adb-cmd"
-        SERVER_SCRIPT = "adb_mcp_server.py"
+        # **本包没有桥**：ADB 调试台只做"把设备日志抓进 Unity 控制台"这一件事，
+        # 自己不提供 MCP server，也不装命令行客户端。要让 AI 抓日志，装「Unity MCP 指令系统」，
+        # 它里面的 adb.* 指令会反射调用本模块的 AdbExternalApi（见 Commands/Adb/）。
+        BRIDGE_DIR_IN_PKG = ""
+        BRIDGE_NAMES = []
+        SKILL_FILES = []
+        SKILL_NAME = ""
+        SERVER_SCRIPT = ""
         ENTRY_CONSOLE = "Tools / ADB 调试 / ADB 调试台"
-        ENTRY_HTTP = "Tools / ADB 调试 / ADB 调试台（服务段，含令牌与端口）"
+        ENTRY_HTTP = ""
         REQUIRES = [
             "Unity 2021.3 及以上",
             "adb 可执行文件（Android SDK platform-tools，可在设置里填完整路径）",
-            "Python 3.8 及以上（仅 MCP 桥 / 命令行客户端需要）",
         ]
         # ADB 工具没有工程客制化目录；指向一个不存在的路径，终检自然恒过
         PROJECT_COUPLED_IN_PKG = PKG_ROOT + "/Project"
@@ -423,6 +412,13 @@ def stable_guid(path_in_pkg):
 
 def build_manifest(name, version, author, built, file_count, output_name, warnings):
     """包内 `package.json`。Unity 的 .unitypackage 没有标准元数据槽位，只能自带清单。"""
+    entrypoints = {"console": ENTRY_CONSOLE}
+    if ENTRY_HTTP:
+        entrypoints["httpServer"] = ENTRY_HTTP
+    if BRIDGE_DIR_IN_PKG and SERVER_SCRIPT:
+        entrypoints["mcpBridge"] = PKG_ROOT + "/" + BRIDGE_DIR_IN_PKG + "/" + SERVER_SCRIPT
+        entrypoints["skillDoc"] = PKG_ROOT + "/" + BRIDGE_DIR_IN_PKG + "/SKILL.md"
+
     manifest = {
         "name": name,
         "version": version,
@@ -434,14 +430,10 @@ def build_manifest(name, version, author, built, file_count, output_name, warnin
         "packageFile": output_name,
         "installRoot": PKG_ROOT,
         "files": file_count,
-        "entrypoints": {
-            "console": ENTRY_CONSOLE,
-            "httpServer": ENTRY_HTTP,
-            "mcpBridge": PKG_ROOT + "/" + BRIDGE_DIR_IN_PKG + "/" + SERVER_SCRIPT,
-            "skillDoc": PKG_ROOT + "/" + BRIDGE_DIR_IN_PKG + "/SKILL.md",
-        },
+        "entrypoints": entrypoints,
         # 安装器据此决定把桥同步到 `.workbuddy/skills/<skillName>/` 的哪几份文件、各叫什么路径。
-        # 老包（v1.0）没有这几个字段，安装器有回落规则，不是必需的。
+        # **键存在但值为空 = 本包不装技能目录**（ADB 包就是这样，它没有桥）。
+        # 老包（v1.0）根本没有这几个键，安装器有回落规则，不是必需的。
         "skillName": SKILL_NAME,
         "skillFiles": [{"from": src, "to": dst} for src, dst in SKILL_FILES],
         "requires": list(REQUIRES),
@@ -530,8 +522,11 @@ BUNDLE_DOC_ADB = """# {name} v{version} — 部署说明
 
 ## 这个目录是什么
 
-**ADB 调试工具**的可分包。它与「Unity MCP 指令系统」（`Aketsuki_Unity_MCP`）是**两个独立的工具**：
-同一台机器、同一个 Unity 工程里可以两个都装，也可以只装这一个。两者不共享任何代码。
+**ADB 调试台**的可分包：把 Android 真机 / 模拟器的 logcat 抓进 Unity 控制台。
+它**不含任何 MCP 服务、不含端口、不含令牌**，装上就能用，不需要配置客户端。
+
+AI 想抓日志时装「Unity MCP 指令系统」那一个包即可——它里面的 `adb.*` 指令会反射调用本工具的
+`AdbExternalApi`。两个包可以都装，也可以只装这一个、纯手工看日志。
 
 接收方只要有 `{name}-{version}.unitypackage` 和本目录里的 `install.py` 就能装。
 
@@ -543,54 +538,28 @@ python install.py --project D:/路径/到/Unity工程根             # 落地
 ```
 
 `--project` 指向含 `Assets/` 和 `ProjectSettings/` 的那一层。
-
-它会做两件事：
-
-1. 把包内 {files} 个资产解包到 `<工程>/{installRoot}/`
-2. 把 MCP 桥同步到 `<工程>/.workbuddy/skills/{skillName}/`（`scripts/adb_mcp_server.py`、
-   `scripts/adb_cli.py`、`SKILL.md`——`install_bridge.py` 不进技能目录，它的活已经干完了）。
-   不需要就加 `--no-skill`。
+它会把这 {files} 个资产解包到 `<工程>/{installRoot}/`；**不写 .workbuddy、不装技能目录**。
 
 规则：**只新增/覆盖，绝不删除**；目标工程已有的 `.meta` 一律保留（保住旧 GUID）。
 
-## 装完还要让它生效
+## 用起来
 
 1. **让 Unity 刷新**：聚焦 Unity 窗口自动导入。
-2. **开调试服务**：菜单 `Tools / ADB 调试 / ADB 调试台`，勾「启用调试服务」（端口默认 57841 起避让）。
-3. **接 MCP（可选）**：菜单 `Tools / ADB 调试 / 安装 MCP 桥（写入 mcp.json）`，
-   它会调用 `install_bridge.py` 把条目写进 `~/.workbuddy/mcp.json`：
-
-```json
-"adb-debug-你的工程名": {{
-  "command": "python",
-  "args": [
-    "<工程根>/.workbuddy/skills/{skillName}/scripts/adb_mcp_server.py",
-    "--project-root", "<工程根>"
-  ],
-  "env": {{ "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1" }}
-}}
-```
-
-写完到连接器管理页对 `adb-debug-你的工程名` 点信任。
-
-## 自检
-
-```bash
-python <工程根>/.workbuddy/skills/{skillName}/scripts/adb_cli.py status
-```
-
-能看到端口与抓取状态就通了。AI 侧只有两个工具：`adb_status`、`adb_logcat`。
+2. 菜单 `Tools / ADB 调试 / ADB 调试台`：
+   - 「设备」下拉是现场 `adb devices -l` 的结果，选中即写设置；不可用的设备会把原因写在脸上。
+   - 勾「启用 logcat」开始抓，日志以 `[ADB] ` 前缀进控制台（Tag 过滤默认 `Unity`）。
+3. 找不到 adb 时在窗口里手填 `adb.exe` 完整路径（通常在 `<Android SDK>/platform-tools/adb.exe`）。
 
 ## 和指令系统的关系
 
 | | Unity MCP 指令系统 | 本工具 |
 | --- | --- | --- |
-| 默认端口 | 57831 | 57841 |
-| 信息文件 | `.workbuddy/UnityEditCommand/.http-info.*` | `.workbuddy/AdbDebug/.adb-info.*` |
-| 技能目录 | `.workbuddy/skills/unity-cmd/` | `.workbuddy/skills/{skillName}/` |
+| 对外接口 | HTTP 57831 + MCP 桥 | **没有**（只开窗口） |
+| 技能目录 | `.workbuddy/skills/unity-cmd/` | 无 |
+| AI 怎么用 | `unity_execute` 等工具 | 装指令系统后调 `adb.devices` / `adb.logcat.*` |
 
-两者唯一的交集在 Unity 控制台：本工具把设备日志以 `[ADB] ` 前缀打进控制台，
-装了指令系统时 AI 可以用 `console.read` 读到；没装时人在 Console 里照样看得到。
+交集只有一处：本工具把日志打进 Unity 控制台；指令系统那侧的 `adb.*` 指令反射调用本工具的
+`AdbExternalApi`，把它翻译成 MCP 工具 `unity_adb_devices` 等。
 
 ## 版本
 

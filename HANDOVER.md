@@ -20,14 +20,15 @@ Unity **编辑器扩展** + 一层 **Python 桥**，让你（或 AI）用 HTTP /
 
 > **本仓库现在有两个并列的工具，不是一个。**
 >
-> | 工具 | 目录 | 干什么 | 包名 | 端口 |
+> | 工具 | 目录 | 干什么 | 包名 | 对外接口 |
 > | --- | --- | --- | --- | --- |
-> | 指令系统（本文档主角） | `Assets/Editor/ExternalCommandSystem/` | 下发指令控制编辑器 / 运行时 | `Aketsuki_Unity_MCP` | 57831 |
-> | ADB 调试 | `Assets/Editor/AdbDebugger/` | 抓 Android 真机 logcat 进控制台 | `Aketsuki_AdbDebugger` | 57841 |
+> | 指令系统（本文档主角） | `Assets/Editor/ExternalCommandSystem/` | 下发指令控制编辑器 / 运行时 | `Aketsuki_Unity_MCP` | HTTP 57831 + MCP 桥 |
+> | ADB 调试 | `Assets/Editor/AdbDebugger/` | 抓 Android 真机 logcat 进控制台 | `Aketsuki_AdbDebugger` | **没有**（只开窗口） |
 >
-> 两者**零依赖**（ADB 的 asmdef 是 `references: []`，物理上引用不到对方），可单独安装、
-> 各自一套端口/令牌/信息文件/HTTP 服务/MCP server/技能目录/`.unitypackage`。
-> ADB 那份的文档在 `Assets/Editor/AdbDebugger/README.md`，本文档不重复。
+> 两者**零依赖**（ADB 的 asmdef 是 `references: []`，物理上引用不到对方），可单独安装。
+> ADB 那份**不自带 MCP**：要让 AI 抓日志，装指令系统，用它的 `adb.*` 五条指令——
+> 那是指令系统里的一层反射适配（`Commands/Adb/`），调 ADB 模块的 `AdbExternalApi`。
+> ADB 自己的文档在 `Assets/Editor/AdbDebugger/README.md`，本文档不重复。
 > 工具侧一切按 `--module {mcp,adb}` 区分（`deploy.py` / `build_unitypackage.py` / `install_unitypackage.py`）。
 
 ## 2. 10 分钟上手
@@ -77,12 +78,12 @@ python Tools/deploy.py <目标> --verify      # 部署 + 让目标编辑器编�
 用不上就删掉那条，别看到报错又去装回来。
 
 **部署一次写两处**，两个都要管：
-1. `<工程>/Assets/Editor/ExternalCommandSystem/`（服务端 C#，140 个文件）
+1. `<工程>/Assets/Editor/ExternalCommandSystem/`（服务端 C#，138 个文件）
 2. `<工程>/.workbuddy/skills/unity-cmd/`（MCP 桥脚本 + `SKILL.md`，3 个文件）
 
-ADB 工具同理但路径全不同：`Assets/Editor/AdbDebugger/`（31 个文件）+ `.workbuddy/skills/adb-cmd/`。
-`deploy.py --module adb <目标>` 管后者；**不带 `--module` 就是 mcp**。
-`--prune` 只清本模块目录里的孤儿，不会碰另一个工具的目录。
+ADB 工具只写一处：`Assets/Editor/AdbDebugger/`（20 个文件，含 `.meta`）。
+**它没有技能目录、没有桥**——`deploy.py --module adb <目标>` 只同步这些 C# 与文档；
+**不带 `--module` 就是 mcp**。`--prune` 只清本模块目录里的孤儿，不会碰另一个工具的目录。
 
 第 2 处是 MCP **真正拉起**的那份，不写它，AI 读到的指令说明就永远停在旧版（IMPR-007 的坑）。
 `--check` / `--list` / `--dry-run` 都会报这两处状态。目标那份比仓库新（mtime 更晚）时**不覆盖**，
@@ -132,9 +133,14 @@ python Tools/build_unitypackage.py --module adb --bundle    # → Tools/UnityPac
    不影响正确性，但你等的时候别以为卡死了。
 7. **运行时指令默认关闭**（`CommandSystemSettings.RuntimeCommandsEnabled=false`，按工程存）。
    关着时连 `runtime.play/stop` 都失败，逃生口是常规指令 `editor.play` / `editor.stop`。
-8. **ADB logcat 的三条边界（一次只跟一个设备 / 打印的是合并后的日志 / `suppressStack` 临时改
-   Unity 全局堆栈设置）已随工具拆走**，见 `Assets/Editor/AdbDebugger/README.md`「三条已知边界」。
-   本工具里已没有 `adb.logcat` 指令、没有 ADB 设置项、也没有它的后台线程。
+8. **ADB 相关的三件事要分清**：
+   - 抓取本身（设备扫描、进程、堆栈合并、`suppressStack` 临时改全局堆栈设置）在
+     `Assets/Editor/AdbDebugger/`，边界见它的 README。
+   - AI 侧入口是本文档这套指令里的 `adb.devices` / `adb.logcat.start|stop|status|read`
+     （`Commands/Adb/`），**全部走反射**调 `AdbExternalApi`：没装 ADB 包时这五条报"没找到 ADB 调试台"，
+     其余指令不受影响，也不会编译失败。
+   - `adb.logcat.read` 的缓冲 **2000 条、取走即删**；日志同时进 Unity 控制台（`[ADB] ` 前缀），
+     所以 `console.read contains:"[ADB]"` 也能读到。
 
 ## 8. 未决事项（接手前先看这段）
 

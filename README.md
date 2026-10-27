@@ -10,13 +10,14 @@
 
 > **仓库里有两个并列的工具**（2026-10-27 拆的，FEAT-007）：
 >
-> | 工具 | 目录 | 干什么 | 包名 | 端口 |
+> | 工具 | 目录 | 干什么 | 包名 | 对外接口 |
 > | --- | --- | --- | --- | --- |
-> | Unity MCP 指令系统 | `Assets/Editor/ExternalCommandSystem/` | 下发指令控制编辑器 / 运行时 | `Aketsuki_Unity_MCP` | 57831 |
-> | ADB 调试 | `Assets/Editor/AdbDebugger/` | 抓 Android 真机 logcat 进控制台 | `Aketsuki_AdbDebugger` | 57841 |
+> | Unity MCP 指令系统 | `Assets/Editor/ExternalCommandSystem/` | 下发指令控制编辑器 / 运行时 | `Aketsuki_Unity_MCP` | HTTP 57831 + MCP 桥 |
+> | ADB 调试 | `Assets/Editor/AdbDebugger/` | 抓 Android 真机 logcat 进控制台 | `Aketsuki_AdbDebugger` | **没有**（只开窗口） |
 >
-> 两者**零依赖**（ADB 是独立 asmdef，`references: []`），可只装其一、各有独立包与技能目录。
-> 本文档其余部分讲的是**指令系统**；ADB 看
+> 两者**零依赖**（ADB 是独立 asmdef，`references: []`），各有独立分发包，可只装其一。
+> ADB 不自带 MCP——AI 要用就装指令系统，调它的 `adb.devices` / `adb.logcat.*` 五条指令
+> （反射适配，见 `Commands/Adb/`）。ADB 自己的文档在
 > [`Assets/Editor/AdbDebugger/README.md`](Assets/Editor/AdbDebugger/README.md)。
 
 > **⚠️ HTTP 200 ≠ 指令成功（DOC-001）。** 指令业务失败时服务端仍返回 200，
@@ -96,7 +97,7 @@ python Tools/deploy.py --force-refresh     # 编辑器在后台不响应时，�
 python Tools/deploy.py --prune             # 顺带删掉目标侧的孤儿文件（默认只报告）
 
 python Tools/deploy.py --module adb --list  # ADB 工具（不带 --module 就是指令系统）
-python Tools/deploy.py --module adb         # 部署 ADB（29 文件 + 桥 3 文件）
+python Tools/deploy.py --module adb         # 部署 ADB（20 个文件，没有桥）
 ```
 
 当前登记：`project_island_back`、`majotavern`、`CivelRev`（工程根在 `CivelRev/Demo/CivilizationRevival`，
@@ -131,11 +132,12 @@ python Tools/verify_unitypackage.py --with-ui \
 python Tools/install_unitypackage.py --project <目标工程根>   # 目标工程正开着编辑器时用这个
 
 python Tools/build_unitypackage.py --module adb --bundle      # ADB 工具的分发包
-python Tools/install_unitypackage.py --module adb --project <目标工程根>
+python Tools/install_unitypackage.py --project <目标工程根>    # 同目录只有一个包时可省 --module
 ```
 
 安装器**不写死路径**：装到哪、桥同步到哪个技能目录、同步哪几份文件，全从包内 `package.json`
 的 `installRoot` / `skillName` / `skillFiles` 读，所以两个工具的包共用同一份 `install.py`。
+ADB 包的 `skillFiles` 是**空列表**（显式声明"本包没有桥"），安装器据此不碰 `.workbuddy/`。
 同目录有多个包时用 `--module` 或 `-p` 指定，它不会替你猜。
 
 包内只有 `Assets/Editor/ExternalCommandSystem/`（含 `McpBridge/` 三个桥脚本），

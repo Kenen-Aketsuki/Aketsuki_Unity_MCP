@@ -56,14 +56,12 @@ MODULE_HINTS = {
     "adb": {
         "prefix": "Aketsuki_AdbDebugger",
         "install_root": "Assets/Editor/AdbDebugger",
-        "bridge_dir": "AdbBridge",
-        "skill_name": "adb-cmd",
-        "skill_files": [
-            ("adb_mcp_server.py", "scripts/adb_mcp_server.py"),
-            ("adb_cli.py", "scripts/adb_cli.py"),
-            ("SKILL.md", "SKILL.md"),
-        ],
-        "server": "adb_mcp_server.py",
+        # ADB 调试台没有桥、没有技能目录：它不提供 MCP，能力由指令系统的 adb.* 指令反射调用。
+        # 这几个字段留空是**有意的**，别照着 MCP 那份补回来。
+        "bridge_dir": "",
+        "skill_name": "",
+        "skill_files": [],
+        "server": "",
     },
 }
 
@@ -172,6 +170,8 @@ def resolve_layout(manifest, module):
     """从包清单推出：安装根、桥目录、技能目录名、要同步进技能目录的文件。
 
     清单字段是权威来源；缺字段的老包按模块兜底。
+    **注意"键存在但值为空"与"键缺失"是两种意思**：前者是显式声明"本包没有桥"
+    （ADB 包就是这样），后者才是老包、需要回落。
     """
     hint = MODULE_HINTS.get(module) or {}
     manifest = manifest or {}
@@ -180,18 +180,23 @@ def resolve_layout(manifest, module):
         or "Assets/Editor/ExternalCommandSystem"
 
     bridge = (manifest.get("entrypoints") or {}).get("mcpBridge") or ""
-    bridge_dir = os.path.dirname(bridge) if bridge else ""
+    bridge_dir = os.path.dirname(bridge)
     if not bridge_dir:
-        bridge_dir = install_root + "/" + (hint.get("bridge_dir") or "McpBridge")
+        bridge_dir = install_root + "/" + hint.get("bridge_dir", "") if hint.get("bridge_dir") else ""
 
     server = os.path.basename(bridge) if bridge else (hint.get("server") or "")
-    skill_name = manifest.get("skillName") or hint.get("skill_name")
-    if not skill_name:
-        # 老包没有 skillName：按服务脚本名反推，再不行退回 MCP 的
-        skill_name = "adb-cmd" if server == "adb_mcp_server.py" else "unity-cmd"
 
-    skill_files = normalize_skill_files(manifest.get("skillFiles"))
-    if not skill_files:
+    if "skillName" in manifest:
+        skill_name = manifest.get("skillName") or ""
+    else:
+        skill_name = hint.get("skill_name") or ""
+        if not skill_name:
+            # 老包没有 skillName：按服务脚本名反推，再不行退回 MCP 的
+            skill_name = "adb-cmd" if server == "adb_mcp_server.py" else "unity-cmd"
+
+    if "skillFiles" in manifest:
+        skill_files = normalize_skill_files(manifest.get("skillFiles"))
+    else:
         skill_files = MODULE_HINTS["adb" if skill_name == "adb-cmd" else "mcp"]["skill_files"]
 
     return {
@@ -230,9 +235,15 @@ def normalize_skill_files(raw):
 def install_skill(project, entries, layout, dry_run, out):
     """把 MCP 桥同步到 `<工程>/.workbuddy/skills/<skill_name>/`。
 
-    MCP 客户端拉起的是这一份，不是包内 `McpBridge/`（ADB 是 `AdbBridge/`）那份。
+    MCP 客户端拉起的是这一份，不是包内 `McpBridge/` 那份。
     以前靠手工拷，三个工程的 SKILL.md 因此各自停在旧版（不含 runtime.*）——这里一并兜住。
+
+    包内清单显式声明"没有技能文件"时直接返回（ADB 调试台就是这种：它没有桥）。
+    这属于正常情况，不进 problems（那不是"问题"，是设计）。
     """
+    if not layout["skill_files"]:
+        return 0, 0
+
     skill_root = os.path.join(project, ".workbuddy", "skills", layout["skill_name"])
     bridge_dir = layout["bridge_dir"]
     blobs = {}
@@ -356,9 +367,12 @@ def main(argv=None):
     print("资产 %d 个（目录 %d）→ 新增 %d / 更新 %d / 未变 %d%s"
           % (len(entries), folders, added, updated, same, "（dry-run，未写盘）" if args.dry_run else ""))
     if args.skill:
-        print("MCP 桥 → .workbuddy/skills/%s/：新增 %d / 更新 %d%s"
-              % (layout["skill_name"], skill_new, skill_up,
-                 "（dry-run，未写盘）" if args.dry_run else ""))
+        if layout["skill_files"]:
+            print("MCP 桥 → .workbuddy/skills/%s/：新增 %d / 更新 %d%s"
+                  % (layout["skill_name"], skill_new, skill_up,
+                     "（dry-run，未写盘）" if args.dry_run else ""))
+        else:
+            print("技能目录：无（本包不含 MCP 桥）")
 
     if problems:
         print()
