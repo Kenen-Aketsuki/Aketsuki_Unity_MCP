@@ -80,7 +80,7 @@ python Tools/deploy.py <目标> --verify      # 部署 + 让目标编辑器编�
 1. `<工程>/Assets/Editor/ExternalCommandSystem/`（服务端 C#，140 个文件）
 2. `<工程>/.workbuddy/skills/unity-cmd/`（MCP 桥脚本 + `SKILL.md`，3 个文件）
 
-ADB 工具同理但路径全不同：`Assets/Editor/AdbDebugger/`（29 个文件）+ `.workbuddy/skills/adb-cmd/`。
+ADB 工具同理但路径全不同：`Assets/Editor/AdbDebugger/`（31 个文件）+ `.workbuddy/skills/adb-cmd/`。
 `deploy.py --module adb <目标>` 管后者；**不带 `--module` 就是 mcp**。
 `--prune` 只清本模块目录里的孤儿，不会碰另一个工具的目录。
 
