@@ -686,6 +686,14 @@ namespace CivilRev.AdbDebugger
                     ReleaseStackTraceSuppression();
                 }
             }
+            else
+            {
+                // 没活也要收尾：ReleaseStackTraceSuppression 原本只挂在上面那个分支里，
+                // 而"设备安静下来 / 日志全被过滤掉"之后就再也不进那个分支——抑制窗口再没人看，
+                // 用户全局的堆栈设置会一直停在 None，直到停止抓取或域重载才还原。
+                // 这里每帧问一次窗口到没到期，到期才写盘（RestoreStackTraceNow），静止时不写。
+                ReleaseStackTraceSuppression();
+            }
 
             if (_exited)
             {
