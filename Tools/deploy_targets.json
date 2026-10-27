@@ -1,13 +1,8 @@
 {
   "$comment": "Tools/deploy.py 的部署目标。root 是 Unity 工程根（含 Assets/ 与 ProjectSettings/ 的那一层），不是工作区根。改了这里不用改脚本。",
+  "$removed": "project_island 已由用户手动卸载（2026-10-25 13:37 删掉 Assets/Editor/ExternalCommandSystem，git 从未跟踪），IMPR-009 批注为『这个工程暂时不需要这个工具了』，故不列为目标。不要顺手加回来——加回来等于把用户删掉的东西重新装上门。",
   "source": "Assets/Editor/ExternalCommandSystem",
   "targets": [
-    {
-      "name": "project_island",
-      "root": "D:/Wrok_proj/project_island",
-      "unity": "2022.3.62f2c1",
-      "note": "工作区根与工程根同一层"
-    },
     {
       "name": "project_island_back",
       "root": "D:/Wrok_proj/project_island_back",
