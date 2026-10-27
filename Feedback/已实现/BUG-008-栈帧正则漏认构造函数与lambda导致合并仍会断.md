@@ -63,8 +63,7 @@ IL2CPP 里状态机是嵌套类型，写作 `Outer+<Method>d__N:MoveNext()`（�
 | --- | --- |
 | 正则用例 32 条（19 正例 / 13 反例） | ✅ 全过，旧正则下漏的 5 种写法现在都认 |
 | `Tools/compile_adb.py --project .` | ✅ 编译通过（CivilRev.AdbDebugger.Editor） |
-| 部署 project_island_back | ✅ AdbLogcatService.cs，内容校验一致 |
-| 部署 majotavern | ✅ 同上（该工程装了同一个模块，留旧的等于留 bug） |
+| 部署 project_island_back / majotavern / CivelRev | ✅ 三处都装了这个模块，各更新 2 文件、20 文件校验一致、离线编译通过 |
 | 真机复验 | ⏳ 等用户下次抓到带构造函数帧的日志确认（控制台应只剩 1 条） |
 
 反例里保留了 `Note: see foo()`、`Time: 12:30 (x)`、`Error: .5 (units)`、
