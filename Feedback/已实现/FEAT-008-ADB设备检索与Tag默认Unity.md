@@ -99,3 +99,9 @@ proposal: false
 3. 不自动执行 `adb connect`：网络设备仍需用户先连好（或手动填序列号）。
 4. Tag 默认 `Unity` 意味着系统层日志（`AndroidRuntime`、`libc`）默认看不到——这是有意的，
    要看得显式清空 tag。SKILL.md 里已写明这条升级路径。
+
+## 后续（2026-10-27）
+
+> 设备检索与 Tag 默认 `Unity` **保留**；但工单里提到的 `/v1/devices`、`/v1/status` 字段、
+> `adb_devices` / `adb_logcat` 两个 MCP 工具、`adb_cli.py devices` 子命令**已随 FEAT-009 删除**。
+> 同样的能力现在走指令 `adb.devices`（`refresh` 默认 true 现场扫）与 MCP 工具 `unity_adb_devices`。
