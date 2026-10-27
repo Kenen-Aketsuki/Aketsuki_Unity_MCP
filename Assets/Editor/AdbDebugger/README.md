@@ -124,7 +124,9 @@ python Tools/install_unitypackage.py --project <目标工程>
 2. 设备不在时 `adb logcat` **不退出**、只挂着等，打 `- waiting for device -`；该状态会出现在
    `adb.logcat.status` 的 `notice` 字段里。抓取进程退出时，报错里会附上"最近一次扫描到的设备"，方便对序列号。
 3. `suppressStack`（默认开）会在打印期间临时改 Unity 的堆栈设置（500ms 抑制窗口），
-   停止 / 退出 / 域重载立刻还原。副作用是窗口内你自己脚本的 `Debug.Log` 也没堆栈。
+   停止 / 退出 / 域重载立刻还原，**空闲超过窗口也会自动还原**（BUG-009：之前"没日志"就没人看窗口，
+   于是设置会一直停在 None，你自己脚本的日志也连带没栈）。
+   副作用是窗口内你自己脚本的 `Debug.Log` 也没堆栈。
 4. 堆栈合并的上限是「行数 + 2000 字符」，撞到就截断并注明。`stackLines=0` 等于完全不打印调用栈。
 5. `adb.logcat.read` 的缓冲只有 **2000 条**，满了丢最旧的并计数（`dropped`）。长期不读会丢历史。
 6. 扫描有 8 秒上限：`adb server` 卡死时不会把编辑器一起挂住，窗口里会给一句"试试 adb kill-server"。
