@@ -314,9 +314,15 @@ namespace CivilRev.CommandSystem
             var descriptor = Registry.Find(entry.Id);
             if (descriptor == null)
             {
-                var message = $"未注册的指令 ID：{entry.Id}";
+                // "被剔除"和"ID 写错"要分开说：前者有明确原因（缺可选包），照着原因做就能用；
+                // 后者是拼写/版本问题。混成一句"未注册的指令 ID"会把人带到错的方向。
+                var skipped = Registry.SkipReason(entry.Id);
+                var message = skipped == null
+                    ? $"未注册的指令 ID：{entry.Id}"
+                    : $"指令 '{entry.Id}' 当前不可用，已从指令列表里剔除：{skipped}";
+
                 CommandLog.Error(message);
-                return CommandResult.Unknown(entry.Id);
+                return CommandResult.Unknown(entry.Id, message);
             }
 
             // 运行时（Play 模式）指令的统一门禁：开关关着 / 不在 Play 一律失败。

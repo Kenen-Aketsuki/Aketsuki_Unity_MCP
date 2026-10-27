@@ -3,6 +3,30 @@ using System.Collections.Generic;
 namespace CivilRev.CommandSystem.Editor
 {
     /// <summary>
+    /// <c>adb.*</c> 五条指令的公共基座：**唯一职责**是说明"我依赖哪个可选插件"。
+    ///
+    /// <para>
+    /// 判定与剔除全在 <see cref="OptionalDependencyCommand"/> / <see cref="CommandRegistry"/> 里，
+    /// 这里不写一行判断代码 —— 以后加同类插件（录屏、真机截图、Profiler 采样……）也只需照抄这三行。
+    /// </para>
+    ///
+    /// <para>
+    /// 没装 ADB 调试台就不注册：这五条不会出现在 <c>/v1/commands</c>、编辑器控制台窗口，
+    /// 也不会被 <c>unity_mcp_server.py</c> 变成 MCP 工具。锁死这一点很重要：列表里挂着一个
+    /// **必然失败**的 <c>unity_adb_devices</c>，比它压根不出现更误导人（AI 会以为能抓日志，
+    /// 调了才发现要装包，然后花几轮去验证是不是自己参数写错了）。
+    /// </para>
+    ///
+    /// <para>
+    /// 装包之后 Unity 会重新编译 → 域重载 → 重新扫描，五条指令自动出现，不需要重启编辑器。
+    /// </para>
+    /// </summary>
+    public abstract class AdbCommandBase : OptionalDependencyCommand
+    {
+        protected override OptionalDependency Dependency => AdbBridgeAdapter.Plugin;
+    }
+
+    /// <summary>
     /// ADB 调试适配指令。
     ///
     /// <para>
@@ -21,9 +45,9 @@ namespace CivilRev.CommandSystem.Editor
         Description = "列出 Android 设备（真机 / 模拟器）：序列号、状态、型号，以及 adb 路径与失败原因",
         Usage = "refresh: bool（默认 true 现场扫；false 用上次缓存）",
         EditorOnly = true)]
-    public sealed class AdbDevicesCommand : ICommand
+    public sealed class AdbDevicesCommand : AdbCommandBase
     {
-        public CommandResult Execute(CommandContext context)
+        public override CommandResult Execute(CommandContext context)
         {
             var args = new Dictionary<string, string>();
             if (context.Args.Has("refresh"))
@@ -70,9 +94,9 @@ namespace CivilRev.CommandSystem.Editor
         Description = "开始抓 Android logcat（日志以 [ADB] 前缀进 Unity 控制台，并留一份供 adb.logcat.read 读）",
         Usage = "serial: string, tag: string（默认 Unity；空=不过滤）, level: V|D|I|W|E|F|A, backfill: int",
         EditorOnly = true)]
-    public sealed class AdbLogcatStartCommand : ICommand
+    public sealed class AdbLogcatStartCommand : AdbCommandBase
     {
-        public CommandResult Execute(CommandContext context)
+        public override CommandResult Execute(CommandContext context)
         {
             var args = new Dictionary<string, string>();
             Copy(context, args, "serial");
@@ -112,9 +136,9 @@ namespace CivilRev.CommandSystem.Editor
     [Command("adb.logcat.stop",
         Description = "停止 logcat 抓取（已抓到的日志不会丢，仍可用 adb.logcat.read 读走）",
         EditorOnly = true)]
-    public sealed class AdbLogcatStopCommand : ICommand
+    public sealed class AdbLogcatStopCommand : AdbCommandBase
     {
-        public CommandResult Execute(CommandContext context)
+        public override CommandResult Execute(CommandContext context)
         {
             var result = AdbBridgeAdapter.Run("logcat.stop", null);
             if (!result.Success)
@@ -130,9 +154,9 @@ namespace CivilRev.CommandSystem.Editor
     [Command("adb.logcat.status",
         Description = "查看 logcat 抓取状态：是否在跑、连的哪台设备、tag/级别、各项计数与最近的错误",
         EditorOnly = true)]
-    public sealed class AdbLogcatStatusCommand : ICommand
+    public sealed class AdbLogcatStatusCommand : AdbCommandBase
     {
-        public CommandResult Execute(CommandContext context)
+        public override CommandResult Execute(CommandContext context)
         {
             var result = AdbBridgeAdapter.Run("logcat.status", null);
             if (!result.Success)
@@ -161,9 +185,9 @@ namespace CivilRev.CommandSystem.Editor
         Description = "取走已抓到的 logcat（取走即删除），返回级别 / tag / 合并后的正文",
         Usage = "max: int（默认 200，上限 2000）",
         EditorOnly = true)]
-    public sealed class AdbLogcatReadCommand : ICommand
+    public sealed class AdbLogcatReadCommand : AdbCommandBase
     {
-        public CommandResult Execute(CommandContext context)
+        public override CommandResult Execute(CommandContext context)
         {
             var args = new Dictionary<string, string>();
             if (context.Args.Has("max"))

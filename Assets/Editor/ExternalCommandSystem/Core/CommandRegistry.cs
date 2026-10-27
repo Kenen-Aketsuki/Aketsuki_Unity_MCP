@@ -91,6 +91,17 @@ namespace CivilRev.CommandSystem
 
         private readonly List<CommandDescriptor> _order = new List<CommandDescriptor>();
 
+        /// <summary>
+        /// 因依赖没就绪而**没注册**的指令：ID → 原因。
+        /// <para>
+        /// 它不参与任何列表（<see cref="All"/> / <c>/v1/commands</c> / 控制台窗口都不看它），
+        /// 只用于两件事：扫描结束时打一条汇总日志；以及硬调这条指令时给出"为什么没有它"，
+        /// 而不是干巴巴一句"未注册的指令 ID"。
+        /// </para>
+        /// </summary>
+        private readonly Dictionary<string, string> _skipped =
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
         private bool _scanned;
 
         /// <summary>已注册指令数量</summary>
@@ -98,6 +109,12 @@ namespace CivilRev.CommandSystem
 
         /// <summary>所有已注册指令（按注册顺序）</summary>
         public IEnumerable<CommandDescriptor> All => _order;
+
+        /// <summary>
+        /// 因依赖缺失而被剔除的指令（ID → 原因）。只读，供诊断与日志用；
+        /// **不要**拿它拼指令列表——这些指令就是不该出现。
+        /// </summary>
+        public IReadOnlyDictionary<string, string> Skipped => _skipped;
 
         #region 注册
 
@@ -124,6 +141,16 @@ namespace CivilRev.CommandSystem
             if (attribute == null || string.IsNullOrEmpty(attribute.Id))
             {
                 CommandLog.Warning($"指令类 {type.Name} 缺少有效的 CommandAttribute.Id，已忽略");
+                return false;
+            }
+
+            // 可选依赖没就绪（例如没装「ADB 调试台」）→ **不注册**。
+            // 这样它不会出现在 /v1/commands、控制台窗口、MCP 工具列表里 ——
+            // 一个必然失败的工具有出现在列表里，比不出现更误导。
+            string unavailable;
+            if (TryGetUnavailableReason(type, out unavailable))
+            {
+                _skipped[attribute.Id] = unavailable;
                 return false;
             }
 
@@ -185,7 +212,62 @@ namespace CivilRev.CommandSystem
         {
             _map.Clear();
             _order.Clear();
+            _skipped.Clear();
             _scanned = false;
+        }
+
+        /// <summary>
+        /// 问一次"这条指令现在能不能用"。
+        /// <para>
+        /// 只对实现了 <see cref="ICommandAvailability"/> 的类型动作，其余类型直接返回 false（可用），
+        /// 所以绝大多数指令在注册阶段**没有任何额外开销**。
+        /// </para>
+        /// <para>
+        /// 探测本身抛异常时**按不可用处理**：一个连可用性都问不出来的指令，放进去只会让调用方在
+        /// 执行阶段碰到同一个异常，不如现在就说清楚。
+        /// </para>
+        /// </summary>
+        private static bool TryGetUnavailableReason(Type type, out string reason)
+        {
+            reason = null;
+
+            if (!typeof(ICommandAvailability).IsAssignableFrom(type))
+            {
+                return false;
+            }
+
+            try
+            {
+                var probe = (ICommandAvailability)Activator.CreateInstance(type);
+                reason = probe?.GetUnavailableReason();
+            }
+            catch (Exception e)
+            {
+                reason = $"可用性判定失败（{type.Name}）：{e.Message}";
+            }
+
+            if (string.IsNullOrEmpty(reason))
+            {
+                reason = null;
+                return false;
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// 查某条指令"为什么不在列表里"。没被剔除过则返回 null。
+        /// <para>供运行器把"未注册的指令 ID"换成能照着做的解释。</para>
+        /// </summary>
+        public string SkipReason(string id)
+        {
+            if (string.IsNullOrEmpty(id))
+            {
+                return null;
+            }
+
+            string reason;
+            return _skipped.TryGetValue(id, out reason) ? reason : null;
         }
 
         private bool Add(CommandDescriptor descriptor)
@@ -206,6 +288,10 @@ namespace CivilRev.CommandSystem
 
             _map[descriptor.Id] = descriptor;
             _order.Add(descriptor);
+
+            // 之前被剔除过、这次可用了（装了包 → 域重载 → 重新扫描）：旧原因必须清掉，
+            // 否则 SkipReason 会继续骗人说"不可用"。
+            _skipped.Remove(descriptor.Id);
             return true;
         }
 
@@ -246,7 +332,52 @@ namespace CivilRev.CommandSystem
             }
 
             _scanned = true;
+            LogSkipped();
             return _order.Count - before;
+        }
+
+        /// <summary>
+        /// 把"因依赖缺失被剔除"这件事在控制台说一次。
+        /// <para>
+        /// 用 Info 而不是 Warning：可选包没装**是正常状态**，不是错误。不报的话，
+        /// 用户看到 <c>adb.*</c> 凭空消失会更困惑；报成警告又会让每次启动都红一片。
+        /// </para>
+        /// </summary>
+        private void LogSkipped()
+        {
+            if (_skipped.Count == 0)
+            {
+                return;
+            }
+
+            // 同一原因往往对应一整个插件（ADB 就是 5 条同一句），按原因分组打印，
+            // 否则一个可选包没装就刷 5 行一模一样的字，真正的信息被稀释。
+            var reasons = new List<string>();
+            var groups = new List<List<string>>();
+            foreach (var pair in _skipped)
+            {
+                var index = reasons.IndexOf(pair.Value);
+                if (index < 0)
+                {
+                    reasons.Add(pair.Value);
+                    groups.Add(new List<string>());
+                    index = reasons.Count - 1;
+                }
+
+                groups[index].Add(pair.Key);
+            }
+
+            var builder = new System.Text.StringBuilder();
+            builder.Append("已跳过 ").Append(_skipped.Count).Append(" 条依赖未就绪的指令（不会出现在指令列表里）：");
+            for (var i = 0; i < reasons.Count; i++)
+            {
+                builder.Append("\n  ")
+                    .Append(string.Join("、", groups[i].ToArray()))
+                    .Append(" — ")
+                    .Append(reasons[i]);
+            }
+
+            CommandLog.Info(builder.ToString());
         }
 
         private static bool ShouldSkip(Assembly assembly)
