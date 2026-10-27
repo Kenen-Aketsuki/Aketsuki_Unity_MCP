@@ -130,6 +130,23 @@ namespace CivilRev.AdbDebugger
             @"(?<pid>\d+)\s+(?<tid>\d+)\s+(?<level>[VDIWEFA])\s+(?<tag>.*?)\s*:\s?(?<message>.*)$",
             RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
+        /// <summary>
+        /// Unity 在 Android 上打印的 C# 栈帧：<c>Type:Method()</c> / <c>Namespace.Type:Method(System.String)</c>。
+        /// <para>
+        /// <b>为什么要单独认这一种：</b>设备端 player 的 managed 栈既没有 <c>at </c> 前缀、也不带文件行号，
+        /// 只用冒号把类型和方法连起来。逐行抓 logcat 时它和普通正文长得一模一样，
+        /// 只按 <c>at </c> / <c>Caused by:</c> 判定必然漏——一条 <c>Debug.Log</c> 会被拆成「正文 + N 条栈帧」。
+        /// </para>
+        /// <para>
+        /// 保守取舍：类型名不许空白、方法名不许空白，于是 <c>Note: see foo()</c>、<c>Time: 12:30 (x)</c>
+        /// 这类正文不会被误判；代价是「用户自己打了一条恰好形如 <c>Foo:Bar()</c> 的正文、且紧跟上一条」
+        /// 会被并进去（内容不丢，展开仍可见）。
+        /// </para>
+        /// </summary>
+        private static readonly Regex UnityStackFrame = new Regex(
+            @"^[A-Za-z_][A-Za-z0-9_.`<>+]*\s*:\s*[A-Za-z_][A-Za-z0-9_<>]*\s*\([^()]*\)$",
+            RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
         private static readonly ConcurrentQueue<string> Lines = new ConcurrentQueue<string>();
         private static readonly StringBuilder Stderr = new StringBuilder();
         private static readonly object StderrGate = new object();
@@ -689,7 +706,7 @@ namespace CivilRev.AdbDebugger
         /// <summary>
         /// 把一行 logcat 归并成 Unity 控制台的一条日志。
         /// <para>
-        /// 分两段：普通行**启一条新的**，堆栈续行**并进当前这条**（<see cref="IsStackTraceContinuation"/>）。
+        /// 分两段：普通行**启一条新的**，堆栈续行**并进当前这条**（<see cref="ClassifyContinuation"/>）。
         /// 过滤只作用在普通行上——续行跟着首行走，否则一次异常会被滤掉半截、剩下的堆栈反而看不懂。
         /// </para>
         /// </summary>
@@ -728,7 +745,20 @@ namespace CivilRev.AdbDebugger
                 message = match.Groups["message"].Value;
             }
 
-            if (IsStackTraceContinuation(message))
+            var continuation = ClassifyContinuation(message);
+
+            // 栈尾的空行：既不能收尾上一条（会把正文和栈劈成两条），也不能自己成条
+            // （否则控制台里多出一条什么都不带的 [ADB]）。直接丢，计进 filtered。
+            if (continuation == ContinuationKind.Blank)
+            {
+                Interlocked.Increment(ref _filtered);
+                return;
+            }
+
+            // StackLine 没归属（首行被 tag/级别滤掉）就丢弃：孤立栈行没有信息量。
+            // UnityFrame 与普通正文同形，没归属时宁可当日志打出来，也不吞掉可能是用户日志的那行。
+            if (continuation == ContinuationKind.StackLine ||
+                (continuation == ContinuationKind.UnityFrame && _pending != null))
             {
                 AppendContinuation(message);
                 return;
@@ -847,47 +877,75 @@ namespace CivilRev.AdbDebugger
             FlushPending();
         }
 
+        /// <summary>一行原始输入相对「上一条日志」的身份</summary>
+        private enum ContinuationKind
+        {
+            /// <summary>普通日志正文，启一条新的</summary>
+            None,
+
+            /// <summary><c>at …</c> / <c>Caused by:</c> / <c>... N more</c>：Java 与老格式 Unity 栈行</summary>
+            StackLine,
+
+            /// <summary>Unity Android 的 C# 栈帧 <c>Type:Method(参数)</c>，无 <c>at </c> 前缀</summary>
+            UnityFrame,
+
+            /// <summary>纯空行（Unity 的栈尾常见）</summary>
+            Blank,
+        }
+
         /// <summary>
-        /// 一行是不是上一条日志的堆栈续行。
+        /// 一行是不是上一条日志的堆栈续行，以及是哪一种。
         /// <para>
         /// <b>必须看 message 部分而不是整行：</b>logcat 里 Java 与 Unity 的堆栈都是"一行一条"，
         /// 每行照样带时间戳和 tag（<c>10-27 … E Unity   :   at Foo.Bar ()</c>），
         /// 拿整行判 <c>StartsWith("\tat")</c> 永远不成立。
         /// </para>
+        /// <para>
+        /// <b>为什么返回分类而不是 bool：</b>三种续行的"没归属时怎么办"不一样——
+        /// <see cref="ContinuationKind.StackLine"/> 直接丢（孤立栈行没意义），
+        /// <see cref="ContinuationKind.UnityFrame"/> 要放行成普通日志（它和正文同形，丢了就是吞日志），
+        /// <see cref="ContinuationKind.Blank"/> 一律丢（不能让它把上一条收尾）。
+        /// </para>
         /// </summary>
-        private static bool IsStackTraceContinuation(string message)
+        private static ContinuationKind ClassifyContinuation(string message)
         {
             if (string.IsNullOrEmpty(message))
             {
-                return false;
+                return ContinuationKind.Blank;
             }
 
             var text = message.TrimStart(' ', '\t');
             if (text.Length == 0)
             {
-                return false;
+                return ContinuationKind.Blank;
             }
 
             // Java：\tat com.x.Y.z(Foo.java:42)     Unity C#：  at Foo.Bar () [0x…] in <…>:0
             if (text.StartsWith("at ", StringComparison.Ordinal))
             {
-                return true;
+                return ContinuationKind.StackLine;
             }
 
             if (text.StartsWith("Caused by:", StringComparison.Ordinal) ||
                 text.StartsWith("Suppressed:", StringComparison.Ordinal))
             {
-                return true;
+                return ContinuationKind.StackLine;
             }
 
             // Java 的 "... 23 more"
             if (text.StartsWith("...", StringComparison.Ordinal) &&
                 text.IndexOf("more", StringComparison.OrdinalIgnoreCase) > 0)
             {
-                return true;
+                return ContinuationKind.StackLine;
             }
 
-            return false;
+            // Android 上 player 的 managed 栈：Proxy_TaskGuide:CheckGuide()
+            if (UnityStackFrame.IsMatch(text.TrimEnd()))
+            {
+                return ContinuationKind.UnityFrame;
+            }
+
+            return ContinuationKind.None;
         }
 
         #region C# 堆栈抑制
