@@ -29,6 +29,7 @@ python scripts/send.py send <文件>.json --dry-run   # 只校验不真执行
 python scripts/send.py send <文件>.json --request-id <ID>  # 幂等下发（重试不会二次执行）
 python scripts/send.py cancel                 # 请求协作式取消当前批次
 python scripts/send.py compile                # 编译 + 等待 + 回传错误（改 .cs 后的闭环）
+python scripts/send.py seq <步骤>.json         # 顺序执行多步，步间由客户端等待（跨帧节奏）
 ```
 
 客户端从 `<工作空间>/.workbuddy/UnityEditCommand/.http-info.<projectHash>` 读取端口与令牌，
@@ -56,6 +57,46 @@ python scripts/send.py compile                # 编译 + 等待 + 回传错误�
 
 `resolve` 子命令只做定位、不下发，用来在"卡住"时看清到底连到了谁。怀疑连错进程时第一时间跑它，
 而不是去翻 `netstat` / 进程命令行（那只是兜底手段）。
+
+### 顺序执行（客户端侧等待，`seq`）
+
+服务端**一条指令只占一帧、一个批次在一个 tick 内跑完**，所以"点一下 → 等动画 → 再看结果"
+只能由客户端控节奏。`seq` 就是那个控制器：**一次一步、各自一个 HTTP 请求、步间自己 sleep**，
+服务端零改动，随时可以不用它。
+
+```bash
+python scripts/send.py seq steps.json            # 人看的排版
+python scripts/send.py seq steps.json --json     # 机读：{"ok":…,"total":…,"steps":[…]}
+python scripts/send.py seq steps.json --dry-run  # 每步都只校验
+```
+
+步骤文件（顶层 `steps` 数组；也可以直接给普通的 `{"commands":[…]}`，那就当单步脚本）：
+
+```json
+{
+  "steps": [
+    { "label": "点开始按钮",
+      "commands": [ { "id": "runtime.click", "params": { "target": "[scene:Level1]UIRoot/BtnStart" } } ],
+      "waitAfterMs": 800 },
+    { "label": "确认界面变了",
+      "commands": [ { "id": "runtime.hierarchy", "params": { "root": "[scene:Level1]UIRoot" } } ] }
+  ]
+}
+```
+
+| 字段 | 默认 | 说明 |
+| --- | --- | --- |
+| `label` | `第 N 步` | 输出里的名字 |
+| `commands` | 必填 | 与 `send` 的指令数组同构 |
+| `waitAfterMs` | 0 | **这一步成功后**等多久再发下一步（最后一步不等待） |
+| `stopOnError` | `true` | 这一步失败后是否停止后续步骤 |
+| `waitBusy` | 取 `--wait-busy` | 发这一步前若编辑器在编译/刷新，最多等几秒 |
+
+退出码：`0` 全部成功、`1` 某步失败或有步未执行、`3` 某步被协议层拒绝、`4` 等空闲超时、`2` 步骤文件本身不合法。
+带 `--request-id X` 时每步派生 `X-1`、`X-2`……，重跑整份脚本不会把已成功的步骤再执行一遍。
+
+**别把它当帧级同步用**：`waitAfterMs` 是墙上时间，帧率波动时不准。要确认状态，宁可在下一步
+轮询 `runtime.hierarchy` / `editor.state` 看真实结果，而不是把 sleep 调长、调准。
 
 ## MCP 通道（推荐给 AI Agent 用）
 
@@ -265,8 +306,10 @@ Unity 没启动时 `tools/list` 仍会在半秒内返回那 5 个元工具，调
 
 ### 三条硬边界（别硬扛）
 
-1. **没有跨帧等待**。一条指令只占一帧，所以"点一下 → 等动画 → 再点"要**客户端自己控节奏**
-   （两次 HTTP 之间 sleep，或轮询 `runtime.hierarchy` 观察状态变化）。`runtime.scroll` 也因此**没有松手惯性**。
+1. **没有跨帧等待**。一条指令只占一帧，所以"点一下 → 等动画 → 再点"要客户端自己控节奏：
+   用 `send.py seq`（客户端侧 sleep，见上文「顺序执行」），或两次 HTTP 之间自己轮询
+   `runtime.hierarchy` 观察状态变化。`runtime.scroll` 也因此**没有松手惯性**。
+   注意服务端的 `batch` 指令解决不了这件事——它在一个 tick 内顺序跑完，中途不会让帧推进。
 2. **拿不到键盘/摇杆的硬输入**。游戏代码里 `Input.GetKeyDown`、新 Input System 直接读设备的部分，
    EventSystem 注入碰不到——这属于要改项目输入抽象才能解决的事，不是指令能绕过的。
 3. **点击有真实副作用**。开开关前的确认、用完关掉，都是纪律问题不是技术问题。

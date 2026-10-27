@@ -15,6 +15,7 @@
     python send.py send <文件>.json --request-id <ID>   # 幂等重放：同一 ID 不二次执行
     python send.py cancel                     # 请求协作式取消当前批次
     python send.py compile                    # 编译并回传错误（改完 .cs 后的闭环）
+    python send.py seq <步骤>.json             # 顺序执行多步，步间由客户端等待（跨帧节奏）
 
 定位正确的端点（本客户端最重要的一件事）：
     同一个工程目录里可能同时跑着多个 Unity 进程，它们都会加载同一套 Editor 程序集并
@@ -26,7 +27,7 @@
 
 退出码：
     0  HTTP 200 且 ok=true（全部指令成功）
-    1  HTTP 200 但 ok=false（有指令失败，报告已打印）
+    1  HTTP 200 但 ok=false（有指令失败；seq 时表示某一步失败或后面有步没执行）
     2  连不上服务（未启动、信息文件缺失、或找不到任何可达端点）
     3  协议错误（400/401/404/405/413）
     4  编辑器忙碌（503）
@@ -733,6 +734,155 @@ def cmd_send(client, args):
     return 0 if payload.get("ok") else 1
 
 
+def load_steps(path):
+    """读步骤文件 → (steps, error)。格式见 SKILL.md「顺序执行（客户端侧等待）」。"""
+    body = read_body(path)
+    if body is None:
+        return None, "步骤文件读不到：%s" % path
+    if not body.strip():
+        return None, "步骤文件为空：%s" % path
+    try:
+        data = json.loads(body)
+    except ValueError as exc:
+        return None, "步骤文件不是合法 JSON：%s" % exc
+
+    if isinstance(data, dict) and "steps" not in data and "commands" in data:
+        # 允许直接把普通指令文件当单步脚本用，省得为一步再包一层
+        data = [data]
+    elif isinstance(data, dict):
+        data = data.get("steps")
+
+    if not isinstance(data, list) or not data:
+        return None, "步骤文件里需要 steps 数组（或直接给 {\"commands\": [...]}）：%s" % path
+
+    steps = []
+    for offset, item in enumerate(data, 1):
+        if not isinstance(item, dict):
+            return None, "第 %d 步不是对象" % offset
+        commands = item.get("commands")
+        if not isinstance(commands, list) or not commands:
+            return None, "第 %d 步缺 commands 数组（或为空）" % offset
+        try:
+            wait_ms = int(item.get("waitAfterMs") or 0)
+            wait_busy = int(item.get("waitBusy") or 0)
+        except (TypeError, ValueError):
+            return None, "第 %d 步的 waitAfterMs / waitBusy 不是数字" % offset
+        steps.append({
+            "label": str(item.get("label") or ("第 %d 步" % offset)),
+            "commands": commands,
+            "waitAfterMs": max(0, wait_ms),
+            "waitBusy": max(0, wait_busy),
+            "stopOnError": bool(item.get("stopOnError", True)),
+        })
+    return steps, None
+
+
+def cmd_seq(client, args):
+    """客户端侧顺序执行：一步一个 HTTP 请求，步间按 waitAfterMs 自己等。
+
+    服务端一条指令只占一帧、一个批次在一个 tick 内跑完，所以「点一下 → 等动画 → 再看结果」
+    只能由客户端控节奏。这里就是那个控制器：**服务端零改动**，随时可回退。
+    """
+    steps, error = load_steps(args.file)
+    if error:
+        sys.stderr.write(error + "\n")
+        return 2
+
+    total = len(steps)
+    results = []
+    started_all = time.time()
+
+    if not args.json:
+        print("顺序执行 %d 步（步间等待在客户端做，服务端零改动）" % total)
+
+    for position, step in enumerate(steps, 1):
+        label = step["label"]
+        wait_busy = step["waitBusy"] or args.wait_busy
+
+        if wait_busy > 0:
+            status, payload, _ = client.call("v1/status")
+            if status == 200 and isinstance(payload, dict) and payload.get("busy"):
+                if not wait_until_ready(client, wait_busy):
+                    results.append({"index": position, "label": label, "ok": False,
+                                    "error": "等待 Unity 空闲超时（%d 秒）" % wait_busy})
+                    if not args.json:
+                        sys.stderr.write("[%d/%d] %s → 等待空闲超时\n" % (position, total, label))
+                    if step["stopOnError"]:
+                        break
+                    continue
+
+        body = json.dumps({"commands": step["commands"]}, ensure_ascii=False)
+        params = []
+        if args.dry_run:
+            params.append("dryRun=1")
+        if args.request_id:
+            # 每步一个派生 ID：重跑整份脚本时不会把已成功的步骤再执行一遍
+            params.append("requestId=" + urllib.parse.quote("%s-%d" % (args.request_id, position)))
+        query = ("?" + "&".join(params)) if params else ""
+
+        tick = time.time()
+        status, payload, raw = client.call("v1/execute" + query, method="POST", body=body)
+        elapsed = int((time.time() - tick) * 1000)
+
+        entry = {"index": position, "label": label, "elapsedMs": elapsed, "payload": payload}
+        if status is None:
+            entry.update({"ok": False, "error": raw.strip()[:400]})
+        elif status != 200:
+            message = payload.get("message") if isinstance(payload, dict) else None
+            entry.update({"ok": False, "httpStatus": status,
+                          "error": message or raw.strip()[:400]})
+        else:
+            entry["ok"] = bool(payload.get("ok"))
+        results.append(entry)
+
+        if not args.json:
+            if entry.get("httpStatus"):
+                sys.stderr.write("[%d/%d] %s → 请求被拒绝（HTTP %s）：%s\n"
+                                 % (position, total, label, entry["httpStatus"], entry["error"]))
+            elif entry.get("error"):
+                sys.stderr.write("[%d/%d] %s → %s\n" % (position, total, label, entry["error"]))
+            else:
+                if payload.get("dryRun"):
+                    print("[%d/%d] %s → 校验通过（dry-run，%s 条未执行），%d ms"
+                          % (position, total, label, payload.get("total", 0), elapsed))
+                else:
+                    print("[%d/%d] %s → %s  %s/%s 条，%d ms"
+                          % (position, total, label, "成功" if entry["ok"] else "有失败",
+                             payload.get("succeeded", 0), payload.get("total", 0), elapsed))
+                for item in (payload.get("failures") or []):
+                    print("        ✗ #%s %-20s [%s] %s"
+                          % (item.get("index", "?"), item.get("id", "?"),
+                             item.get("status", "?"), item.get("message", "")))
+
+        if not entry["ok"] and step["stopOnError"]:
+            if not args.json:
+                sys.stderr.write("第 %d 步失败，按 stopOnError 停下；后面 %d 步未执行\n"
+                                 % (position, total - position))
+            break
+
+        if step["waitAfterMs"] > 0 and position < total:
+            if not args.json:
+                print("        等待 %d ms……" % step["waitAfterMs"])
+            time.sleep(step["waitAfterMs"] / 1000.0)
+
+    ok = len(results) == total and all(item["ok"] for item in results)
+    if args.json:
+        print(json.dumps({"ok": ok, "total": total, "executed": len(results),
+                          "elapsedMs": int((time.time() - started_all) * 1000),
+                          "steps": results}, ensure_ascii=False, indent=2))
+    else:
+        print("结论：%s（%d/%d 步成功，总耗时 %.1f s）"
+              % ("全部成功" if ok else "有失败或未执行完",
+                 sum(1 for item in results if item["ok"]), total,
+                 time.time() - started_all))
+
+    if not results:
+        return 2
+    if any(item.get("httpStatus") for item in results):
+        return 3
+    return 0 if ok else 1
+
+
 def cmd_simple(client, args, path):
     status, payload, raw = client.call(path)
     if status is None:
@@ -939,11 +1089,11 @@ def build_parser():
         prog="send.py",
         description="向 Unity 编辑器的指令系统下发 JSON 指令",
     )
-    parser.add_argument("command", choices=["ping", "status", "commands", "send", "resolve", "cancel", "compile"],
+    parser.add_argument("command", choices=["ping", "status", "commands", "send", "seq", "resolve", "cancel", "compile"],
                         help="要执行的操作；resolve 只做端点定位诊断，cancel 请求协作式取消，"
-                             "compile 触发编译并回传错误")
+                             "compile 触发编译并回传错误，seq 顺序执行多步（步间客户端等待）")
     parser.add_argument("file", nargs="?",
-                        help="send 时的指令 JSON 文件路径，'-' 表示从标准输入读")
+                        help="send 的指令 JSON / seq 的步骤 JSON 文件路径，'-' 表示从标准输入读")
     parser.add_argument("--dry-run", action="store_true", help="只校验不真正执行")
     parser.add_argument("--request-id", metavar="ID",
                         help="幂等键：同一 ID 重试不会二次执行（服务端缓存 5 分钟）")
@@ -977,8 +1127,8 @@ def main(argv=None):
     if getattr(args, "project_root", None):
         configure(args.project_root)
 
-    if args.command == "send" and not args.file:
-        parser.error("send 需要指定指令文件路径（'-' 表示标准输入）")
+    if args.command in ("send", "seq") and not args.file:
+        parser.error("%s 需要指定 JSON 文件路径（'-' 表示标准输入）" % args.command)
 
     if args.command == "resolve":
         return cmd_resolve(args)
@@ -1008,6 +1158,8 @@ def main(argv=None):
     client = Client(chosen.url, chosen.token, args.timeout)
     if args.command == "send":
         return cmd_send(client, args)
+    if args.command == "seq":
+        return cmd_seq(client, args)
     if args.command == "cancel":
         return cmd_cancel(client, args)
     if args.command == "compile":
