@@ -4,6 +4,7 @@
 
 MCP 客户端走 adb_mcp_server.py；这个脚本是给人用的：
     python adb_cli.py status
+    python adb_cli.py devices
     python adb_cli.py logcat start --serial 2LQ0224A15000813 --tag Unity
     python adb_cli.py logcat stop
 """
@@ -24,6 +25,7 @@ def main():
     sub = parser.add_subparsers(dest="command")
 
     sub.add_parser("status", help="查服务与抓取状态")
+    sub.add_parser("devices", help="列出已连接的设备/模拟器")
 
     logcat = sub.add_parser("logcat", help="启停 logcat")
     logcat.add_argument("action", choices=["start", "stop", "restart", "status"])
@@ -43,6 +45,10 @@ def main():
     try:
         if args.command == "status" or (args.command == "logcat" and args.action == "status"):
             print(bridge.tool_adb_status({})["content"][0]["text"])
+            return 0
+
+        if args.command == "devices":
+            print(bridge.tool_adb_devices({})["content"][0]["text"])
             return 0
 
         if args.command == "logcat":

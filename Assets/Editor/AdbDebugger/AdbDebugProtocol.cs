@@ -21,6 +21,7 @@ namespace CivilRev.AdbDebugger
         /// <summary>请求路径前缀（都在本工具自己的端口上，不与指令系统共用）</summary>
         internal const string StatusPath = "/v1/status";
         internal const string LogcatPath = "/v1/logcat";
+        internal const string DevicesPath = "/v1/devices";
 
         /// <summary>把 <c>RawUrl</c> 拆成路径与查询串</summary>
         internal static void SplitUrl(string rawUrl, out string path, out string query)
@@ -208,6 +209,18 @@ namespace CivilRev.AdbDebugger
             var inner = new JsonOut();
             body(inner);
             _builder.Append(inner.ToString());
+            return this;
+        }
+
+        /// <summary>
+        /// 原样塞入一段**已经是合法 JSON** 的文本（数组 / 对象）。
+        /// 用来拼"对象数组"这类 <see cref="Arr(string,IEnumerable{string})"/> 表达不了的结构；
+        /// 正确性由调用方保证——这里不做校验（本工具的输出全是自造的，不接外部输入）。
+        /// </summary>
+        internal JsonOut Raw(string name, string json)
+        {
+            Key(name);
+            _builder.Append(string.IsNullOrEmpty(json) ? "null" : json);
             return this;
         }
 

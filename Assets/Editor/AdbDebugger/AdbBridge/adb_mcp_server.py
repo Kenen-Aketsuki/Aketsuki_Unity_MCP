@@ -254,6 +254,9 @@ class Bridge(object):
     def status(self):
         return self.call("/v1/status")
 
+    def devices(self):
+        return self.call("/v1/devices")
+
     def logcat(self, params):
         return self.call("/v1/logcat", params)
 
@@ -290,6 +293,12 @@ def tool_adb_status(arguments):
                  % ("运行中" if payload.get("running") else "未运行",
                     payload.get("port"),
                     "运行中" if payload.get("logcatRunning") else "未运行"))
+    if "deviceCount" in payload:
+        serial = payload.get("serial") or ""
+        lines.append("设备 %s｜可用 %s/%s 台"
+                     % (("指定 " + serial) if serial else "自动",
+                        payload.get("usableDevices", 0),
+                        payload.get("deviceCount", 0)))
     if payload.get("logcatRunning"):
         lines.append("收到 %s 行 / 打印 %s 条 / 合并 %s 行 / 过滤 %s / 丢弃 %s"
                      % (_fmt_int(payload.get("received", 0)),
@@ -305,6 +314,39 @@ def tool_adb_status(arguments):
         lines.append("注意：%s" % payload.get("notice"))
     if payload.get("lastError"):
         lines.append("上次失败：%s" % payload.get("lastError"))
+
+    lines.append("")
+    lines.append(_json_text(payload))
+    return _text_result("\n".join(lines))
+
+
+def tool_adb_devices(arguments):
+    """列设备。启动 logcat 之前先看一眼，尤其是有模拟器 + 真机同时插着的时候。"""
+    try:
+        payload = BRIDGE.devices()
+    except BridgeError as error:
+        return _text_result(str(error), is_error=True)
+
+    devices = payload.get("devices") or []
+    lines = []
+    if not devices:
+        lines.append("没有已连接的设备或模拟器（USB 调试开了吗？线插好了吗？）")
+    else:
+        for item in devices:
+            mark = "  ← 当前选中" if item.get("selected") else ""
+            lines.append("- %s｜%s｜%s%s"
+                         % (item.get("model") or "(未知型号)",
+                            item.get("serial") or "?",
+                            item.get("state") or "?",
+                            mark))
+            if not item.get("usable") and item.get("hint"):
+                lines.append("    " + str(item["hint"]))
+
+    serial = payload.get("serial") or ""
+    lines.append("")
+    lines.append("当前选择：%s" % (serial if serial else "自动（adb 自己挑唯一设备）"))
+    if payload.get("error"):
+        lines.append("注意：%s" % payload["error"])
 
     lines.append("")
     lines.append(_json_text(payload))
@@ -350,11 +392,20 @@ TOOLS = [
         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
     },
     {
+        "name": "adb_devices",
+        "description": (
+            "列出当前连接的 Android 设备/模拟器（序列号、型号、状态）。"
+            "状态不是 device 的（unauthorized/offline）会附带原因与修法。"
+            "多设备并存时，用它拿到 serial 再传给 adb_logcat。"),
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
         "name": "adb_logcat",
         "description": (
             "启停 Android 设备的 logcat 抓取。日志会以 [ADB] 前缀逐条打进 Unity 控制台"
             "（一次异常的堆栈会合并成一条日志），用 Unity 侧的 console.read 读内容。"
-            "action=start 需要设备已连接（USB 调试已授权或模拟器已启动）。"
+            "action=start 需要设备已连接（USB 调试已授权或模拟器已启动），"
+            "不确定连了哪台时先调 adb_devices。"
             "抓完请 stop —— logcat 是持续洪流。"),
         "inputSchema": {
             "type": "object",
@@ -365,13 +416,20 @@ TOOLS = [
                     "description": "start 启动、stop 停止、restart 重连、status 查状态",
                     "default": "start",
                 },
-                "tag": {"type": "string", "description": "tag 子串过滤（大小写不敏感）；Unity 的日志 tag 是 Unity"},
+                "tag": {
+                    "type": "string",
+                    "description": "tag 子串过滤（大小写不敏感），默认 Unity（Unity 的 Debug.Log 都在这个 tag 下）；"
+                                   "空字符串 = 不过滤，整机日志都会进来",
+                },
                 "level": {
                     "type": "string",
                     "enum": ["V", "D", "I", "W", "E", "F"],
                     "description": "最低级别，默认 I",
                 },
-                "serial": {"type": "string", "description": "设备序列号；多设备时必须填，单设备可留空"},
+                "serial": {
+                    "type": "string",
+                    "description": "设备序列号，调 adb_devices 拿；留空＝自动（仅当只有一台可用设备时）",
+                },
                 "backfill": {"type": "integer", "description": "连接时先回填多少行历史（-T N），默认 20"},
                 "stack": {
                     "type": "integer",
@@ -389,6 +447,7 @@ TOOLS = [
 
 TOOL_HANDLERS = {
     "adb_status": tool_adb_status,
+    "adb_devices": tool_adb_devices,
     "adb_logcat": tool_adb_logcat,
 }
 

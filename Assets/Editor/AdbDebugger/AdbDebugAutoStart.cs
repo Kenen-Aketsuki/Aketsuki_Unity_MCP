@@ -34,6 +34,10 @@ namespace CivilRev.AdbDebugger
 
         private static void Restore()
         {
+            // 先把设备列表扫一遍：/v1/status 与 /v1/devices 里会报"几台设备可用"，
+            // 不预热的话第一次问的人会看到 0 台（真扫在后台线程，不占启动时间）
+            AdbDevices.RequestScan();
+
             if (!AdbDebuggerSettings.ServerEnabled)
             {
                 return;

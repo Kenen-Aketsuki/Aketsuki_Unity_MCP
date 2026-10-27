@@ -388,7 +388,7 @@ namespace CivilRev.AdbDebugger
             if (string.IsNullOrEmpty(adb))
             {
                 error = "找不到 adb：" + source +
-                        "。请在「指令控制台 → ADB Logcat」里手填 adb.exe 的完整路径" +
+                        "。请在「Tools / ADB 调试 / ADB 调试台」里手填 adb.exe 的完整路径" +
                         "（通常在 <Android SDK>/platform-tools/adb.exe）。";
                 _state = StateFailed;
                 _lastError = error;
@@ -978,8 +978,41 @@ namespace CivilRev.AdbDebugger
                 _lastError += "：" + stderr;
             }
 
-            AdbLog.Error(_lastError +
-                             "。常见原因：没连设备、开了多个设备但没填序列号、adb server 版本不匹配。");
+            var advice = "常见原因：没连设备、开了多个设备但没填序列号、adb server 版本不匹配。";
+            var serial = (AdbDebuggerSettings.Serial ?? string.Empty).Trim();
+            if (serial.Length > 0)
+            {
+                advice += "当前指定设备：" + serial + "。";
+            }
+
+            // 把"上次扫到哪几台"直接写进报错：设备换了是这个报错最常见的成因，
+            // 让用户不用再开窗口对一遍序列号。措辞保留"最近一次"，因为这里读的是缓存，
+            // 现扫要起进程、会卡住主线程的 Tick
+            var devices = AdbDevices.Snapshot();
+            if (devices.Count > 0)
+            {
+                var names = new StringBuilder();
+                for (var i = 0; i < devices.Count; i++)
+                {
+                    if (i > 0)
+                    {
+                        names.Append("、");
+                    }
+
+                    names.Append(devices[i].Serial);
+                    if (!devices[i].Usable)
+                    {
+                        names.Append("（").Append(devices[i].State).Append("）");
+                    }
+                }
+
+                advice += "最近一次扫描到的设备：" + names + "。";
+            }
+
+            AdbLog.Error(_lastError + advice);
+
+            // 进程没了，设备列表很可能也变了（拔线 / 关模拟器）——顺手重扫，窗口下一帧就更新
+            AdbDevices.RequestScan();
 
             // 开关必须跟着现实走：进程没了还显示"已启用"是最容易误导人的状态
             if (AdbDebuggerSettings.LogcatEnabled)
