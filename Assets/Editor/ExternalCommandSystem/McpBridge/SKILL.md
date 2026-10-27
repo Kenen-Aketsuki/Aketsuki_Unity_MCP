@@ -200,6 +200,36 @@ Unity 没启动时 `tools/list` 仍会在半秒内返回那 5 个元工具，调
 > 已知限制：编译**失败**时不会发生域重载，服务仍然存活、能正常回答"错在哪"——这是闭环成立的前提。
 > 编译**成功**会重载域，内存里的完整消息列表会清空，但摘要存在 `SessionState` 里，`lastCompile` 仍可查。
 
+## Android 真机日志（`adb.logcat`，默认关闭）
+
+要在真机/模拟器上验证"代码在设备上跑成什么样"，用 `adb.logcat` 把设备日志拉进 Unity 控制台：
+
+```json
+{"commands":[{"id":"adb.logcat","params":{"action":"start","serial":"127.0.0.1:7555","level":"I"}}]}
+```
+
+- `action`：`start` / `stop` / `restart` / `status`；`status` 返回 `running` / `received` / `printed` / `coalesced` / `filtered` / `dropped` / `stackLines` / `notice`。
+- 设备日志进控制台，前缀 `[ADB] `，级别已映射（`W`→warning，`E/F`→error）。读它不用新接口：
+
+```json
+{"commands":[{"id":"console.read","params":{"count":30,"contains":"[ADB]","type":"error"}}]}
+```
+
+- **堆栈是合并过的**：一次 Java 异常在 logcat 里是几十行独立记录，这里会把 `at …` / `Caused by: …` / `... N more`
+  并进前一条，所以**一条控制台日志可能含多行文本**（首行 + 堆栈）。`printed` 是条数，`coalesced` 是并进去的行数，
+  `received - printed - filtered` 大致就是合并掉的行数。
+- 降噪两个参数（都即时生效）：
+
+| 参数 | 默认 | 说明 |
+| --- | --- | --- |
+| `stack` | 40 | 一条最多并入多少行堆栈；**`stack:0` = 完全不打印调用栈**，只要首行 |
+| `suppressStack` | true | 关掉每条日志下面那段指向 `AdbLogcatService.Emit` 的 C# 堆栈（打印期间临时改 Unity 堆栈设置，打完还原） |
+
+- 它**不受「运行时指令」开关约束**（操作的是主机上的 adb，不碰运行中的游戏），但自己默认关闭。
+- 三条实测边界：① 一次只跟一个设备，多设备必须填 `serial`；② 设备不在时 adb **不会退出**，会等，
+  状态栏/`notice` 会显示 `- waiting for device -`，此时一条日志都不会来；③ 每帧最多**输出 20 条 / 扫描 200 行**，队列超 5000 行开始丢（看 `dropped`）。
+- 抓完记得 `{"action":"stop"}` —— logcat 是持续洪流，一直开着会持续往控制台灌。
+
 ## 运行时指令（Play 模式干预，默认关闭）
 
 `runtime.*` 这一组指令操作的是**正在运行的游戏**：进/出 Play、找运行时节点、点按钮、拖列表、写输入框。

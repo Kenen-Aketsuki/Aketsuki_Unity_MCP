@@ -389,6 +389,7 @@ CommandRegistry.Default.RegisterInstance("my.cmd", new MyCommand(dependency));
 | `asset.compile` | 请求 Unity 重新编译脚本程序集（默认先 `AssetDatabase.Refresh()` 同步资源数据库，否则外部直写的 .cs 不被 ADB 感知，用户随后 Ctrl+R 会再补编一次；`clean:true` 做干净重建）；**Play 模式下阻断** | `clean`, `refresh`(默认 true) |
 | `asset.compileReport` | 读取最近一次编译结果（错误/警告明细，结构化） | `clear` |
 | `console.read` | 读取最近的编辑器/运行时日志（异常、报错） | `type`, `contains`, `clear` |
+| `adb.logcat` | 启停 ADB logcat，Android 日志打进 Unity 控制台（前缀 `[ADB] `，堆栈续行合并成一条）。**默认关闭**，不受「运行时指令」开关约束（它操作主机上的 adb，不碰运行中的游戏） | `action`(start/stop/restart/status), `tag`, `level`, `serial`, `backfill`, `stack`(0=不打调用栈), `suppressStack` |
 | `ui.canvas` | 确保场景有 Canvas（含 Scaler 与 EventSystem）；复用时取最外层那个，并写入变量 `ui.canvas`（名字）与 `ui.canvasPath`（完整路径） | `name`, `reuseExisting`, `createEventSystem`, `referenceResolution` |
 | `ui.uiRoot` | 生成 UI 根节点（自带 Canvas，结构与运行期 `uiRoot` 约定一致） | `name`, `referenceResolution`, `createEventSystem`, `reuseExisting` |
 | `ui.node` | 空 RectTransform 容器（只做父节点/坐标系） | `name`, `parent` + 布局参数 |
@@ -671,12 +672,98 @@ Assets/Editor/ExternalCommandSystem/
 
 ---
 
+## 5.4 ADB logcat（Android 真机日志）
+
+从主机拉起 `adb logcat`，把设备 / 模拟器的日志**逐条**打进 Unity 控制台。**默认关闭**。
+
+### 怎么开
+
+三个入口改的是**同一个开关**（`CommandSystemSettings.AdbLogcatEnabled`，按工程隔离）：
+
+- 菜单 **Tools / 指令系统 / ADB Logcat 日志**
+- 指令控制台 →「ADB logcat（Android 真机日志）」分区
+- 指令 `adb.logcat`（`action=start` / `stop` / `restart` / `status`）
+
+关掉立刻杀进程，不留后台抓取；域重载 / 重启编辑器时按设置自动恢复（`beforeAssemblyReload`
+只杀进程不清开关，所以改完 `.cs` 重编译后会自己接回来）。
+
+### 参数
+
+| 项 | 默认 | 说明 |
+| --- | --- | --- |
+| `adb` 路径 | 空＝自动定位 | 顺序：手填路径 → `ANDROID_HOME`/`ANDROID_SDK_ROOT` → Unity 的 `AndroidSdkRoot` → **编辑器自带** `PlaybackEngines/AndroidPlayer/SDK` → `PATH`。Hub 装的 Unity 都带一份 platform-tools，所以多数机器不用配 |
+| 设备序列号 | 空＝自动 | 多设备时必须填（`adb devices` 里的那个，如 `127.0.0.1:7555`）。**改完要重新连接** |
+| Tag 过滤 | 空＝不过滤 | tag 子串匹配、大小写不敏感。**即时生效** |
+| 最低级别 | `I` | V/D/I/W/E/F。**即时生效** |
+| 回填行数 | 20 | 连接时先补多少行历史（`-T N`）。**改完要重新连接** |
+| 堆栈合并行数 | 40 | 一条日志最多并入多少行堆栈续行；**0 = 完全不打印调用栈**。**即时生效** |
+| 隐藏 C# 堆栈 | 开 | 打印期间临时把 Unity 的堆栈类型设成 `None`，打完还原。**即时生效** |
+
+### 输出形态
+
+**一条日志 = 首行 + 它的堆栈续行**，前面加 `[ADB] ` 前缀；级别映射成 Unity 的日志类型
+（`W→LogWarning`，`E/F/A→LogError`，其余 `Log`），所以错误在控制台是红的。
+
+堆栈为什么要合并：logcat 里一次 Java 异常是十几到上百行，**每行都带完整前缀、都是独立记录**；
+逐行打印会把一次崩溃刷成几十条控制台条目，每条还各自附带一段 C# 堆栈。合并后它只是**一条**日志，
+在控制台列表里占一行，展开才看到全部堆栈：
+
+```
+[ADB] java.lang.NullPointerException: Attempt to invoke virtual method ...   ← 列表里就这一行
+      ├ at com.demo.Game$1.onClick(Game.java:42)                             ← 展开后
+      ├ at android.view.View.performClick(View.java:7448)
+      └ ... 12 more
+```
+
+识别为续行的四类（判定看 **message 部分**，因为 logcat 里堆栈行也带时间戳和 tag）：
+
+- `at …`（Java 的 `\tat com.x.Y.z(Foo.java:42)` 与 Unity 的 `  at Foo.Bar () [0x…] in <…>:0`）
+- `Caused by: …` / `Suppressed: …`
+- `... N more`
+
+合并上限两道：**行数**（上面那个参数）与**字符数**（2000）。撞到任一上限就停止并入，
+末尾补一行 `…（堆栈已截断，本条最多合并 N 行）`。`FATAL EXCEPTION:` / `Process:` 这类崩溃元信息
+不并入——它们各占一行反而更好认。
+
+**为什么要隐藏 C# 堆栈**：`Debug.Log` 会自动附一段调用栈，而每条 `[ADB]` 日志的堆栈都指向
+`AdbLogcatService.Emit` 同一个位置，零信息量。实现方式是打印期间把
+`Application.SetStackTraceLogType` 临时设成 `None`，用 **500ms 抑制窗口**（不是每条切成对切，
+那会每秒写几百次编辑器偏好），停止 / 退出 / 域重载时立刻还原。关掉这个开关就完全按 Unity 全局设置走。
+
+> 副作用：抑制窗口内你自己脚本的 `Debug.Log` 也会没有堆栈。只有 500ms 窗口且随时可关，
+> 抓 logcat 时默认开着更划算。
+
+AI 侧读法——**不需要新接口**，日志已经进了 `CommandConsoleBuffer`：
+
+```json
+{"commands":[{"id":"console.read","params":{"count":30,"contains":"[ADB]","type":"error"}}]}
+```
+
+### 为什么是 `-T N` 而不是 `-t N` / `-d`
+
+`-t N` 会隐式 `-d`：打印完就退出，要持续输出就得反复拉进程、还会重复打印。`-T N` 才是
+「先补 N 行、然后保持连接继续跟随」。回填填 0 会退化成「整个缓冲区倒出来」（上万行），
+所以 `<=0` 时干脆不传这个参数，由用户自己承担。
+
+### 三条已知边界
+
+1. **一次只跟一个设备**（`-s` 单序列号）。多设备不填序列号时 adb 直接报错退出，错误里会说明。
+2. **设备不在时 adb 不退出**，而是挂着等，只在 stderr 打 `- waiting for device -`。
+   这个状态会浮到控制台状态栏与 `adb.logcat status` 的 `notice` 字段里——否则"进程在跑、一条日志没有"极难自查。
+3. **两道节流**：每帧最多**输出 20 条**、最多**扫描 200 行**原始输入（合并后一行输入常常不产出日志，
+   所以两个闸必须分开，否则真机洪流下队列永远追不上）。队列超过 5000 行开始丢弃（计 `dropped`）。
+   logcat 是洪流，连着不关一整天会一直往控制台灌；看完就关。
+
+---
+
 ## 6. 自动激活机制（重点：低开销）
 
 `Editor/CommandAutoRunner.cs` 用 `[InitializeOnLoad]` 自动启动，只做一件事——指令注册：
 
 1. **注册**：只在程序集重载时执行一次，使用 Unity 的 `TypeCache`（内部有缓存，不需要全量反射遍历程序集），并做一次 `ScanAssemblies` 兜底。
 2. **执行**：全部由控制台窗口或菜单**手动触发**，没有常驻监听、没有轮询、没有后台线程，空闲时零开销。
+   > 唯一例外是 §5.4 的 ADB logcat：开关打开期间有一个 stdout 读取线程 + 每帧一次的出队（输出上限 20 条 / 扫描上限 200 行），
+   > 关掉即停。它跟指令注册/执行无关，不影响上面这句的结论。
 
 > 旧的「文件状态监听」（`FileSystemWatcher` + 去抖 + 去重）**已被移除**；现在下发指令改走
 > **HTTP 指令服务**，不再有"保存文件即自动执行"。需要批量执行目录里的 `.json` 时，用控制台窗口的 **扫描目录**。

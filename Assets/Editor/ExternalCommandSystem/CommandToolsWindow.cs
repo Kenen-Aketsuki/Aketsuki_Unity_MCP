@@ -70,6 +70,8 @@ namespace CivilRev.CommandSystem.Editor
             EditorGUILayout.Space();
             DrawRuntimeSection();
             EditorGUILayout.Space();
+            DrawAdbLogcatSection();
+            EditorGUILayout.Space();
             DrawCommandListSection();
             EditorGUILayout.Space();
             DrawLogSection();
@@ -396,6 +398,179 @@ namespace CivilRev.CommandSystem.Editor
             {
                 EditorGUILayout.LabelField("（未注册任何运行时指令）", EditorStyles.miniLabel);
             }
+            EditorGUI.indentLevel--;
+        }
+
+        #endregion
+
+        #region ADB logcat 区
+
+        /// <summary>
+        /// ADB logcat 抓取开关与过滤条件。
+        /// <para>
+        /// 为什么单独成区：它是"从主机起一个外部进程、往控制台灌日志"的模块，
+        /// 与指令执行、HTTP 服务都没有关系；混进执行设置里会让人以为它影响指令结果。
+        /// </para>
+        /// </summary>
+        private void DrawAdbLogcatSection()
+        {
+            EditorGUILayout.LabelField("ADB logcat（Android 真机日志）", EditorStyles.boldLabel);
+
+            var enabled = CommandSystemSettings.AdbLogcatEnabled;
+            var newEnabled = EditorGUILayout.Toggle(AdbLogcatService.ToggleLabel, enabled);
+            if (newEnabled != enabled)
+            {
+                if (newEnabled)
+                {
+                    if (!AdbLogcatService.Start(out var error) && !string.IsNullOrEmpty(error))
+                    {
+                        CommandLog.Error(error);
+                    }
+                }
+                else
+                {
+                    AdbLogcatService.Stop();
+                }
+            }
+
+            // 状态每帧从服务读，而不是缓存——进程可能因为拔设备自己退出，
+            // 缓存会让界面显示"在跑"而实际早就没了
+            EditorGUILayout.LabelField("状态", AdbLogcatService.SummaryText, EditorStyles.miniLabel);
+
+            if (AdbLogcatService.IsRunning && !string.IsNullOrEmpty(AdbLogcatService.AdbPath))
+            {
+                EditorGUILayout.LabelField("adb", AdbLogcatService.AdbPath, EditorStyles.miniLabel);
+            }
+
+            if (!string.IsNullOrEmpty(AdbLogcatService.LastError))
+            {
+                EditorGUILayout.HelpBox(AdbLogcatService.LastError, MessageType.Error);
+            }
+
+            EditorGUI.indentLevel++;
+
+            #region adb 路径
+
+            EditorGUILayout.BeginHorizontal();
+            var adbPath = EditorGUILayout.TextField("adb 路径", CommandSystemSettings.AdbPath);
+            if (GUILayout.Button("浏览", GUILayout.Width(56)))
+            {
+                var picked = EditorUtility.OpenFilePanel("选择 adb 可执行文件", string.Empty,
+                    Application.platform == RuntimePlatform.WindowsEditor ? "exe" : string.Empty);
+                if (!string.IsNullOrEmpty(picked))
+                {
+                    adbPath = picked;
+                }
+            }
+
+            EditorGUILayout.EndHorizontal();
+
+            if (adbPath != CommandSystemSettings.AdbPath)
+            {
+                CommandSystemSettings.AdbPath = adbPath;
+                if (AdbLogcatService.IsRunning)
+                {
+                    CommandLog.Info("adb 路径已修改，点「重新连接」后生效");
+                }
+            }
+
+            if (string.IsNullOrEmpty(CommandSystemSettings.AdbPath))
+            {
+                EditorGUILayout.LabelField("留空＝自动定位：环境变量 → Unity 的 AndroidSdkRoot → 编辑器自带 SDK → PATH",
+                    EditorStyles.miniLabel);
+            }
+
+            #endregion
+
+            #region 设备与过滤
+
+            var serial = EditorGUILayout.TextField("设备序列号", CommandSystemSettings.AdbLogcatSerial);
+            if (serial != CommandSystemSettings.AdbLogcatSerial)
+            {
+                CommandSystemSettings.AdbLogcatSerial = serial;
+                CommandLog.Info("序列号已修改，点「重新连接」后生效");
+            }
+
+            EditorGUILayout.BeginHorizontal();
+            var tag = EditorGUILayout.TextField("Tag 过滤", CommandSystemSettings.AdbLogcatTag);
+
+            // 选项必须覆盖 CommandSystemSettings.AdbLogcatLevel 的**全部合法值**（含 A：
+            // 用 adb.logcat 指令设过 A 之后，这里少一项就会每帧判成"变了"→把用户设置刷回 I）
+            var levelOptions = new[] { "V", "D", "I", "W", "E", "F", "A" };
+            var currentLevel = Array.IndexOf(levelOptions, CommandSystemSettings.AdbLogcatLevel);
+            if (currentLevel < 0)
+            {
+                currentLevel = 2;
+            }
+
+            var pickedLevel = EditorGUILayout.Popup(currentLevel, levelOptions, GUILayout.Width(60));
+            EditorGUILayout.EndHorizontal();
+
+            if (tag != CommandSystemSettings.AdbLogcatTag || levelOptions[pickedLevel] != CommandSystemSettings.AdbLogcatLevel)
+            {
+                CommandSystemSettings.AdbLogcatTag = tag;
+                CommandSystemSettings.AdbLogcatLevel = levelOptions[pickedLevel];
+                // 这两个都是客户端过滤，改完立刻作用到正在跑的输出
+                AdbLogcatService.RefreshFilters();
+            }
+
+            var backfill = EditorGUILayout.IntField("回填行数", CommandSystemSettings.AdbLogcatBackfill);
+            if (backfill != CommandSystemSettings.AdbLogcatBackfill)
+            {
+                CommandSystemSettings.AdbLogcatBackfill = backfill;
+            }
+
+            // 先按 setter 同一套规则夹紧再比较，否则手填 -1 会每帧判成"变了"、每帧写一次 EditorPrefs
+            var stackRaw = EditorGUILayout.IntField("堆栈合并行数", CommandSystemSettings.AdbLogcatStackLines);
+            var stackLines = Math.Max(0, Math.Min(CommandSystemSettings.MaxAdbStackLines, stackRaw));
+            if (stackLines != CommandSystemSettings.AdbLogcatStackLines)
+            {
+                CommandSystemSettings.AdbLogcatStackLines = stackLines;
+                AdbLogcatService.RefreshFilters();
+            }
+
+            EditorGUILayout.LabelField(
+                stackLines <= 0
+                    ? "0 = 不打印调用栈，只留首行内容"
+                    : "一条日志最多并入这么多行堆栈（Java 异常 / Unity 崩溃堆栈合成一条），超出截断并注明",
+                EditorStyles.miniLabel);
+
+            var suppressStack = EditorGUILayout.Toggle("隐藏 C# 堆栈", CommandSystemSettings.AdbSuppressStack);
+            if (suppressStack != CommandSystemSettings.AdbSuppressStack)
+            {
+                CommandSystemSettings.AdbSuppressStack = suppressStack;
+                // 关掉的时候要立刻把用户原本的堆栈设置还回去，不能等下一次窗口到期
+                AdbLogcatService.RefreshFilters();
+            }
+
+            EditorGUILayout.LabelField("隐藏 C# 堆栈 = 不再显示每条 [ADB] 日志下面那段指向 Emit 的堆栈；" +
+                                       "关闭后按 Unity 全局设置显示", EditorStyles.miniLabel);
+
+            #endregion
+
+            EditorGUILayout.BeginHorizontal();
+            if (GUILayout.Button("重新连接"))
+            {
+                AdbLogcatService.Stop();
+                if (!AdbLogcatService.Start(out var error) && !string.IsNullOrEmpty(error))
+                {
+                    CommandLog.Error(error);
+                }
+            }
+
+            if (GUILayout.Button("清空计数"))
+            {
+                AdbLogcatService.ResetCounters();
+            }
+
+            EditorGUILayout.EndHorizontal();
+
+            EditorGUILayout.HelpBox(
+                "日志逐条打进 Unity 控制台，前缀 [ADB] ，地址已映射成 Unity 的级别（W→警告，E/F→错误）。" +
+                "AI 侧用 console.read（contains: \"[ADB]\"）即可读到。" +
+                "Tag / 级别即时生效；序列号与回填行数需要重新连接。",
+                MessageType.None);
+
             EditorGUI.indentLevel--;
         }
 

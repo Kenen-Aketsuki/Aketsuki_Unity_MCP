@@ -27,7 +27,7 @@ cd D:/Wrok_proj/Aketsuki_Unity_MCP
 python Assets/Editor/ExternalCommandSystem/McpBridge/send.py \
        --project-root D:/Wrok_proj/project_island_back status
 
-# ② 有哪些指令（60 条，参数说明由服务端 CommandAttribute 提供，不会漂）
+# ② 有哪些指令（61 条，参数说明由服务端 CommandAttribute 提供，不会漂）
 ... send.py --project-root <工程> commands
 
 # ③ 发一条
@@ -65,7 +65,7 @@ python Tools/deploy.py <目标> --verify      # 部署 + 让目标编辑器编�
 用不上就删掉那条，别看到报错又去装回来。
 
 **部署一次写两处**，两个都要管：
-1. `<工程>/Assets/Editor/ExternalCommandSystem/`（服务端 C#，133 个文件）
+1. `<工程>/Assets/Editor/ExternalCommandSystem/`（服务端 C#，140 个文件）
 2. `<工程>/.workbuddy/skills/unity-cmd/`（MCP 桥脚本 + `SKILL.md`，3 个文件）
 
 第 2 处是 MCP **真正拉起**的那份，不写它，AI 读到的指令说明就永远停在旧版（IMPR-007 的坑）。
@@ -112,6 +112,13 @@ python Tools/build_unitypackage.py --bundle   # → Tools/UnityPackage/Aketsuki_
    不影响正确性，但你等的时候别以为卡死了。
 7. **运行时指令默认关闭**（`CommandSystemSettings.RuntimeCommandsEnabled=false`，按工程存）。
    关着时连 `runtime.play/stop` 都失败，逃生口是常规指令 `editor.play` / `editor.stop`。
+8. **`adb.logcat` 一次只跟一个设备**，多设备必须填 `serial`；设备不在时 adb **不退出**、只是挂着等
+   （`- waiting for device -`，会浮到状态与 `notice` 字段里）。它是持续洪流，看完就 `action=stop`。
+9. **`adb.logcat` 打印的是合并后的日志**：一项 `at …` / `Caused by:` / `... N more` 续行会被并进前一条，
+   所以一条控制台日志可能含多行文本。上限两道（行数 `stack`、字符 2000），撞到就截断并注明。
+   `stack=0` 就是不打印调用栈。别把这些"多行"当成一次打印了多条——`printed` 才是条数。
+10. **`suppressStack` 会临时改 Unity 全局堆栈设置**（打印期间 `None`，500ms 抑制窗口，停止/退出/域重载立即还原）。
+    副作用是窗口内你自己脚本的 `Debug.Log` 也没堆栈。关掉这个开关就完全按 Unity 全局设置走。
 
 ## 8. 未决事项（接手前先看这段）
 
