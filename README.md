@@ -8,6 +8,17 @@
 
 **本仓库只有这套工具**：没有任何游戏逻辑、场景、美术资源、第三方游戏依赖。
 
+> **仓库里有两个并列的工具**（2026-10-27 拆的，FEAT-007）：
+>
+> | 工具 | 目录 | 干什么 | 包名 | 端口 |
+> | --- | --- | --- | --- | --- |
+> | Unity MCP 指令系统 | `Assets/Editor/ExternalCommandSystem/` | 下发指令控制编辑器 / 运行时 | `Aketsuki_Unity_MCP` | 57831 |
+> | ADB 调试 | `Assets/Editor/AdbDebugger/` | 抓 Android 真机 logcat 进控制台 | `Aketsuki_AdbDebugger` | 57841 |
+>
+> 两者**零依赖**（ADB 是独立 asmdef，`references: []`），可只装其一、各有独立包与技能目录。
+> 本文档其余部分讲的是**指令系统**；ADB 看
+> [`Assets/Editor/AdbDebugger/README.md`](Assets/Editor/AdbDebugger/README.md)。
+
 > **⚠️ HTTP 200 ≠ 指令成功（DOC-001）。** 指令业务失败时服务端仍返回 200，
 > 成败在 body 的 `ok` / `records[].status`；批量看 `succeeded`/`failed`。
 > 判据顺序永远是 **body 优先，状态码只用来识别网络/协议层错误**。
@@ -18,6 +29,7 @@
 
 ```
 Aketsuki_Unity_MCP/                     ← Unity 工程根（用 Unity 直接打开这里）
+├── Assets/Editor/AdbDebugger/       ★ 另一个独立工具：ADB logcat → Unity 控制台（见其 README）
 ├── Assets/Editor/ExternalCommandSystem/
 │   ├── Core/          JSON/         指令框架、HTTP 协议层、路径与场景查询
 │   ├── Commands/                    内置指令（gameobject / component / prefab / ui / scene / asset ...）
@@ -38,6 +50,7 @@ Aketsuki_Unity_MCP/                     ← Unity 工程根（用 Unity 直接�
     ├── build_unitypackage.py        打成 .unitypackage（排除 Project/，三次校验防泄漏）
     ├── install_unitypackage.py      解包直接落地到别的工程（不经过 Unity 导入器）
     ├── verify_unitypackage.py       无头 Unity 建空工程 → 导入 → 补 UGUI/TMP 再编译，断言可用
+    ├── compile_adb.py               离线编译 ADB 程序集（asmdef 没有 csproj，先借主程序集的引用）
     └── feedback_index.py            重建 Feedback/索引.md + 校验状态/编号/必填字段
 ```
 
@@ -81,6 +94,9 @@ python Tools/deploy.py --verify            # 部署后让目标工程编译一�
 python Tools/deploy.py --offline-compile   # 不依赖编辑器，离线编译验证编辑程序集（2 秒级）
 python Tools/deploy.py --force-refresh     # 编辑器在后台不响应时，提到前台代按 Ctrl+R
 python Tools/deploy.py --prune             # 顺带删掉目标侧的孤儿文件（默认只报告）
+
+python Tools/deploy.py --module adb --list  # ADB 工具（不带 --module 就是指令系统）
+python Tools/deploy.py --module adb         # 部署 ADB（29 文件 + 桥 3 文件）
 ```
 
 当前登记：`project_island_back`、`majotavern`、`CivelRev`（工程根在 `CivelRev/Demo/CivilizationRevival`，
@@ -113,7 +129,14 @@ python Tools/build_unitypackage.py --list-only      # 只看会打进哪些资�
 python Tools/verify_unitypackage.py --with-ui \
     --unity "C:/Program Files/Unity/Hub/Editor/2021.3.16f1c1/Editor/Unity.exe"
 python Tools/install_unitypackage.py --project <目标工程根>   # 目标工程正开着编辑器时用这个
+
+python Tools/build_unitypackage.py --module adb --bundle      # ADB 工具的分发包
+python Tools/install_unitypackage.py --module adb --project <目标工程根>
 ```
+
+安装器**不写死路径**：装到哪、桥同步到哪个技能目录、同步哪几份文件，全从包内 `package.json`
+的 `installRoot` / `skillName` / `skillFiles` 读，所以两个工具的包共用同一份 `install.py`。
+同目录有多个包时用 `--module` 或 `-p` 指定，它不会替你猜。
 
 包内只有 `Assets/Editor/ExternalCommandSystem/`（含 `McpBridge/` 三个桥脚本），
 `Project/`（工程客制化）**强制排除**：收集阶段跳过、目录条目跳过、写包终检断言，

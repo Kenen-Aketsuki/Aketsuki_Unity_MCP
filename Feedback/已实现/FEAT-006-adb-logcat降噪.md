@@ -6,7 +6,7 @@ status: done
 source: Aketsuki_Unity_MCP
 created: 2026-10-27
 updated: 2026-10-27
-files: Assets/Editor/ExternalCommandSystem/Adb/AdbLogcatService.cs, Assets/Editor/ExternalCommandSystem/Adb/AdbLogcatCommands.cs, Assets/Editor/ExternalCommandSystem/CommandSystemSettings.cs, Assets/Editor/ExternalCommandSystem/CommandToolsWindow.cs
+files: Assets/Editor/AdbDebugger/AdbLogcatService.cs, Assets/Editor/AdbDebugger/AdbDebuggerSettings.cs, Assets/Editor/AdbDebugger/AdbDebugWindow.cs（原在 ExternalCommandSystem/Adb/，见 FEAT-007）
 proposal: false
 ---
 
@@ -91,3 +91,17 @@ FEAT-005 的"一行 logcat = 一条 Unity 日志"在真机上被放大成两处�
 - 抑制窗口内用户脚本日志无堆栈（500ms，可关）。
 - 合并按"连续续行"归并，不判断 pid/tag 是否与首行一致。跨进程交错的极端情况下理论上会串行归并，
   实际 logcat 输出是逐行原子写、交错的概率远低于噪声本身，暂不为它加复杂度。
+
+## 补记（同日，FEAT-007）
+
+本工单落地的第二天就把 ADB 整个拆成独立工具了，**代码本身没改，只是换了门牌**：
+
+| 原来 | 现在 |
+| --- | --- |
+| `ExternalCommandSystem/Adb/AdbLogcatService.cs` | `AdbDebugger/AdbLogcatService.cs` |
+| `CommandSystemSettings.Adb*` | `AdbDebuggerSettings.*`（独立前缀 `CivilRev.AdbDebug.`） |
+| 指令 `adb.logcat`（`AdbLogcatCommands.cs`） | **已删除**，改走 ADB 服务 `POST /v1/logcat` |
+| 指令控制台的 ADB 分区 | 窗口 `Tools / ADB 调试 / ADB 调试台` |
+
+上面记的合并规则、`stack=0` 退路、抑制窗口、两道节流，全部原样保留在新位置，
+`Assets/Editor/AdbDebugger/README.md` 是新的权威描述。

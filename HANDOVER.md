@@ -18,6 +18,18 @@ Unity **编辑器扩展** + 一层 **Python 桥**，让你（或 AI）用 HTTP /
 服务端是 C#，装在 **4 个 Unity 工程**里（现役 3 个，见 §4）。它只读写本地文件 + 监听
 `127.0.0.1`，没有远端通路。
 
+> **本仓库现在有两个并列的工具，不是一个。**
+>
+> | 工具 | 目录 | 干什么 | 包名 | 端口 |
+> | --- | --- | --- | --- | --- |
+> | 指令系统（本文档主角） | `Assets/Editor/ExternalCommandSystem/` | 下发指令控制编辑器 / 运行时 | `Aketsuki_Unity_MCP` | 57831 |
+> | ADB 调试 | `Assets/Editor/AdbDebugger/` | 抓 Android 真机 logcat 进控制台 | `Aketsuki_AdbDebugger` | 57841 |
+>
+> 两者**零依赖**（ADB 的 asmdef 是 `references: []`，物理上引用不到对方），可单独安装、
+> 各自一套端口/令牌/信息文件/HTTP 服务/MCP server/技能目录/`.unitypackage`。
+> ADB 那份的文档在 `Assets/Editor/AdbDebugger/README.md`，本文档不重复。
+> 工具侧一切按 `--module {mcp,adb}` 区分（`deploy.py` / `build_unitypackage.py` / `install_unitypackage.py`）。
+
 ## 2. 10 分钟上手
 
 ```bash
@@ -27,7 +39,7 @@ cd D:/Wrok_proj/Aketsuki_Unity_MCP
 python Assets/Editor/ExternalCommandSystem/McpBridge/send.py \
        --project-root D:/Wrok_proj/project_island_back status
 
-# ② 有哪些指令（61 条，参数说明由服务端 CommandAttribute 提供，不会漂）
+# ② 有哪些指令（条数不写死，随代码变；参数说明由服务端 CommandAttribute 提供，不会漂）
 ... send.py --project-root <工程> commands
 
 # ③ 发一条
@@ -68,6 +80,10 @@ python Tools/deploy.py <目标> --verify      # 部署 + 让目标编辑器编�
 1. `<工程>/Assets/Editor/ExternalCommandSystem/`（服务端 C#，140 个文件）
 2. `<工程>/.workbuddy/skills/unity-cmd/`（MCP 桥脚本 + `SKILL.md`，3 个文件）
 
+ADB 工具同理但路径全不同：`Assets/Editor/AdbDebugger/`（29 个文件）+ `.workbuddy/skills/adb-cmd/`。
+`deploy.py --module adb <目标>` 管后者；**不带 `--module` 就是 mcp**。
+`--prune` 只清本模块目录里的孤儿，不会碰另一个工具的目录。
+
 第 2 处是 MCP **真正拉起**的那份，不写它，AI 读到的指令说明就永远停在旧版（IMPR-007 的坑）。
 `--check` / `--list` / `--dry-run` 都会报这两处状态。目标那份比仓库新（mtime 更晚）时**不覆盖**，
 只报冲突 —— 那通常意味着有人在工程里改过，`--force-skill` 才硬写。
@@ -87,13 +103,17 @@ python Tools/deploy.py <目标> --verify      # 部署 + 让目标编辑器编�
 ## 6. 分发给别人
 
 ```bash
-python Tools/build_unitypackage.py --bundle   # → Tools/UnityPackage/Aketsuki_Unity_MCP-<版本>/
+python Tools/build_unitypackage.py --bundle                 # → Tools/UnityPackage/Aketsuki_Unity_MCP-<版本>/
+python Tools/build_unitypackage.py --module adb --bundle    # → Tools/UnityPackage/Aketsuki_AdbDebugger-<版本>/
 ```
 
 产出目录：`.unitypackage` + `install.py` + `DEPLOY.md` + `manifest.json`。
 **给目录或 zip，不要只给那个 `.unitypackage`** —— 接收方得自己拆 tar.gz、按 guid 拼路径、
-还要知道"目标已有 `.meta` 不能覆盖"，光一个包做不对。`install.py --skill` 会顺带写
-`.workbuddy/skills/unity-cmd/`。
+还要知道"目标已有 `.meta` 不能覆盖"，光一个包做不对。`install.py`（= 仓库里的
+`Tools/install_unitypackage.py`）会顺带写 `.workbuddy/skills/<skillName>/`，
+**装哪个工具、装到哪、桥同步哪几份，全从包内 `package.json` 读**（`installRoot` /
+`entrypoints.mcpBridge` / `skillName` / `skillFiles`），脚本里没有写死路径 —— 两个包共用同一个安装器。
+同目录里有两个包时用 `--module` 或 `-p` 指定，别指望它猜。
 
 包装完 ≠ 能用：还要在 `~/.workbuddy/mcp.json` 加一条带 `--project-root` 的条目，
 并在连接器管理页点"信任"。这件事包里做不了，必须人来做。
@@ -112,13 +132,9 @@ python Tools/build_unitypackage.py --bundle   # → Tools/UnityPackage/Aketsuki_
    不影响正确性，但你等的时候别以为卡死了。
 7. **运行时指令默认关闭**（`CommandSystemSettings.RuntimeCommandsEnabled=false`，按工程存）。
    关着时连 `runtime.play/stop` 都失败，逃生口是常规指令 `editor.play` / `editor.stop`。
-8. **`adb.logcat` 一次只跟一个设备**，多设备必须填 `serial`；设备不在时 adb **不退出**、只是挂着等
-   （`- waiting for device -`，会浮到状态与 `notice` 字段里）。它是持续洪流，看完就 `action=stop`。
-9. **`adb.logcat` 打印的是合并后的日志**：一项 `at …` / `Caused by:` / `... N more` 续行会被并进前一条，
-   所以一条控制台日志可能含多行文本。上限两道（行数 `stack`、字符 2000），撞到就截断并注明。
-   `stack=0` 就是不打印调用栈。别把这些"多行"当成一次打印了多条——`printed` 才是条数。
-10. **`suppressStack` 会临时改 Unity 全局堆栈设置**（打印期间 `None`，500ms 抑制窗口，停止/退出/域重载立即还原）。
-    副作用是窗口内你自己脚本的 `Debug.Log` 也没堆栈。关掉这个开关就完全按 Unity 全局设置走。
+8. **ADB logcat 的三条边界（一次只跟一个设备 / 打印的是合并后的日志 / `suppressStack` 临时改
+   Unity 全局堆栈设置）已随工具拆走**，见 `Assets/Editor/AdbDebugger/README.md`「三条已知边界」。
+   本工具里已没有 `adb.logcat` 指令、没有 ADB 设置项、也没有它的后台线程。
 
 ## 8. 未决事项（接手前先看这段）
 
