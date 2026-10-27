@@ -244,6 +244,8 @@ Unity 没启动时 `tools/list` 仍会在半秒内返回那 5 个元工具，调
 1. **`adb.logcat.read` 取走即删**：同一批不会返回第二次。要多留就一次读大一点。
 2. **日志同时也进 Unity 控制台**，所以 `console.read contains:"[ADB]"` 也能读到；
    但控制台会滚动、会被其它日志稀释，需要干净的一批就用 `adb.logcat.read`。
+   **两条路拿到的文本不一样**：`console.read` 里主内容带 `<b>…</b>`（给人看的加粗），
+   `adb.logcat.read` 是纯文本。要程序化解析就用后者，或者先把标签剥掉；`contains` 按正文过滤两边都命中。
 3. **`adb.logcat.start` 成功只代表进程起来了**，不等第一行日志。设备没连时 adb 会挂着
    `- waiting for device -`（`adb.logcat.status` 的 `notice` 能看到），此时一条日志都不会来。
 
