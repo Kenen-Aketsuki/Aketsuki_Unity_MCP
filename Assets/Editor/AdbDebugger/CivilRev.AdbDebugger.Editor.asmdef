@@ -1,0 +1,16 @@
+{
+    "name": "CivilRev.AdbDebugger.Editor",
+    "rootNamespace": "CivilRev.AdbDebugger",
+    "references": [],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}
