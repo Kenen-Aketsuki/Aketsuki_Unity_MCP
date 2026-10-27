@@ -129,3 +129,23 @@ public abstract class AdbCommandBase : OptionalDependencyCommand
 4. 判定必须便宜且无副作用（每次扫描都会调），不要在 `GetUnavailableReason()` 里跑进程或读大文件。
 5. 目前只有 `adb.*` 五条走这套机制；`AddressablesBridge` 等其它可选依赖**没改**——
    它们的失败是"指令存在但调用报错"，要不要一起收敛是另一件事，不在本轮范围。
+
+## 真机端到端复验（2026-10-27 18:17，Aketsuki_Unity_MCP 编辑器）
+
+上面那轮是离线探针。本工程的编辑器起来之后，用真实 HTTP / MCP 链路又跑了一遍（这台工程**装了**
+ADB 调试台，所以验的是"可用就出现"那一侧；"没装就剔除"仍以探针为准，见顶部表格）：
+
+| 环节 | 命令 / 请求 | 结果 |
+| --- | --- | --- |
+| 指令列表 | `GET /v1/commands` | 65 条，其中 5 条 `adb.devices` / `adb.logcat.start|stop|status|read` |
+| 设备扫描 | `adb.devices` | 36 ms，1 台可用：`V2241A（emulator-5554）`，adb 来自编辑器自带 AndroidPlayer SDK |
+| 抓取启动 | `adb.logcat.start {tag:Unity, level:I, backfill:50}` | 实际命令 `adb logcat -v threadtime -T 50` |
+| 计数 | `adb.logcat.status` | 8 秒收到 191 / 打印 111 / tag 过滤 80 / 丢弃 0 |
+| 取走即删 | `adb.logcat.read {max:5}` → 再读 3 条 | 第一次 5 条、缓冲 110；第二次是新行，前 5 条不再出现 |
+| 停止 | `adb.logcat.stop` | 报"缓冲里还有 111 条没被取走" |
+| MCP 工具列表 | `unity_mcp_server.py` 走 stdio 的 `tools/list` | 70 个工具，含 `unity_adb_devices` 等 5 个 `unity_adb_*` |
+| MCP 调用 | `tools/call unity_adb_devices` | 24.9 ms，返回同一台设备 |
+
+**未覆盖**：没有一台"活着且没装 ADB"的编辑器，"没装 → MCP 工具列表里查不到"这一条仍是推演
+（工具表由 `/v1/commands` 生成，而后者只读 `Registry.All`，所以剔除必然传导），不是实测。
+要做实测就临时把 `Assets/Editor/AdbDebugger` 移出 Assets 重编一次，代价是两次域重载。
