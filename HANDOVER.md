@@ -78,7 +78,7 @@ python Tools/deploy.py <目标> --verify      # 部署 + 让目标编辑器编�
 用不上就删掉那条，别看到报错又去装回来。
 
 **部署一次写两处**，两个都要管：
-1. `<工程>/Assets/Editor/ExternalCommandSystem/`（服务端 C#，138 个文件）
+1. `<工程>/Assets/Editor/ExternalCommandSystem/`（服务端 C#，145 个文件，含 `.meta`）
 2. `<工程>/.workbuddy/skills/unity-cmd/`（MCP 桥脚本 + `SKILL.md`，3 个文件）
 
 ADB 工具只写一处：`Assets/Editor/AdbDebugger/`（20 个文件，含 `.meta`）。
@@ -137,8 +137,11 @@ python Tools/build_unitypackage.py --module adb --bundle    # → Tools/UnityPac
    - 抓取本身（设备扫描、进程、堆栈合并、`suppressStack` 临时改全局堆栈设置）在
      `Assets/Editor/AdbDebugger/`，边界见它的 README。
    - AI 侧入口是本文档这套指令里的 `adb.devices` / `adb.logcat.start|stop|status|read`
-     （`Commands/Adb/`），**全部走反射**调 `AdbExternalApi`：没装 ADB 包时这五条报"没找到 ADB 调试台"，
-     其余指令不受影响，也不会编译失败。
+     （`Commands/Adb/`），**全部走反射**调 `AdbExternalApi`：没装 ADB 包时这五条**根本不注册**——
+     `/v1/commands`、控制台窗口、MCP 工具列表里都没有 `unity_adb_*`，其余指令不受影响，也不会编译失败。
+     硬调会得到"指令已从列表里剔除：<装什么>"而不是"未注册的指令 ID"。
+     机制见 `Assets/Editor/ExternalCommandSystem/README.md` §5.5（`ICommandAvailability` + `OptionalDependency`），
+     以后加同类可选插件照那三步做。
    - `adb.logcat.read` 的缓冲 **2000 条、取走即删**；日志同时进 Unity 控制台（`[ADB] ` 前缀），
      所以 `console.read contains:"[ADB]"` 也能读到。
 

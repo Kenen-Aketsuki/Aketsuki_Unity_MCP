@@ -685,17 +685,89 @@ ADB 抓取在**完全独立的第二个工具** `Aketsuki_AdbDebugger`（目录 
 | `adb.logcat.status` | 状态、设备、各项计数、`notice` / `lastError` |
 | `adb.logcat.read` | 取走缓冲里的日志（**取走即删**，`max` 默认 200 / 上限 2000） |
 
-实现位置 `Commands/Adb/`，**里面没有一行 ADB 逻辑**：`AdbBridgeAdapter` 用 `Type.GetType` 反射调
-`AdbExternalApi.Invoke(string, IDictionary<string,string>)`，把返回的 JSON 交给 `JsonValue.Parse`，
-再作为指令 `Data` 结构化返回。这与 `AddressablesBridge` 处理可选包同一个套路。
+实现位置 `Commands/Adb/`，**里面没有一行 ADB 逻辑**：`AdbBridgeAdapter` 只声明"我要调谁"
+（一个 `OptionalDependency`：类型全名 + 方法名 + 签名 + 装包提示），
+`AdbCommandBase` 把它的可用性接到注册表上；调通后把 `AdbExternalApi.Invoke(string, IDictionary<string,string>)`
+返回的 JSON 交给 `JsonValue.Parse`，再作为指令 `Data` 结构化返回。
 
 **为什么必须是反射**：本工具跑在预定义程序集（没有 asmdef），ADB 是独立 asmdef。直接引用会让
-"没装 ADB 就编译失败"，连带整个指令系统不能用。反射把它降级成运行时依赖：
+"没装 ADB 就编译失败"，连带整个指令系统不能用。反射把它降级成运行时依赖。
 
-- 没装 ADB 包 → 这五条指令失败并说明"没找到 ADB 调试台"，其余指令完全不受影响；
+**没装时这五条根本不注册**（机制见 §5.5）：
+
+- `/v1/commands`、控制台窗口、MCP 工具列表里**都没有** `unity_adb_devices` —— 列表里挂一个必然失败的工具，
+  比它不出现更误导人；
+- 启动时控制台留一条汇总日志，说明少的是哪个包、装完在哪；
+- 硬调 `adb.devices` 也不是干巴巴的"未注册的指令 ID"，而是
+  `指令 'adb.devices' 当前不可用，已从指令列表里剔除：<装什么、装完在哪>`；
 - 装了 → 自动出现 MCP 工具 `unity_adb_devices` / `unity_adb_logcat_start` …（服务端按已注册指令生成，桥不用改）。
 
 参数、输出形态、堆栈合并规则、已知边界，都在 `Assets/Editor/AdbDebugger/README.md`。
+
+---
+
+## 5.5 可选插件（`ICommandAvailability` + `OptionalDependency`）
+
+指令系统里有一类指令只是**适配层**：本体在可以单独安装、也可以完全不装的包里
+（目前是 `adb.*` → 「ADB 调试台」；以后可能是录屏、真机截图、Profiler 采样之类）。
+
+### 5.5.1 两条规则
+
+| | 协议 | 工具 |
+| --- | --- | --- |
+| 类型 | `Core/ICommandAvailability.cs` | `Core/OptionalDependency.cs` |
+| 谁用 | 注册表 | 适配层自己 |
+| 作用 | 注册期问一次"这条能用吗"，不可用就**不注册** | 反射调外部程序集，封装 `Type.GetType` / `GetMethod` / 异常包装 / 缓存 |
+| 必须用吗 | 想剔除就必须实现 | 可用可不用（判定逻辑不一定来自反射） |
+
+**为什么必须在**注册期**判定，而不是执行期报错**：注册表是唯一事实来源。
+只要不进 `CommandRegistry.All`，`/v1/commands`、编辑器控制台窗口、`unity_mcp_server.py` 生成的 MCP 工具列表
+就自动一致——不需要在四个出口各写一遍过滤，也不会出现"某处的列表和实际能力对不上"。
+
+**判定必须便宜且无副作用**：每次程序集扫描（域重载后各一次）都会调用，实现里只该做
+"类型在不在""文件存在不存在"这类检查，不要跑进程、不要读大文件。
+
+### 5.5.2 加一个同类插件：三步
+
+```csharp
+// ① 适配层：声明"调谁"（就这一个字段，反射样板都在 OptionalDependency 里）
+internal static class FooBridge
+{
+    internal static readonly OptionalDependency Plugin = OptionalDependency.Static(
+        "Foo.BarApi",                    // 类型全名（不含程序集）
+        "Foo.Bar.Editor",                // 程序集名（不含 .dll）
+        "Invoke",                        // 静态方法名
+        new[] { typeof(string) },        // 参数签名
+        "本体要另装「Foo 面板」那个包；装好后菜单在 Tools / Foo。");   // 装什么、装完在哪
+
+    internal static CommandResult Run(string verb) { /* TryInvoke + 解析返回值 */ }
+}
+
+// ② 基类：把插件的可用性接到注册表上
+public abstract class FooCommandBase : OptionalDependencyCommand
+{
+    protected override OptionalDependency Dependency => FooBridge.Plugin;
+}
+
+// ③ 指令：只写业务分发
+[Command("foo.run", Description = "…", EditorOnly = true)]
+public sealed class FooRunCommand : FooCommandBase
+{
+    public override CommandResult Execute(CommandContext context) => FooBridge.Run("run");
+}
+```
+
+不需要改 `CommandRegistry`、`CommandHttpServer`、`unity_mcp_server.py`：注册表会自动剔除/注册，
+HTTP 与 MCP 侧按已注册指令生成。
+
+### 5.5.3 边界
+
+- **一次域重载判一次**。装包 → Unity 重新编译 → 域重载 → 重新扫描，指令自动出现，不用重启编辑器。
+- 判定本身抛异常时**按不可用处理**（连"能不能用"都问不出来的指令，放进去只会在执行期炸同一个异常），
+  原因会写成 `可用性判定失败（类型名）：…`。
+- 剔除记录只用于日志与报错文案（`CommandRegistry.Skipped` / `SkipReason`），**不要拿它拼指令列表**。
+- 插件版本过旧（类型在、方法签名对不上）同样算不可用，`OptionalDependency` 会指出缺哪个签名。
+
 
 ## 6. 自动激活机制（重点：低开销）
 

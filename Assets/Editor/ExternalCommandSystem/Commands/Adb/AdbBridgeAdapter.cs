@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Reflection;
 using System.Text;
 
 namespace CivilRev.CommandSystem.Editor
@@ -12,47 +11,69 @@ namespace CivilRev.CommandSystem.Editor
     /// <b>为什么是反射而不是引用：</b>ADB 调试台是一个**可以单独安装**的独立包
     /// （asmdef <c>CivilRev.AdbDebugger.Editor</c>）。指令系统跑在预定义程序集里，
     /// 直接引用它会导致"没装 ADB 的程序集就编译失败"，整个指令系统跟着不能用。
-    /// 反射把它降级成运行时依赖：没装就是这几条指令报错，其余照常。
-    /// 这与 <see cref="AddressablesBridge"/> 处理可选包的做法一致。
+    /// 反射把它降级成运行时依赖：没装就不注册这几条指令，其余照常。
+    /// </para>
+    ///
+    /// <para>
+    /// <b>反射样板在 <see cref="OptionalDependency"/> 里</b>，本文件只剩"ADB 的契约定在哪"。
+    /// 以后加同类插件（录屏、截图、采样器……）照抄这个文件的结构即可：
+    /// 一个 <see cref="OptionalDependency.Static"/> 句柄 + 一层薄薄的子命令分发。
     /// </para>
     ///
     /// <para>
     /// <b>契约面只有一处：</b><c>AdbExternalApi.Invoke(string, IDictionary&lt;string,string&gt;)</c>
-    /// 返回 JSON 文本。ADB 侧加字段不会影响这里；改了类名/签名才会——那种改动要同步改本文件。
+    /// 返回 JSON 文本。ADB 侧加字段不会影响这里；改了类名/签名才会——那种改动要同步改下面的常量。
     /// </para>
     /// </summary>
     internal static class AdbBridgeAdapter
     {
-        private const string TypeName = "CivilRev.AdbDebugger.AdbExternalApi, CivilRev.AdbDebugger.Editor";
+        /// <summary>插件程序集名（= asmdef 名，不含 .dll）</summary>
+        internal const string AssemblyName = "CivilRev.AdbDebugger.Editor";
 
-        private const string NotInstalled =
-            "没找到 ADB 调试台的代码（程序集 CivilRev.AdbDebugger.Editor 不存在）。" +
+        /// <summary>对外契约的类型全名（不含程序集）</summary>
+        internal const string TypeName = "CivilRev.AdbDebugger.AdbExternalApi";
+
+        /// <summary>对外契约的方法名</summary>
+        internal const string MemberName = "Invoke";
+
+        /// <summary>没装时给用户看的话：装什么、装完在哪</summary>
+        private const string InstallHint =
             "这几条指令只是适配层，本体要另装「ADB 调试」那个包；装好后菜单里会出现 Tools / ADB 调试 / ADB 调试台。";
 
-        private static bool _resolved;
-        private static MethodInfo _invoke;
-        private static string _resolveError;
+        /// <summary>
+        /// 插件句柄。解析一次就缓存；装包后 Unity 会重新编译并域重载，静态状态自然重建。
+        /// </summary>
+        internal static readonly OptionalDependency Plugin = OptionalDependency.Static(
+            TypeName,
+            AssemblyName,
+            MemberName,
+            new[] { typeof(string), typeof(IDictionary<string, string>) },
+            InstallHint);
 
-        /// <summary>ADB 调试台是否可用（不抛异常，供 help 与调试用）</summary>
-        internal static bool Available
-        {
-            get
-            {
-                EnsureResolved();
-                return _invoke != null;
-            }
-        }
+        /// <summary>ADB 调试台是否可用（不抛异常，供诊断用）</summary>
+        internal static bool Available => Plugin.Available;
+
+        /// <summary>不可用的原因；可用时为 null。注册阶段由 <c>AdbCommandBase</c> 取用。</summary>
+        internal static string UnavailableReason => Plugin.UnavailableReason;
 
         /// <summary>执行一个子命令并把结果解析成 <see cref="JsonValue"/>。</summary>
         /// <param name="command">devices / logcat.start / logcat.stop / logcat.status / logcat.read</param>
         /// <param name="args">字符串参数，可为 null</param>
         internal static CommandResult Run(string command, IDictionary<string, string> args)
         {
-            string json;
+            object raw;
             string error;
-            if (!TryInvoke(command, args, out json, out error))
+            var payload = args ?? new Dictionary<string, string>(StringComparer.Ordinal);
+
+            if (!Plugin.TryInvoke(new object[] { command, payload }, out raw, out error))
             {
                 return CommandResult.Fail(error);
+            }
+
+            var json = raw as string;
+            if (json == null)
+            {
+                return CommandResult.Fail("ADB 调试台没有返回内容（" + command + "）");
             }
 
             JsonValue value;
@@ -71,78 +92,6 @@ namespace CivilRev.CommandSystem.Editor
             }
 
             return CommandResult.Ok(string.Empty, value);
-        }
-
-        private static bool TryInvoke(
-            string command, IDictionary<string, string> args, out string json, out string error)
-        {
-            json = null;
-            error = null;
-
-            EnsureResolved();
-            if (_invoke == null)
-            {
-                error = _resolveError;
-                return false;
-            }
-
-            try
-            {
-                json = (string)_invoke.Invoke(null, new object[]
-                {
-                    command,
-                    args ?? new Dictionary<string, string>(StringComparer.Ordinal)
-                });
-
-                if (json == null)
-                {
-                    error = "ADB 调试台没有返回内容（" + command + "）";
-                    return false;
-                }
-
-                return true;
-            }
-            catch (TargetInvocationException exception)
-            {
-                var inner = exception.InnerException ?? exception;
-                error = "ADB 调试台执行 " + command + " 抛异常：" + inner.Message;
-                return false;
-            }
-            catch (Exception exception)
-            {
-                error = "调用 ADB 调试台失败：" + exception.Message;
-                return false;
-            }
-        }
-
-        private static void EnsureResolved()
-        {
-            if (_resolved)
-            {
-                return;
-            }
-
-            _resolved = true;
-
-            var type = Type.GetType(TypeName, throwOnError: false);
-            if (type == null)
-            {
-                _resolveError = NotInstalled;
-                return;
-            }
-
-            _invoke = type.GetMethod(
-                "Invoke",
-                BindingFlags.Public | BindingFlags.Static,
-                null,
-                new[] { typeof(string), typeof(IDictionary<string, string>) },
-                null);
-
-            if (_invoke == null)
-            {
-                _resolveError = "ADB 调试台版本过旧：找到了 " + type.FullName +
-                                "，但没有 Invoke(string, IDictionary<string,string>)。请升级 ADB 调试包。";
-            }
         }
 
         /// <summary>把设备数组拼成一行人类可读摘要（Message 用；完整字段在 Data 里）</summary>

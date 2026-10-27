@@ -63,7 +63,22 @@ namespace CivilRev.CommandSystem
         /// <summary>构造"未知指令"结果</summary>
         public static CommandResult Unknown(string commandId)
         {
-            return new CommandResult(CommandStatus.UnknownCommand, $"未注册的指令 ID：{commandId}", null);
+            return Unknown(commandId, null);
+        }
+
+        /// <summary>
+        /// 构造"未知指令"结果，并用 <paramref name="message"/> 覆盖默认文案。
+        /// <para>
+        /// 用于"指令存在但因依赖缺失被剔除"的情形：默认的"未注册的指令 ID"藏起了真正原因，
+        /// 调用方会以为是自己拼错了 ID。
+        /// </para>
+        /// </summary>
+        public static CommandResult Unknown(string commandId, string message)
+        {
+            return new CommandResult(
+                CommandStatus.UnknownCommand,
+                string.IsNullOrEmpty(message) ? $"未注册的指令 ID：{commandId}" : message,
+                null);
         }
 
         public override string ToString()
