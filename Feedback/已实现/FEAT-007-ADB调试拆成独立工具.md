@@ -95,7 +95,23 @@ ADB 真正依赖的只有主机上的 `adb.exe`，它的宿主是**编辑器进�
 | ADB 包 | `build_unitypackage.py --module adb --version 1.0` | 17 资产（15 文件 + 2 目录），40.8 KB |
 | 装到空工程 | `install_unitypackage.py --module adb --project <空工程>` | 15 文件落地且**逐字节与源一致**、`.meta` 齐备；桥 3 份正确进 `.workbuddy/skills/adb-cmd/`（含 `scripts/` 子目录） |
 | 幂等 | 同一命令再跑一次 | 「新增 0 / 更新 0 / 未变 15」 |
-| 无头导入 | `verify_unitypackage.py -p <ADB 包> --with-ui` | 见下（结果补在本节末尾） |
+| 无头导入 | `verify_unitypackage.py --module adb --with-ui` | Unity 真把 15 个文件导到 `Assets/Editor/AdbDebugger/`（连同 .meta 共 33 个），`error CS` 0 条 |
+| Unity 真实编译 | 用户工程 `project_island_back`（2022.3.62f2c1，同时装了指令系统） | 编辑器自己编出 `Library/ScriptAssemblies/CivilRev.AdbDebugger.Editor.dll`（10-27 16:44），证明 asmdef 在**真实编辑器**里也能独立成程序集 |
+
+### 无头编译这一步没跑完（环境问题，不是包的问题）
+
+`verify_unitypackage.py --with-ui` 的第二步（补 UGUI/TMP 再编译）在本机跑不完：
+`bee_backend` 卡在 `ScriptAssemblies` 不再输出，`Library/ScriptAssemblies` 一直是空的。
+期间 `-quit` 之后 Unity 也不退出。日志里的线索是
+`bee_backend: error: More than one copy of bee_backend running in <临时工程> -- PID ... waiting`
+——上一次被我中断的 Unity 留下的**孤儿 `bee_backend.exe`** 占着该工程的 DAG 锁；
+清掉孤儿、换新临时工程后仍然卡住，判断为环境问题（用户的编辑器同时开着、机器资源吃满）。
+所以「无头 Unity 编译通过」这条判据本轮**没拿到**，改用上表最后两行替代：
+四份离线编译 + 用户工程真实编辑器产出的 dll。等机器空下来可以补跑。
+
+顺带修了这个脚本的一个真 bug：关键文件断言（`EXPECTED_MARKERS`/`FORBIDDEN_PREFIX`）
+原来写死成指令系统的路径，拿 ADB 包一跑就报「缺少关键文件 McpSetup.cs…」的**假失败**。
+现在改为从包内 `package.json` 的 `installRoot` / `entrypoints` 推导，两个包都能用。
 
 ## 边界与遗留
 
