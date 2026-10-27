@@ -41,17 +41,82 @@ UNITY_HUB_DIRS = [
     r"C:\Program Files\Unity\Editor",
 ]
 
-EXPECTED_MARKERS = [
-    "Assets/Editor/ExternalCommandSystem/McpSetup.cs",
-    "Assets/Editor/ExternalCommandSystem/CommandHttpServer.cs",
-    "Assets/Editor/ExternalCommandSystem/McpBridge/send.py",
-    "Assets/Editor/ExternalCommandSystem/McpBridge/unity_mcp_server.py",
-    "Assets/Editor/ExternalCommandSystem/McpBridge/SKILL.md",
-]
+# 关键文件断言**不再写死**：两个工具（指令系统 / ADB 调试）的 installRoot 与桥路径都不同，
+# 写死一份就只对那个包有效。真值来自包内 `package.json` 的 `installRoot` / `entrypoints`，
+# 缺清单的老包按模块兜底。下面这张表只是兜底。
+MODULE_HINTS = {
+    "mcp": {
+        "prefix": "Aketsuki_Unity_MCP",
+        "install_root": "Assets/Editor/ExternalCommandSystem",
+        "bridge_dir": "McpBridge",
+        "server": "unity_mcp_server.py",
+    },
+    "adb": {
+        "prefix": "Aketsuki_AdbDebugger",
+        "install_root": "Assets/Editor/AdbDebugger",
+        "bridge_dir": "AdbBridge",
+        "server": "adb_mcp_server.py",
+    },
+}
 
-# 工程客制化目录（ECS 下 Project/）：MCP 与工程代码耦合的内容只允许存在本工程，
-# 绝不允许随包分发。打包器已强制排除，这里对成品包再做一道独立断言。
-FORBIDDEN_PREFIX = "Assets/Editor/ExternalCommandSystem/Project/"
+
+def package_module(package):
+    base = os.path.basename(package)
+    for name, hint in MODULE_HINTS.items():
+        if base.startswith(hint["prefix"]):
+            return name
+    return None
+
+
+def default_package(module=None):
+    """脚本同级目录里的 .unitypackage；两个包共存时必须点名。"""
+    found = sorted(glob.glob(os.path.join(HERE, "*.unitypackage")))
+    if module:
+        found = [f for f in found if os.path.basename(f).startswith(MODULE_HINTS[module]["prefix"])]
+    if len(found) == 1:
+        return found[0]
+    if len(found) > 1:
+        raise SystemExit("有多个包，请用 -p 或 --module 指定：" + "".join(chr(10) + "  " + f for f in found))
+    return DEFAULT_PKG
+
+
+def read_manifest(package):
+    """从包里读 `Assets/**/package.json`（取层级最浅的那份）。没有就返回 (None, None)。"""
+    raw = gzip.decompress(open(package, "rb").read())
+    best = None
+    with tarfile.open(fileobj=io.BytesIO(raw)) as tar:
+        names = set(tar.getnames())
+        for member in tar.getmembers():
+            parts = member.name.split("/")
+            if len(parts) != 2 or parts[1] != "pathname":
+                continue
+            pathname = tar.extractfile(member).read().decode("utf-8").strip()
+            if os.path.basename(pathname) != "package.json":
+                continue
+            asset = parts[0] + "/asset"
+            if asset not in names:
+                continue
+            depth = pathname.count("/")
+            if best is None or depth < best[0]:
+                best = (depth, pathname, tar.extractfile(asset).read())
+    if best is None:
+        return None, None
+    try:
+        return best[1], json.loads(best[2].decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return best[1], None
+
+
+def expectations(package, module):
+    """要断言存在的关键文件，以及绝不允许出现的目录（工程客制化 Project/）。"""
+    _manifest_path, manifest = read_manifest(package)
+    hint = MODULE_HINTS.get(module) or MODULE_HINTS["mcp"]
+    manifest = manifest or {}
+    root = manifest.get("installRoot") or hint["install_root"]
+    entrypoints = manifest.get("entrypoints") or {}
+    bridge = entrypoints.get("mcpBridge") or (root + "/" + hint["bridge_dir"] + "/" + hint["server"])
+    markers = [root + "/package.json", bridge, os.path.dirname(bridge) + "/SKILL.md"]
+    return markers, root + "/Project/"
 
 
 def find_unity():
@@ -116,15 +181,19 @@ def count_files(root):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="用无头 Unity 验证 .unitypackage 可导入性")
-    parser.add_argument("-p", "--package", default=DEFAULT_PKG)
+    parser.add_argument("-p", "--package", default=None)
+    parser.add_argument("--module", choices=("mcp", "adb"), default=None,
+                        help="包没清单 / 自动定位时按这个模块兜底")
     parser.add_argument("--unity", help="Unity.exe 路径，默认自动挑版本最高的")
     parser.add_argument("--with-ui", action="store_true", help="补 UGUI/TMP 后再编译，检查 error CS")
     parser.add_argument("--keep", action="store_true", help="保留临时工程")
     args = parser.parse_args(argv)
 
-    package = os.path.abspath(args.package)
+    package = os.path.abspath(args.package or default_package(args.module))
     if not os.path.isfile(package):
         raise SystemExit("包不存在：%s" % package)
+    module = args.module or package_module(package)
+    expected, forbidden = expectations(package, module)
 
     if args.unity:
         unity = args.unity
@@ -145,10 +214,10 @@ def main(argv=None):
         problems.append("gzip FNAME 为 %r，Unity 只接受 'archtemp.tar' 或缺省" % gz["fname"])
 
     # 工程客制化内容不得随包分发
-    leaked = sorted({p for p, _ in assets if p.startswith(FORBIDDEN_PREFIX)})
+    leaked = sorted({p for p, _ in assets if p.startswith(forbidden)})
     if leaked:
         problems.append("包内出现工程客制化内容（%s 下 %d 条）：%s..."
-                        % (FORBIDDEN_PREFIX, len(leaked), leaked[0]))
+                        % (forbidden, len(leaked), leaked[0]))
 
     workdir = tempfile.mkdtemp(prefix="pkgverify_")
     project = os.path.join(workdir, "proj")
@@ -171,16 +240,16 @@ def main(argv=None):
 
         assets_dir = os.path.join(project, "Assets")
         found = count_files(assets_dir)
-        markers = [m for m in EXPECTED_MARKERS
+        markers = [m for m in expected
                    if os.path.isfile(os.path.join(project, m.replace("/", os.sep)))]
 
         print("\n导入结果：Assets 下 %d 个文件（含 .meta），关键文件命中 %d/%d"
-              % (found, len(markers), len(EXPECTED_MARKERS)))
+              % (found, len(markers), len(expected)))
 
         if found == 0:
             problems.append("导入后 Assets 为空——Unity 读到了包但没导出任何资产")
 
-        missing = [m for m in EXPECTED_MARKERS if m not in markers]
+        missing = [m for m in expected if m not in markers]
         if missing:
             problems.append("缺少关键文件：%s" % ", ".join(missing))
 
