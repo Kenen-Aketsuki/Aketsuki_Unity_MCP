@@ -425,7 +425,12 @@ namespace CivilRev.AdbDebugger
                 return HandleLogcat(item.Query);
             }
 
-            return AdbReply.Fail(404, "未知路径：" + path + "（支持 /v1/status、/v1/logcat）");
+            if (EndsWith(path, AdbDebugProtocol.DevicesPath) || EndsWith(path, "/devices"))
+            {
+                return HandleDevices();
+            }
+
+            return AdbReply.Fail(404, "未知路径：" + path + "（支持 /v1/status、/v1/devices、/v1/logcat）");
         }
 
         private static bool EndsWith(string path, string suffix)
@@ -488,6 +493,20 @@ namespace CivilRev.AdbDebugger
             }
         }
 
+        /// <summary>
+        /// 设备列表。**同步扫一次**（主线程）：客户端问"现在连了哪台"时给它缓存里的旧答案没有意义。
+        /// adb server 正常时这一步几十毫秒；冷启动最长 8 秒，仍在客户端 20 秒超时之内。
+        /// </summary>
+        private static AdbReply HandleDevices()
+        {
+            string error;
+            var devices = AdbDevices.ScanNow(out error);
+            var serial = (AdbDebuggerSettings.Serial ?? string.Empty).Trim();
+
+            // 拼 JSON 的部分在 AdbDevices.Json 里：那层能离线单测，这层依赖 HttpListener 不能
+            return AdbReply.Ok(AdbDevices.Json(devices, serial, error));
+        }
+
         private static void ApplyOverrides(Dictionary<string, string> query)
         {
             if (AdbDebugProtocol.Has(query, "tag"))
@@ -528,6 +547,18 @@ namespace CivilRev.AdbDebugger
         internal static string StatusJson()
         {
             var service = Instance;
+            var serial = (AdbDebuggerSettings.Serial ?? string.Empty).Trim();
+            // 设备数只读缓存，不现扫：客户端会高频轮询 status，每次都跑 adb 会把主线程拖住
+            var devices = AdbDevices.Snapshot();
+            var usable = 0;
+            for (var i = 0; i < devices.Count; i++)
+            {
+                if (devices[i].Usable)
+                {
+                    usable++;
+                }
+            }
+
             var json = new JsonOut()
                 .Bool("ok", true)
                 .Str("tool", "adb-debug")
@@ -540,7 +571,10 @@ namespace CivilRev.AdbDebugger
                 .Str("adb", AdbLogcatService.AdbPath ?? string.Empty)
                 .Str("adbSource", AdbLogcatService.AdbSource ?? string.Empty)
                 .Str("command", AdbLogcatService.LastCommand ?? string.Empty)
-                .Str("serial", AdbDebuggerSettings.Serial ?? string.Empty)
+                .Str("serial", serial)
+                .Bool("serialAuto", serial.Length == 0)
+                .Num("deviceCount", devices.Count)
+                .Num("usableDevices", usable)
                 .Str("tag", AdbDebuggerSettings.Tag ?? string.Empty)
                 .Str("level", AdbDebuggerSettings.Level ?? "I")
                 .Num("backfill", AdbDebuggerSettings.Backfill)

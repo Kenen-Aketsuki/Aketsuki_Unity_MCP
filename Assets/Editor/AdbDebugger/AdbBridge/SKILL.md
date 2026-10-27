@@ -23,27 +23,44 @@ description: 抓取 Android 真机 / 模拟器的 logcat 并打进 Unity 控制�
 
 ## 工具一：`adb_status`
 
-查服务与抓取状态，不需要参数。返回端口、是否在抓、收到/打印/合并/过滤的行数、adb 路径，
+查服务与抓取状态，不需要参数。返回端口、是否在抓、收到/打印/合并/过滤的行数、adb 路径、
+当前选了哪台设备（`serial`，空=自动）、可见设备数（`deviceCount` / `usableDevices`），
 以及 `notice`（典型值 `- waiting for device -`，表示设备没连上、一条日志都不会来）。
 
 **不知道当前什么情况时先调它。**
 
-## 工具二：`adb_logcat`
+## 工具二：`adb_devices`
+
+列出当前连接的设备/模拟器，不需要参数。每台给 `序列号｜状态｜型号`，状态不是 `device`
+（`unauthorized` / `offline` / `recovery`…）的会附一句怎么修。
+
+- **多设备时必须先调它**拿 `serial`，再传给 `adb_logcat` —— 否则 adb 会因为不唯一直接失败。
+- 列表为空 = 没插设备 / USB 调试没开 / 模拟器没起来，此时 `adb_logcat start` 必然失败，
+  别急着排查服务本身。
+- 它是**现场扫**的（跑一次 `adb devices -l`）；`adb_status` 里的设备数来自缓存，可能慢一拍。
+
+## 工具三：`adb_logcat`
 
 | 参数 | 默认 | 说明 |
 | --- | --- | --- |
 | `action` | `start` | `start` / `stop` / `restart` / `status` |
-| `tag` | 空=不过滤 | tag 子串，大小写不敏感。**抓 Unity 日志就填 `Unity`** |
+| `tag` | `Unity` | tag 子串，大小写不敏感。**默认就是 `Unity`**（Debug.Log 的 tag）；传空字符串 = 不过滤，整机日志都会进来 |
 | `level` | `I` | `V`/`D`/`I`/`W`/`E`/`F` |
-| `serial` | 空=自动 | 多设备必须填；`adb devices` 里的那一串 |
+| `serial` | 空=自动 | 从 `adb_devices` 拿；留空时只有一台可用设备才成立 |
 | `backfill` | 20 | 连接时先回填多少行历史（`-T N`） |
 | `stack` | 40 | 一条日志最多并入多少行堆栈；**`0` = 完全不打印调用栈** |
 | `suppressStack` | true | 隐藏 `[ADB]` 日志附带的 C# 堆栈（打印期间临时改 Unity 设置，打完还原） |
 
-典型用法：
+典型用法（单设备，默认只收 Unity 日志）：
 
 ```json
-{"name": "adb_logcat", "arguments": {"action": "start", "tag": "Unity", "level": "V"}}
+{"name": "adb_logcat", "arguments": {"action": "start", "level": "V"}}
+```
+
+要连系统层的崩溃一起看（`AndroidRuntime`、`libc` 之类），显式放开过滤：
+
+```json
+{"name": "adb_logcat", "arguments": {"action": "restart", "tag": "", "level": "E"}}
 ```
 
 然后**用另一个工具读日志**（本工具不返回日志内容，只返回启停结果）：
@@ -71,6 +88,7 @@ description: 抓取 Android 真机 / 模拟器的 logcat 并打进 Unity 控制�
 
 1. `adb_status` —— 服务在不在、端口多少、`lastError` 说了什么。
 2. 服务没起来 → 让用户打开 Unity 的「Tools / ADB 调试 / ADB 调试台」，勾「启用调试服务」。
-3. 服务在、抓取起不来 → 看 `lastError` 与 `notice`：多半是设备没连或序列号填错。
-4. 一切正常但没日志 → 检查 `tag` / `level` 过滤，以及 `adb logcat` 是否真有输出
-   （用 `adb_cli.py status` 或直接 `adb logcat -d -t 20` 对照）。
+3. 服务在、抓取起不来 → `adb_devices` 看设备：没有设备就查线/授权/模拟器；
+   有设备但不是 `device` 状态，返回里直接写了怎么修。
+4. 一切正常但没日志 → 检查 `tag` / `level` 过滤（默认 tag 是 `Unity`，非 Unity 的日志会被滤掉），
+   以及 `adb logcat` 是否真有输出（用 `adb_cli.py status` 或直接 `adb logcat -d -t 20` 对照）。

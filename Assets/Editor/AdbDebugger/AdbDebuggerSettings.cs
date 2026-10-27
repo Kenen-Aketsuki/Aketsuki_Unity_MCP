@@ -31,6 +31,16 @@ namespace CivilRev.AdbDebugger
         public const int DefaultStackLines = 40;
         public const int MaxStackLines = 500;
 
+        /// <summary>
+        /// tag 过滤的默认值。
+        /// <para>
+        /// <b>为什么是 <c>Unity</c>：</b>Android 上 <c>Debug.Log</c> 走的是 Unity 的日志通道，tag 恒为
+        /// <c>Unity</c>（Player 的 stdout 也归到它）。不设过滤时 logcat 会把整机所有 App 的日志一起灌进来，
+        /// 一屏里自己的日志只占几行。默认按 Unity 收窄，要全量就把这个框清空。
+        /// </para>
+        /// </summary>
+        public const string DefaultTag = "Unity";
+
         private const string KeyPort = Prefix + "Port";
         private const string KeyToken = Prefix + "Token";
         private const string KeyServerEnabled = Prefix + "ServerEnabled";
@@ -131,10 +141,10 @@ namespace CivilRev.AdbDebugger
             set { EditorPrefs.SetBool(Scoped(KeyLogcatEnabled), value); }
         }
 
-        /// <summary>tag 子串过滤（客户端侧，即时生效）</summary>
+        /// <summary>tag 子串过滤（客户端侧，即时生效）；默认 <c>Unity</c>，清空表示不过滤</summary>
         public static string Tag
         {
-            get { return EditorPrefs.GetString(Scoped(KeyTag), string.Empty); }
+            get { return EditorPrefs.GetString(Scoped(KeyTag), DefaultTag); }
             set { EditorPrefs.SetString(Scoped(KeyTag), value ?? string.Empty); }
         }
 
