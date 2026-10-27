@@ -841,24 +841,54 @@ namespace CivilRev.AdbDebugger
 
             Capture(text, _pendingLevel, _pendingTag);
 
-            text = Prefix + text;
+            // 控制台那份：主内容加粗、调用栈保持原样。
+            // 标签只加在控制台这一份上——Capture 里存的仍是纯文本，
+            // adb.logcat.read 拿到的不带标签。
+            var log = Prefix + BoldFirstLine(text);
 
             switch (_pendingLevel)
             {
                 case "W":
-                    Debug.LogWarning(text);
+                    Debug.LogWarning(log);
                     break;
                 case "E":
                 case "F":
                 case "A":
-                    Debug.LogError(text);
+                    Debug.LogError(log);
                     break;
                 default:
-                    Debug.Log(text);
+                    Debug.Log(log);
                     break;
             }
 
             Interlocked.Increment(ref _printed);
+        }
+
+        /// <summary>
+        /// 把多行文本的**第一行**用 <c>&lt;b&gt;</c> 包起来，其余行原样。
+        /// <para>
+        /// 控制台渲染富文本，一条「正文 + N 行调用栈」里只有正文需要突出；栈全加粗就等于没加粗。
+        /// </para>
+        /// <para>
+        /// <b>不做 <c>&lt;</c> 转义：</b>Unity 富文本不认 HTML 实体（<c>&amp;lt;</c> 会原样显示成 4 个字符），
+        /// 所以加粗与否都不改变"正文里自带标签会被渲染"这个既存行为——那是用户自己写的内容。
+        /// 唯一的新增风险是正文里出现 <c>&lt;/b&gt;</c> 会让加粗提前闭合，视觉问题，不丢内容。
+        /// </para>
+        /// </summary>
+        private static string BoldFirstLine(string text)
+        {
+            if (string.IsNullOrEmpty(text))
+            {
+                return text;
+            }
+
+            var nl = text.IndexOf('\n');
+            if (nl < 0)
+            {
+                return "<b>" + text + "</b>";
+            }
+
+            return "<b>" + text.Substring(0, nl) + "</b>" + text.Substring(nl);
         }
 
         /// <summary>静默超过 <see cref="FlushIdleMs"/> 就把待定的那条收尾（堆栈结尾后面常常再没有新行）</summary>

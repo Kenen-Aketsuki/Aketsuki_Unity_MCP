@@ -77,6 +77,23 @@
 日志的出口是 Unity 控制台，本工具只负责把设备日志**弄进控制台**。
 没装指令系统时，人在 Console 窗口里照样看得到，只是 AI 读不到——需要 AI 读就两个都装。
 
+### 控制台里的样子
+
+主内容加粗、调用栈原样。一条日志展开后栈有十几行，全加粗等于没加粗：
+
+```
+[ADB] <b>Task Guide True-3-Controller (MainIsLandController)-Normal</b>
+Proxy_TaskGuide:CheckGuide()
+Proxy_TaskGuide:Update()
+```
+
+标签只加在**给控制台的那一份**上，两条读取途径拿到的内容不一样：
+
+| 途径 | 内容 |
+| --- | --- |
+| `adb.logcat.read` | **纯文本**，无任何标签（缓冲里存的就是合并后的原文） |
+| `console.read` | 带 `<b>` 的原文——按正文关键词 `contains` 过滤照样命中，标签不影响匹配 |
+
 ## 安装到别的工程
 
 两条路，都**不需要**指令系统在场：
