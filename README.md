@@ -131,9 +131,16 @@ python Tools/verify_unitypackage.py --with-ui \
     --unity "C:/Program Files/Unity/Hub/Editor/2021.3.16f1c1/Editor/Unity.exe"
 python Tools/install_unitypackage.py --project <目标工程根>   # 目标工程正开着编辑器时用这个
 
-python Tools/build_unitypackage.py --module adb --bundle      # ADB 工具的分发包
+python Tools/build_unitypackage.py --bundle                   # 指令系统：目录 + .zip
+python Tools/build_unitypackage.py --module adb --bundle      # ADB 工具：目录 + .zip
 python Tools/install_unitypackage.py --project <目标工程根>    # 同目录只有一个包时可省 --module
 ```
+
+`--bundle` 除了 `.unitypackage` 还会生成**同名压缩包**（根目录名 = 目录名，解压即得整个包），
+里面三段分明：**Unity 侧工具** = `.unitypackage`；**AI 侧工具** = `ai/`
+（`scripts/unity_mcp_server.py`、`scripts/send.py`、`SKILL.md`，与包内 `McpBridge/` 逐字节同源）；
+**部署文档** = `DEPLOY.md` + `manifest.json`。ADB 包不提供 MCP，因此**没有** `ai/`，
+`manifest.json` 里 `aiSide: null`。
 
 安装器**不写死路径**：装到哪、桥同步到哪个技能目录、同步哪几份文件，全从包内 `package.json`
 的 `installRoot` / `skillName` / `skillFiles` 读，所以两个工具的包共用同一份 `install.py`。

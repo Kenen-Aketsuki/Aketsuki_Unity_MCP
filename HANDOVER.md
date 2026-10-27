@@ -108,10 +108,18 @@ python Tools/build_unitypackage.py --bundle                 # → Tools/UnityPac
 python Tools/build_unitypackage.py --module adb --bundle    # → Tools/UnityPackage/Aketsuki_AdbDebugger-<版本>/
 ```
 
-产出目录：`.unitypackage` + `install.py` + `DEPLOY.md` + `manifest.json`。
-**给目录或 zip，不要只给那个 `.unitypackage`** —— 接收方得自己拆 tar.gz、按 guid 拼路径、
-还要知道"目标已有 `.meta` 不能覆盖"，光一个包做不对。`install.py`（= 仓库里的
-`Tools/install_unitypackage.py`）会顺带写 `.workbuddy/skills/<skillName>/`，
+产出目录 + 同名压缩包：`.unitypackage` + `ai/` + `install.py` + `DEPLOY.md` + `manifest.json`
+→ `Aketsuki_XXX-<版本>.zip`（根目录名 = 目录名，解压即得整个包）。
+
+三段分清楚：**Unity 侧工具** = `.unitypackage`；**AI 侧工具** = `ai/`（`scripts/unity_mcp_server.py`、
+`scripts/send.py`、`SKILL.md`，与包内 `McpBridge/` 同源，`install.py` 会把它同步进技能目录）；
+**部署文档** = `DEPLOY.md` + `manifest.json`。ADB 包没有 AI 侧（它不提供 MCP），`ai/` 目录不存在，
+`manifest.json` 里 `aiSide: null` —— 这不是漏打包。
+
+**发出去必须给 zip**，不要只给 `.unitypackage`、也不要只给目录：光一个包，接收方得自己拆 tar.gz、
+按 guid 拼路径、还要知道"目标已有 `.meta` 不能覆盖"；给目录则会在邮件/网盘里被拆散，
+`.meta` 这种点开头的文件还常被人手工打包时漏掉（少了 `.meta`，Unity 会重新生成 GUID，场景引用全丢）。
+`install.py`（= 仓库里的 `Tools/install_unitypackage.py`）会顺带写 `.workbuddy/skills/<skillName>/`，
 **装哪个工具、装到哪、桥同步哪几份，全从包内 `package.json` 读**（`installRoot` /
 `entrypoints.mcpBridge` / `skillName` / `skillFiles`），脚本里没有写死路径 —— 两个包共用同一个安装器。
 同目录里有两个包时用 `--module` 或 `-p` 指定，别指望它猜。

@@ -42,6 +42,7 @@ import shutil
 import sys
 import tarfile
 import uuid
+import zipfile
 
 # Unity 自己导出的 .unitypackage，gzip 头里的文件名恒为这个值。
 # 客户端（Unity 导入器）会读这个字段，填别的值会导致导入被静默忽略。
@@ -460,6 +461,22 @@ Unity 编辑器指令系统（ExternalCommandSystem）+ MCP 桥的**可分发包
 **不要用 `deploy.py`**：它只在本仓库里有意义（从 `Assets/Editor/ExternalCommandSystem`
 同步到本机多个工程）。它在单独拷出去的目录里会直接报错——上一级没有 `Assets/`。
 
+## 包里有什么
+
+| 路径 | 是什么 | 归谁 |
+| --- | --- | --- |
+| `{name}-{version}.unitypackage` | 全部 C# 源码 + `.meta`（{files} 个文件） | Unity 侧工具 |
+| `ai/scripts/unity_mcp_server.py` | MCP stdio 服务端（真正拉起它的是 MCP 客户端） | AI 侧工具 |
+| `ai/scripts/send.py` | 命令行客户端，不经 AI 也能发指令 / 自检 | AI 侧工具 |
+| `ai/SKILL.md` | 给 AI 看的用法说明（工具清单、参数、纪律） | AI 侧工具 |
+| `install.py` | 安装器：解包落地 + 同步技能目录 + 保留目标已有 `.meta` | 部署工具 |
+| `DEPLOY.md` | 本文件 | 部署文档 |
+| `manifest.json` | 清单：版本 / 文件数 / 安装根，装机前核对用 | 部署文档 |
+
+`ai/` 下的三个文件和 `.unitypackage` 里 `{installRoot}/McpBridge/` 下的那三个是**同一份源码**，
+区别只是落点：`install.py` 会把它们同步到 `<工程>/.workbuddy/skills/{skillName}/`
+（MCP 客户端读的是这里，不是 Assets 里那份）。给一份扁平副本，是为了让人不跑安装器也能手工配。
+
 ## 装到指定工程
 
 ```bash
@@ -529,6 +546,19 @@ AI 想抓日志时装「Unity MCP 指令系统」那一个包即可——它里�
 `AdbExternalApi`。两个包可以都装，也可以只装这一个、纯手工看日志。
 
 接收方只要有 `{name}-{version}.unitypackage` 和本目录里的 `install.py` 就能装。
+
+## 包里有什么
+
+| 路径 | 是什么 | 归谁 |
+| --- | --- | --- |
+| `{name}-{version}.unitypackage` | 全部 C# 源码 + `.meta`（{files} 个文件） | Unity 侧工具 |
+| `install.py` | 安装器：解包落地 + 保留目标已有 `.meta` | 部署工具 |
+| `DEPLOY.md` | 本文件 | 部署文档 |
+| `manifest.json` | 清单：版本 / 文件数 / 安装根，装机前核对用 | 部署文档 |
+
+**AI 侧工具：本包没有。** ADB 调试台不提供 MCP 服务、不开端口、不装技能目录——
+要用 AI 抓日志就装「Unity MCP 指令系统」，它里面的 `adb.*` 指令会反射调用本工具的
+`AdbExternalApi`。所以这里的 `ai/` 目录不存在，不是漏打包。
 
 ## 装到指定工程
 
@@ -640,6 +670,68 @@ def write_package(assets, output, warnings):
     return output
 
 
+def write_ai_side(dist_dir, warnings):
+    """把 AI 侧工具（MCP 桥）拷进 `ai/`，保持技能目录的相对形态（`scripts/` + `SKILL.md`）。
+
+    `.unitypackage` 里本来就带着桥，但那份是"随工程走"的资产副本，路径还是平铺的；
+    MCP 客户端拉起的必须是 `.workbuddy/skills/<skillName>/` 这一份，且 python 要落在 `scripts/` 下。
+    `install.py` 会自动同步；这里再给一份独立副本，是给"不想跑安装器、手工配 mcp.json"的人一个明确落点。
+
+    ADB 模块 `SKILL_FILES` 为空（它没有桥），直接返回 None——不要造一个空的 `ai/` 目录骗人。
+    """
+    if not SKILL_FILES:
+        return None
+
+    # 桥源码可能来自 Assets，也可能只在技能目录里（早先手工装过的那种布局），按名字反查一遍
+    sources = {}
+    for abs_src, _pkg_rel in BRIDGE_SOURCES:
+        sources[os.path.basename(abs_src)] = abs_src
+
+    ai_dir = os.path.join(dist_dir, "ai")
+    os.makedirs(ai_dir, exist_ok=True)
+    copied = 0
+    for src, dest in SKILL_FILES:
+        source = sources.get(src) or os.path.join(CS_SOURCE, BRIDGE_DIR_IN_PKG, src)
+        if not os.path.isfile(source):
+            warnings.append("AI 侧缺文件，已跳过：%s" % source)
+            continue
+        target = os.path.join(ai_dir, dest.replace("/", os.sep))
+        parent = os.path.dirname(target)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        shutil.copy2(source, target)
+        copied += 1
+
+    warnings.append("AI 侧：ai/（%d 个文件）" % copied)
+    return ai_dir
+
+
+def write_zip(dist_dir, warnings):
+    """把分发目录压成同名的 .zip（根目录名 = 目录名，解压即得整个包）。
+
+    压缩包才是真正发出去的东西：单发一个目录，传到邮件/网盘里会被拆散、
+    `.meta` 这类隐藏文件还常被跳过（Windows 资源管理器默认不显示点开头文件，
+    有人手工打包就漏了 —— 少了 `.meta`，Unity 会给每个脚本重新生成 GUID，场景引用全丢）。
+    """
+    archive = dist_dir + ".zip"
+    if os.path.exists(archive):
+        os.remove(archive)
+
+    base = os.path.dirname(dist_dir)
+    count = 0
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as handle:
+        for root, _dirs, files in os.walk(dist_dir):
+            for name in sorted(files):
+                full = os.path.join(root, name)
+                arc = os.path.relpath(full, base).replace(os.sep, "/")
+                handle.write(full, arc)
+                count += 1
+
+    warnings.append("压缩包：%s（%d 个文件，%.0f KB）"
+                    % (archive, count, os.path.getsize(archive) / 1024.0))
+    return archive
+
+
 def write_bundle(package_path, name, version, author, built, install_root, file_count, warnings):
     """生成可分发目录：包 + 安装器 + 部署说明 + 清单副本。
 
@@ -676,14 +768,19 @@ def write_bundle(package_path, name, version, author, built, install_root, file_
     with open(os.path.join(dist_dir, "DEPLOY.md"), "w", encoding="utf-8") as handle:
         handle.write(doc)
 
+    # AI 侧先落地，manifest 里要如实记它有没有——ADB 没有这一侧，记 null 而不是空串
+    ai_dir = write_ai_side(dist_dir, warnings)
+
     manifest = {
         "name": name, "version": version, "author": author, "built": built,
         "unityVersion": read_unity_version(), "packageFile": package_name,
         "installRoot": install_root, "files": file_count,
+        "aiSide": "ai/" if ai_dir else None,
     }
     with open(os.path.join(dist_dir, "manifest.json"), "w", encoding="utf-8") as handle:
         handle.write(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
 
+    write_zip(dist_dir, warnings)
     warnings.append("分发目录：%s" % dist_dir)
     return dist_dir
 
