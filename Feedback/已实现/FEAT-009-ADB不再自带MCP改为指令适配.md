@@ -118,3 +118,11 @@ public static string Invoke(string command, IDictionary<string, string> args)  /
    （FEAT-006 起就欠着这条，本轮依然没法验）。
 5. 包版本我自己定了：ADB **2.0**（删了对外接口，破坏性）、MCP **1.1**（新增指令，向后兼容）。
    要换号说一声。
+
+## 后续（2026-10-27）
+
+> 上面「边界 1：没装 ADB 包时五条 `adb.*` 指令会失败并说明」**已被 FEAT-010 改掉**。
+> 用户要求「不可用就不要在指令列表中出现」，现在没装 ADB 调试台时这五条**根本不注册**：
+> `/v1/commands`、控制台窗口、MCP 工具列表里都查不到 `unity_adb_*`，控制台只留一条汇总日志。
+> 硬调会得到"指令已从列表里剔除：<装什么>"。反射本身的契约没变（仍是 `AdbExternalApi.Invoke`），
+> 只是样板搬进了通用的 `OptionalDependency`。
