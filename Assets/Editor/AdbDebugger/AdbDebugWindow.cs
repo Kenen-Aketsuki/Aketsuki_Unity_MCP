@@ -10,7 +10,7 @@ namespace CivilRev.AdbDebugger
     ///
     /// <para>
     /// <b>为什么不挂在「指令系统」的控制台里：</b>这是两个工具。指令系统管编辑器内的资产/场景/Play 操作，
-    /// 本工具管 Android 设备上的日志，生命周期、端口、开关全都不一样。合并的后果是任何一边出问题
+    /// 本工具管 Android 设备上的日志，安装与开关全都不一样。合并的后果是任何一边出问题
     /// 都要在另一个工具的面板里找原因。
     /// </para>
     /// </summary>
@@ -103,90 +103,12 @@ namespace CivilRev.AdbDebugger
         {
             _scroll = EditorGUILayout.BeginScrollView(_scroll);
 
-            DrawServerSection();
-            EditorGUILayout.Space(6);
             DrawCaptureSection();
             EditorGUILayout.Space(6);
             DrawHelp();
 
             EditorGUILayout.EndScrollView();
         }
-
-        #region 服务
-
-        private void DrawServerSection()
-        {
-            EditorGUILayout.LabelField("调试服务（MCP 客户端进这个端口）", EditorStyles.boldLabel);
-
-            var server = AdbDebugHttpServer.Instance;
-            EditorGUILayout.LabelField("状态",
-                server.IsRunning
-                    ? "运行中 · " + server.BaseUrl
-                    : "未运行（编辑器启动时会按下面的开关自动拉起）");
-
-            if (server.IsRunning)
-            {
-                EditorGUILayout.LabelField("令牌", server.Token, EditorStyles.miniLabel);
-                EditorGUILayout.BeginHorizontal();
-                if (GUILayout.Button("复制令牌"))
-                {
-                    GUIUtility.systemCopyBuffer = server.Token ?? string.Empty;
-                    AdbLog.Info("令牌已复制到剪贴板");
-                }
-
-                if (GUILayout.Button("重新生成令牌"))
-                {
-                    if (EditorUtility.DisplayDialog("重新生成令牌",
-                            "旧令牌会立刻失效，已配置的客户端需要重新读取信息文件。继续？", "生成", "取消"))
-                    {
-                        server.RegenerateToken();
-                        AdbLog.Info("令牌已重新生成");
-                    }
-                }
-
-                EditorGUILayout.EndHorizontal();
-            }
-
-            var serverEnabled = EditorGUILayout.Toggle("启用调试服务", AdbDebuggerSettings.ServerEnabled);
-            if (serverEnabled != AdbDebuggerSettings.ServerEnabled)
-            {
-                AdbDebuggerSettings.ServerEnabled = serverEnabled;
-                if (serverEnabled)
-                {
-                    string error;
-                    if (!server.Start(AdbDebuggerSettings.Port, out error) && !string.IsNullOrEmpty(error))
-                    {
-                        AdbLog.Error(error);
-                    }
-                }
-                else
-                {
-                    server.Stop();
-                    AdbLog.Info("调试服务已停止（信息文件已删除）");
-                }
-            }
-
-            var port = EditorGUILayout.IntField("端口", AdbDebuggerSettings.Port);
-            if (port != AdbDebuggerSettings.Port)
-            {
-                AdbDebuggerSettings.Port = port;
-                AdbLog.Info("端口已修改，点「重启服务」后生效");
-            }
-
-            if (GUILayout.Button("重启服务"))
-            {
-                server.Stop();
-                string error;
-                if (!server.Start(AdbDebuggerSettings.Port, out error) && !string.IsNullOrEmpty(error))
-                {
-                    AdbLog.Error(error);
-                }
-            }
-
-            EditorGUILayout.LabelField("信息文件", AdbDebugHttpServer.InfoDirectory, EditorStyles.miniLabel);
-        }
-
-        #endregion
 
         #region 设备
 
@@ -530,8 +452,9 @@ namespace CivilRev.AdbDebugger
             EditorGUILayout.HelpBox(
                 "日志以 [ADB] 前缀打进 Unity 控制台，级别已映射（W→警告，E/F→错误）。\n" +
                 "一次异常的堆栈会合并成一条日志，不再刷几十条。\n\n" +
-                "AI 侧走本工具自己的 MCP 服务（端口 " + AdbDebuggerSettings.DefaultPort + " 起），" +
-                "与「Unity MCP 指令系统」互不依赖，可以只装其中一个。",
+                "本工具自己不提供任何对外接口。要让 AI 抓日志，装「Unity MCP 指令系统」，" +
+                "用它的 adb.devices / adb.logcat.* 指令——那套指令会调到这里，" +
+                "两边也可以只装其中一个。",
                 MessageType.None);
         }
     }

@@ -200,19 +200,52 @@ Unity 没启动时 `tools/list` 仍会在半秒内返回那 5 个元工具，调
 > 已知限制：编译**失败**时不会发生域重载，服务仍然存活、能正常回答"错在哪"——这是闭环成立的前提。
 > 编译**成功**会重载域，内存里的完整消息列表会清空，但摘要存在 `SessionState` 里，`lastCompile` 仍可查。
 
-## Android 真机日志（已拆成独立工具，指令 `adb.logcat` 已删除）
+## Android 真机日志（`adb.*` 五条指令）
 
-要在真机/模拟器上验证"代码在设备上跑成什么样"，用 **ADB 调试工具**（`Assets/Editor/AdbDebugger/`）：
-它是与本工具**零依赖**的另一个工具，独立端口（57841）、独立 MCP server（名字 `adb-debug-<工程>`，
-工具只有 `adb_status` / `adb_logcat`）、独立技能目录 `.workbuddy/skills/adb-cmd/`。
+要验证"代码在设备上跑成什么样"，用这组指令。它们只是**适配层**：真正的设备扫描与抓取在
+「ADB 调试台」（`Assets/Editor/AdbDebugger/`，一个可单独安装的包），指令通过反射调它的
+`AdbExternalApi`。所以：
 
-- **没装它**：本节提到的一切都不存在，控制台里不会有 `[ADB] ` 前缀的日志。
-  此时改用 `console.read` 读工程自己的日志，或让用户先装 ADB 工具。
-- **装了它**：用 `adb_logcat` 启停，日志照样进 Unity 控制台并带 `[ADB] ` 前缀——
-  所以**读日志仍然用本工具的 `console.read`**（`contains: "[ADB]"`），这是两个工具唯一有用的配合点。
-- 参数（`tag` / `level` / `serial` / `backfill` / `stack` / `suppressStack`）、堆栈合并规则、
-  两条节流、已知边界，全在 `Assets/Editor/AdbDebugger/README.md` 与它的 `SKILL.md` 里。
-- **不要**再发 `{"id":"adb.logcat"}`：指令已删除，会返回 `UnknownCommand`。
+- **装了 ADB 调试台** → 五条指令可用，自动变成 MCP 工具 `unity_adb_devices`、
+  `unity_adb_logcat_start` 等（`unity_list_commands` 里能看到）。
+- **没装** → 调用失败并说明"没找到 ADB 调试台"，其余指令完全不受影响。
+  不要因此去试别的路径，直接让用户装那个包。
+
+| 指令 | 用途 | 关键参数 |
+| --- | --- | --- |
+| `adb.devices` | 现场跑 `adb devices -l`，列序列号 / 状态 / 型号 | `refresh`（默认 true；false 用缓存） |
+| `adb.logcat.start` | 开始抓，日志以 `[ADB] ` 前缀进 Unity 控制台 | `serial` / `tag`（默认 `Unity`，空 = 不过滤）/ `level` / `backfill` |
+| `adb.logcat.stop` | 停止（缓冲里的日志不会丢） | — |
+| `adb.logcat.status` | 在不在跑、连的哪台、各项计数、最近的错误 | — |
+| `adb.logcat.read` | 取走缓冲里的日志（**取走即删**） | `max`（默认 200，上限 2000） |
+
+典型流程：
+
+```json
+{"commands":[{"id":"adb.devices"}]}
+```
+
+多台可用设备时必须显式指定 serial（不指定 adb 会因不唯一直接失败）：
+
+```json
+{"commands":[{"id":"adb.logcat.start","params":{"serial":"emulator-5554","tag":"Unity","level":"W"}}]}
+```
+
+复现问题之后：
+
+```json
+{"commands":[{"id":"adb.logcat.read","params":{"max":200}}]}
+```
+
+三条纪律：
+
+1. **`adb.logcat.read` 取走即删**：同一批不会返回第二次。要多留就一次读大一点。
+2. **日志同时也进 Unity 控制台**，所以 `console.read contains:"[ADB]"` 也能读到；
+   但控制台会滚动、会被其它日志稀释，需要干净的一批就用 `adb.logcat.read`。
+3. **`adb.logcat.start` 成功只代表进程起来了**，不等第一行日志。设备没连时 adb 会挂着
+   `- waiting for device -`（`adb.logcat.status` 的 `notice` 能看到），此时一条日志都不会来。
+
+参数语义、堆栈合并规则、两条节流与已知边界，全在 `Assets/Editor/AdbDebugger/README.md`。
 
 ## 运行时指令（Play 模式干预，默认关闭）
 

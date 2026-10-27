@@ -72,13 +72,11 @@ MODULES = {
     "adb": {
         "title": "ADB 调试",
         "src_rel": "Assets/Editor/AdbDebugger",
-        "bridge": "AdbBridge",
-        "skill_dir_rel": ".workbuddy/skills/adb-cmd",
-        "skill_files": [
-            ("SKILL.md", "SKILL.md"),
-            ("adb_mcp_server.py", "scripts/adb_mcp_server.py"),
-            ("adb_cli.py", "scripts/adb_cli.py"),
-        ],
+        # 本工具**没有桥、没有技能目录**：它不提供 MCP，AI 侧入口是指令系统的 adb.* 指令
+        # （Commands/Adb/ 里反射调 AdbExternalApi）。留空是有意的，别照 MCP 那份补回来。
+        "bridge": "",
+        "skill_dir_rel": "",
+        "skill_files": [],
         # 本工具带 asmdef，不并入 Assembly-CSharp-Editor，编译校验必须点名
         "assembly": "CivilRev.AdbDebugger.Editor",
         "has_project_dir": False,
@@ -109,7 +107,7 @@ def apply_module(name):
     ACTIVE_MODULE = name
     SRC_REL = module["src_rel"]
     SRC_ROOT = os.path.join(REPO, *SRC_REL.split("/"))
-    BRIDGE_ROOT = os.path.join(SRC_ROOT, module["bridge"])
+    BRIDGE_ROOT = os.path.join(SRC_ROOT, module["bridge"]) if module["bridge"] else ""
     SKILL_DIR_REL = module["skill_dir_rel"]
     SKILL_FILES = module["skill_files"]
     ASSEMBLY = module["assembly"]
@@ -408,6 +406,11 @@ def build_skill_plan(root, force=False, skill_root=None):
 
 
 def report_skill(plan):
+    if not SKILL_FILES:
+        # ADB 调试这种"没有桥"的模块：不是 0 个文件同步成功，而是压根没有这件事
+        print("    技能目录：无（本模块不带 MCP 桥）")
+        return
+
     head = "    MCP 桥 %s" % SKILL_DIR_REL
     if not plan.dirty:
         print("%s：✓ 已同步（%d 个文件）" % (head, len(plan.same)))
@@ -903,7 +906,7 @@ def main(argv=None):
                 elif after_skill.conflict:
                     print("    ! MCP 桥 %d 个文件因目标侧更晚未覆盖（见上）"
                           % len(after_skill.conflict))
-                else:
+                elif after_skill.same:
                     print("    ✓ MCP 桥校验通过（%d 个文件与仓库一致）" % len(after_skill.same))
 
         if args.verify:

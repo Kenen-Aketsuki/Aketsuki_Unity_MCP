@@ -6,34 +6,41 @@ using System.Threading;
 
 namespace CivilRev.AdbDebugger
 {
-    /// <summary>一台 Android 设备或模拟器（来自 <c>adb devices -l</c> 的一行）。</summary>
-    internal sealed class AdbDevice
+    /// <summary>
+    /// 一台 Android 设备或模拟器（来自 <c>adb devices -l</c> 的一行）。
+    /// <para>
+    /// <b>public 的原因：</b>「Unity MCP 指令系统」里的 <c>adb.devices</c> 指令要把这个列表
+    /// 转成 JSON 交给 AI。指令系统是另一个程序集，反射门槛已经够低，不必再让它去拼
+    /// NonPublic 的 BindingFlags。
+    /// </para>
+    /// </summary>
+    public sealed class AdbDevice
     {
-        internal string Serial = string.Empty;
-        internal string State = "device";
-        internal string Model = string.Empty;
-        internal string Product = string.Empty;
-        internal string TransportId = string.Empty;
+        public string Serial = string.Empty;
+        public string State = "device";
+        public string Model = string.Empty;
+        public string Product = string.Empty;
+        public string TransportId = string.Empty;
 
         /// <summary>能不能抓 logcat。只有 <c>device</c> 算——<c>unauthorized</c>/<c>offline</c> 时 adb 会直接拒。</summary>
-        internal bool Usable
+        public bool Usable
         {
             get { return string.Equals(State, "device", StringComparison.OrdinalIgnoreCase); }
         }
 
         /// <summary>下拉里显示的名字：<c>型号（序列号）</c>；没有型号时只显示序列号</summary>
-        internal string DisplayName
+        public string DisplayName
         {
             get { return string.IsNullOrEmpty(Model) ? Serial : Model + "（" + Serial + "）"; }
         }
 
         /// <summary>状态的中文解释（含怎么修）</summary>
-        internal string StateHint
+        public string StateHint
         {
             get { return DescribeState(State); }
         }
 
-        internal static string DescribeState(string state)
+        public static string DescribeState(string state)
         {
             var value = (state ?? string.Empty).Trim();
             if (value.Length == 0)
@@ -90,7 +97,7 @@ namespace CivilRev.AdbDebugger
     /// 这样窗口不会因为 adb server 冷启动而顿一下。
     /// </para>
     /// </summary>
-    internal static class AdbDevices
+    public static class AdbDevices
     {
         private const int ScanTimeoutMs = 8000;
 
@@ -105,19 +112,19 @@ namespace CivilRev.AdbDebugger
         private static int _version;
 
         /// <summary>正在后台扫</summary>
-        internal static bool IsScanning
+        public static bool IsScanning
         {
             get { return Volatile.Read(ref _scanning) != 0; }
         }
 
         /// <summary>每完成一次扫描自增；UI 靠它判断"该重绘了"（后台线程不能直接 Repaint）</summary>
-        internal static int Version
+        public static int Version
         {
             get { return Volatile.Read(ref _version); }
         }
 
         /// <summary>最近一次结果（快照，避免 UI 遍历时被后台线程改）</summary>
-        internal static IList<AdbDevice> Snapshot()
+        public static IList<AdbDevice> Snapshot()
         {
             lock (Gate)
             {
@@ -126,7 +133,7 @@ namespace CivilRev.AdbDebugger
         }
 
         /// <summary>最近一次扫描的失败原因（找不到 adb、adb 卡住等）；正常为空</summary>
-        internal static string LastError
+        public static string LastError
         {
             get
             {
@@ -137,7 +144,7 @@ namespace CivilRev.AdbDebugger
             }
         }
 
-        internal static string AdbPath
+        public static string AdbPath
         {
             get
             {
@@ -148,7 +155,7 @@ namespace CivilRev.AdbDebugger
             }
         }
 
-        internal static string AdbSource
+        public static string AdbSource
         {
             get
             {
@@ -159,7 +166,7 @@ namespace CivilRev.AdbDebugger
             }
         }
 
-        internal static DateTime ScannedAt
+        public static DateTime ScannedAt
         {
             get
             {
@@ -171,7 +178,7 @@ namespace CivilRev.AdbDebugger
         }
 
         /// <summary>后台扫一次。已在扫就忽略（主线程调用）。</summary>
-        internal static void RequestScan()
+        public static void RequestScan()
         {
             if (Interlocked.CompareExchange(ref _scanning, 1, 0) != 0)
             {
@@ -215,7 +222,7 @@ namespace CivilRev.AdbDebugger
         }
 
         /// <summary>同步扫一次（HTTP 路由用，主线程）。设备多时也不会超过 <see cref="ScanTimeoutMs"/>。</summary>
-        internal static List<AdbDevice> ScanNow(out string error)
+        public static List<AdbDevice> ScanNow(out string error)
         {
             string source;
             var adb = AdbLocator.Resolve(out source);
@@ -234,7 +241,7 @@ namespace CivilRev.AdbDebugger
         }
 
         /// <summary>一行摘要，例：<c>2 台设备（1 台可用）</c></summary>
-        internal static string Summary()
+        public static string Summary()
         {
             var devices = Snapshot();
             if (devices.Count == 0)
@@ -262,7 +269,7 @@ namespace CivilRev.AdbDebugger
         /// 逻辑一样：真实的解析 + 拼接，不用 mock。
         /// </para>
         /// </summary>
-        internal static string Json(List<AdbDevice> devices, string serial, string error)
+        public static string Json(List<AdbDevice> devices, string serial, string error)
         {
             var selected = (serial ?? string.Empty).Trim();
             var items = new StringBuilder();
@@ -458,7 +465,7 @@ namespace CivilRev.AdbDebugger
         /// emulator-5554          offline
         /// </code>
         /// </summary>
-        internal static List<AdbDevice> Parse(string text)
+        public static List<AdbDevice> Parse(string text)
         {
             var list = new List<AdbDevice>();
             if (string.IsNullOrEmpty(text))

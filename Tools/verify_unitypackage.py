@@ -54,8 +54,9 @@ MODULE_HINTS = {
     "adb": {
         "prefix": "Aketsuki_AdbDebugger",
         "install_root": "Assets/Editor/AdbDebugger",
-        "bridge_dir": "AdbBridge",
-        "server": "adb_mcp_server.py",
+        # 空 = 本包没有桥（ADB 调试台不自带 MCP，能力由指令系统的 adb.* 指令反射调用）
+        "bridge_dir": "",
+        "server": "",
     },
 }
 
@@ -108,15 +109,34 @@ def read_manifest(package):
 
 
 def expectations(package, module):
-    """要断言存在的关键文件，以及绝不允许出现的目录（工程客制化 Project/）。"""
+    """要断言存在的关键文件，以及绝不允许出现的路径前缀。
+
+    **桥与 SKILL.md 只在清单声明了 mcpBridge 时才断言**：ADB 调试台这个包刻意没有桥
+    （它不提供 MCP），写死一份断言会让它永远"缺文件"。
+    另外 ADB 包必须**不含** AdbBridge 目录，防止哪天又把桥塞回去。
+    """
     _manifest_path, manifest = read_manifest(package)
     hint = MODULE_HINTS.get(module) or MODULE_HINTS["mcp"]
     manifest = manifest or {}
     root = manifest.get("installRoot") or hint["install_root"]
     entrypoints = manifest.get("entrypoints") or {}
-    bridge = entrypoints.get("mcpBridge") or (root + "/" + hint["bridge_dir"] + "/" + hint["server"])
-    markers = [root + "/package.json", bridge, os.path.dirname(bridge) + "/SKILL.md"]
-    return markers, root + "/Project/"
+
+    markers = [root + "/package.json"]
+
+    bridge = entrypoints.get("mcpBridge") or ""
+    if not bridge and hint.get("bridge_dir"):
+        bridge = root + "/" + hint["bridge_dir"] + "/" + hint["server"]
+
+    if bridge:
+        markers.append(bridge)
+        markers.append(os.path.dirname(bridge) + "/SKILL.md")
+
+    forbidden = [root + "/Project/"]
+    if module == "adb":
+        # 桥已经删掉了：包内再出现 AdbBridge 就是回归
+        forbidden.append(root + "/AdbBridge/")
+
+    return markers, forbidden
 
 
 def find_unity():
@@ -213,11 +233,11 @@ def main(argv=None):
     if gz["fname"] not in (None, "archtemp.tar"):
         problems.append("gzip FNAME 为 %r，Unity 只接受 'archtemp.tar' 或缺省" % gz["fname"])
 
-    # 工程客制化内容不得随包分发
-    leaked = sorted({p for p, _ in assets if p.startswith(forbidden)})
+    # 工程客制化内容 / 已废弃的桥目录都不得随包分发
+    leaked = sorted({p for p, _ in assets if any(p.startswith(f) for f in forbidden)})
     if leaked:
-        problems.append("包内出现工程客制化内容（%s 下 %d 条）：%s..."
-                        % (forbidden, len(leaked), leaked[0]))
+        problems.append("包内出现不该出现的路径（%s 下 %d 条）：%s..."
+                        % ("、".join(forbidden), len(leaked), leaked[0]))
 
     workdir = tempfile.mkdtemp(prefix="pkgverify_")
     project = os.path.join(workdir, "proj")

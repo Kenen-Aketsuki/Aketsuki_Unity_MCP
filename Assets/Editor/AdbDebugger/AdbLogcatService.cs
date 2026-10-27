@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -11,13 +12,31 @@ using Debug = UnityEngine.Debug;
 namespace CivilRev.AdbDebugger
 {
     /// <summary>
+    /// 一条已经合并好、打进过控制台的 logcat 日志。
+    /// <para>
+    /// <b>为什么要额外留一份：</b>控制台是给人看的，AI 读它要走 <c>console.read</c> 再按
+    /// <c>[ADB]</c> 前缀筛，而且控制台有滚动上限、一刷就找不到。指令系统的
+    /// <c>adb.logcat.read</c> 直接取这份缓冲，拿到的是"合并后的整条日志 + 级别 + tag"。
+    /// </para>
+    /// </summary>
+    public sealed class AdbCapturedLine
+    {
+        public DateTime At;
+        public string Level = "I";
+        public string Tag = string.Empty;
+
+        /// <summary>合并后的正文（含堆栈，不含 <c>[ADB] </c> 前缀）</summary>
+        public string Text = string.Empty;
+    }
+
+    /// <summary>
     /// ADB logcat 抓取服务：把 Android 真机 / 模拟器的日志**逐条**打进 Unity 控制台。
     ///
     /// <para>
     /// <b>开关默认关闭，按工程保存</b>（<see cref="AdbDebuggerSettings.LogcatEnabled"/>）。
     /// 关着的时候一个进程都不起；打开才去拉起 <c>adb logcat</c>。
-    /// 开关状态就是"要不要起进程"这一个事实的唯一来源，控制台、菜单、<c>adb.logcat</c> 指令
-    /// 改的都是它，没有第二份状态。
+    /// 开关状态就是"要不要起进程"这一个事实的唯一来源，窗口、菜单、指令系统的
+    /// <c>adb.logcat.start</c> / <c>adb.logcat.stop</c> 改的都是它，没有第二份状态。
     /// </para>
     ///
     /// <para>
@@ -42,14 +61,8 @@ namespace CivilRev.AdbDebugger
     /// </para>
     /// </summary>
     [InitializeOnLoad]
-    internal static class AdbLogcatService
+    public static class AdbLogcatService
     {
-        /// <summary>菜单项（与 HTTP 指令服务同级，方便找）</summary>
-        internal const string MenuPath = "Tools/指令系统/ADB Logcat 日志";
-
-        /// <summary>控制台里的开关显示名（与 <see cref="AdbDebuggerSettings.LogcatEnabled"/> 同一件事）</summary>
-        internal const string ToggleLabel = "启用 ADB logcat";
-
         /// <summary>每帧最多打印多少条：翻一屏 20 条够看，又不至于在洪流里卡住编辑器</summary>
         private const int MaxLinesPerFrame = 20;
 
@@ -64,6 +77,16 @@ namespace CivilRev.AdbDebugger
 
         /// <summary>队列水位：超过就丢新行并计数，避免断点/后台时把内存吃光</summary>
         private const int MaxQueuedLines = 5000;
+
+        /// <summary>
+        /// 给 <c>adb.logcat.read</c> 留的日志环形缓冲容量。
+        /// <para>
+        /// 2000 条够覆盖"AI 一小段时间没来取"的场景，又不会因为没人取而无限吃内存。
+        /// 真机洪流下一分钟就能刷满，所以溢出时丢最旧的并计数，不丢新的——
+        /// 排查问题要的是"最近发生了什么"。
+        /// </para>
+        /// </summary>
+        private const int MaxCapturedLines = 2000;
 
         /// <summary>单条消息上限，超长截断（logcat 里偶有整段 JSON/堆栈）</summary>
         private const int MaxMessageChars = 2000;
@@ -88,7 +111,7 @@ namespace CivilRev.AdbDebugger
         private const int StackSuppressWindowMs = 500;
 
         /// <summary>Unity 控制台里的统一前缀，配合 <c>console.read</c> 的 <c>contains</c> 精确筛</summary>
-        internal const string Prefix = "[ADB] ";
+        public const string Prefix = "[ADB] ";
 
         private const string StateStopped = "stopped";
         private const string StateRunning = "running";
@@ -110,6 +133,11 @@ namespace CivilRev.AdbDebugger
         private static readonly ConcurrentQueue<string> Lines = new ConcurrentQueue<string>();
         private static readonly StringBuilder Stderr = new StringBuilder();
         private static readonly object StderrGate = new object();
+
+        /// <summary>已输出的日志（给指令读）。只在主线程读写，加锁是为了"取的时候"能安全快照</summary>
+        private static readonly Queue<AdbCapturedLine> Captured = new Queue<AdbCapturedLine>();
+        private static readonly object CapturedGate = new object();
+        private static long _capturedDropped;
 
         private static Process _process;
 
@@ -181,6 +209,9 @@ namespace CivilRev.AdbDebugger
         /// <summary>这一条用哪个级别输出（由首行决定，续行不改变它）</summary>
         private static string _pendingLevel;
 
+        /// <summary>这一条的 logcat tag（由首行决定），只用于留给指令读的那份缓冲</summary>
+        private static string _pendingTag = string.Empty;
+
         private static DateTime _pendingAt;
 
         /// <summary>已并入的续行数</summary>
@@ -225,67 +256,67 @@ namespace CivilRev.AdbDebugger
         #region 对外状态
 
         /// <summary>当前是否在抓日志（进程存活且没收到退出信号）</summary>
-        internal static bool IsRunning
+        public static bool IsRunning
         {
             get { return _process != null && !_exited; }
         }
 
         /// <summary>stopped / running / failed</summary>
-        internal static string State
+        public static string State
         {
             get { return _state; }
         }
 
         /// <summary>实际使用的 adb 路径（未启动时为空）</summary>
-        internal static string AdbPath
+        public static string AdbPath
         {
             get { return _adbPath; }
         }
 
         /// <summary>adb 是怎么找到的（PATH / 环境变量 / 编辑器自带 SDK …）</summary>
-        internal static string AdbSource
+        public static string AdbSource
         {
             get { return _adbSource; }
         }
 
         /// <summary>最近一次错误；成功后清空</summary>
-        internal static string LastError
+        public static string LastError
         {
             get { return _lastError; }
         }
 
         /// <summary>从 adb 收到的行数（含被过滤、被丢弃的）</summary>
-        internal static long ReceivedCount
+        public static long ReceivedCount
         {
             get { return Interlocked.Read(ref _received); }
         }
 
         /// <summary>真正打进 Unity 控制台的行数</summary>
-        internal static long PrintedCount
+        public static long PrintedCount
         {
             get { return Interlocked.Read(ref _printed); }
         }
 
         /// <summary>被 tag / 级别过滤掉的行数</summary>
-        internal static long FilteredCount
+        public static long FilteredCount
         {
             get { return Interlocked.Read(ref _filtered); }
         }
 
         /// <summary>队列溢出被丢弃的行数（超过水位说明编辑器和 logcat 速率差太多）</summary>
-        internal static long DroppedCount
+        public static long DroppedCount
         {
             get { return Interlocked.Read(ref _dropped); }
         }
 
         /// <summary>本次启动时实际用的命令行（排查参数问题用）</summary>
-        internal static string LastCommand
+        public static string LastCommand
         {
             get { return _lastCommand; }
         }
 
         /// <summary>给控制台用的一行摘要</summary>
-        internal static string SummaryText
+        public static string SummaryText
         {
             get
             {
@@ -311,23 +342,68 @@ namespace CivilRev.AdbDebugger
         }
 
         /// <summary>统计归零（只看计数，不影响抓取本身）</summary>
-        internal static void ResetCounters()
+        public static void ResetCounters()
         {
             Interlocked.Exchange(ref _received, 0);
             Interlocked.Exchange(ref _printed, 0);
             Interlocked.Exchange(ref _filtered, 0);
             Interlocked.Exchange(ref _dropped, 0);
             Interlocked.Exchange(ref _coalesced, 0);
+            Interlocked.Exchange(ref _capturedDropped, 0);
+        }
+
+        /// <summary>缓冲里还有多少条没被取走</summary>
+        public static int CapturedCount
+        {
+            get
+            {
+                lock (CapturedGate)
+                {
+                    return Captured.Count;
+                }
+            }
+        }
+
+        /// <summary>因缓冲满而被丢掉的旧日志条数（说明有人很久没取，或日志量远超消费速度）</summary>
+        public static long CapturedDroppedCount
+        {
+            get { return Interlocked.Read(ref _capturedDropped); }
+        }
+
+        /// <summary>
+        /// 取走最多 <paramref name="max"/> 条已输出日志（取走即从缓冲删除）。
+        /// <para>
+        /// "取走"而不是"再读一遍"：指令会被反复调用，重复返回同一批日志会让模型以为
+        /// 又刷了一屏错误。要重新看历史就调大 <paramref name="max"/> 或先别取。
+        /// </para>
+        /// </summary>
+        public static List<AdbCapturedLine> TakeCaptured(int max)
+        {
+            if (max <= 0)
+            {
+                max = 200;
+            }
+
+            var result = new List<AdbCapturedLine>();
+            lock (CapturedGate)
+            {
+                while (result.Count < max && Captured.Count > 0)
+                {
+                    result.Add(Captured.Dequeue());
+                }
+            }
+
+            return result;
         }
 
         /// <summary>被并进前一条日志的堆栈续行数</summary>
-        internal static long CoalescedCount
+        public static long CoalescedCount
         {
             get { return Interlocked.Read(ref _coalesced); }
         }
 
         /// <summary>adb 自己吐在 stderr 上"当前卡在哪"（典型：<c>- waiting for device -</c>）</summary>
-        internal static string Notice
+        public static string Notice
         {
             get { return _notice; }
         }
@@ -337,7 +413,7 @@ namespace CivilRev.AdbDebugger
         #region 启停
 
         /// <summary>按设置恢复：开关开着才拉进程（域重载 / 编辑器启动时走这里）</summary>
-        internal static void RestoreFromSettings()
+        public static void RestoreFromSettings()
         {
             if (!AdbDebuggerSettings.LogcatEnabled)
             {
@@ -351,7 +427,7 @@ namespace CivilRev.AdbDebugger
         }
 
         /// <summary>重新读取 tag / 级别 / 堆栈合并设置（改设置后必须调，否则要重启才生效）</summary>
-        internal static void RefreshFilters()
+        public static void RefreshFilters()
         {
             _tagFilter = (AdbDebuggerSettings.Tag ?? string.Empty).Trim();
             _minLevelRank = RankOf(AdbDebuggerSettings.Level);
@@ -372,7 +448,7 @@ namespace CivilRev.AdbDebugger
         /// 让开关与"真的有进程在跑"保持一致。
         /// </summary>
         /// <param name="error">失败原因（已含怎么修）；成功时为 null</param>
-        internal static bool Start(out string error)
+        public static bool Start(out string error)
         {
             error = null;
 
@@ -422,6 +498,7 @@ namespace CivilRev.AdbDebugger
             _exitCode = 0;
             ClearStderr();
             DropQueued();
+            ClearCaptured();
             _notice = string.Empty;
             _noticePending = false;
 
@@ -463,7 +540,7 @@ namespace CivilRev.AdbDebugger
 
         /// <summary>停止抓取。</summary>
         /// <param name="clearSetting">是否把开关也关掉。域重载 / 退出编辑器时传 false，重载后自动恢复</param>
-        internal static void Stop(bool clearSetting = true)
+        public static void Stop(bool clearSetting = true)
         {
             StopInternal(clearSetting, "adb logcat 已停止", keepFilters: true);
         }
@@ -674,6 +751,7 @@ namespace CivilRev.AdbDebugger
 
             _pending = message;
             _pendingLevel = level;
+            _pendingTag = tag;
             _pendingAt = DateTime.Now;
             _pendingLines = 0;
             _pendingTruncated = false;
@@ -730,6 +808,8 @@ namespace CivilRev.AdbDebugger
             {
                 text = text.Substring(0, MaxMessageChars) + "…（已截断）";
             }
+
+            Capture(text, _pendingLevel, _pendingTag);
 
             text = Prefix + text;
 
@@ -907,6 +987,35 @@ namespace CivilRev.AdbDebugger
             while (Lines.TryDequeue(out _))
             {
                 // 清空即可
+            }
+        }
+
+        /// <summary>留一份给指令读（溢出丢最旧的，保住"最近发生了什么"）</summary>
+        private static void Capture(string text, string level, string tag)
+        {
+            lock (CapturedGate)
+            {
+                if (Captured.Count >= MaxCapturedLines)
+                {
+                    Captured.Dequeue();
+                    Interlocked.Increment(ref _capturedDropped);
+                }
+
+                Captured.Enqueue(new AdbCapturedLine
+                {
+                    At = DateTime.Now,
+                    Level = level ?? "I",
+                    Tag = tag ?? string.Empty,
+                    Text = text ?? string.Empty
+                });
+            }
+        }
+
+        private static void ClearCaptured()
+        {
+            lock (CapturedGate)
+            {
+                Captured.Clear();
             }
         }
 
@@ -1121,30 +1230,6 @@ namespace CivilRev.AdbDebugger
         private static void OnQuitting()
         {
             StopInternal(false, null, keepFilters: true);
-        }
-
-        [MenuItem(MenuPath)]
-        private static void ToggleMenuItem()
-        {
-            if (IsRunning)
-            {
-                Stop();
-            }
-            else
-            {
-                Start(out var error);
-                if (!string.IsNullOrEmpty(error))
-                {
-                    AdbLog.Error(error);
-                }
-            }
-        }
-
-        [MenuItem(MenuPath, true)]
-        private static bool ToggleValidate()
-        {
-            Menu.SetChecked(MenuPath, IsRunning);
-            return true;
         }
 
         #endregion

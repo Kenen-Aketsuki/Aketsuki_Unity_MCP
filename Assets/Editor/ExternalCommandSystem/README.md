@@ -671,24 +671,31 @@ Assets/Editor/ExternalCommandSystem/
 
 ---
 
-## 5.4 ADB logcat（已拆出为独立工具）
+## 5.4 ADB logcat（本体在独立工具，本工具只提供 `adb.*` 适配指令）
 
-> **2026-10-27 起本节内容不在本工具里了。** ADB 抓取被拆成**完全独立的第二个工具**
-> `Aketsuki_AdbDebugger`（包名同名，目录 `Assets/Editor/AdbDebugger/`），
-> 与本工具**零依赖、可单独安装**：独立 asmdef（`references: []`，物理上引用不到本工具）、
-> 独立端口 57841、独立 HTTP 服务、独立窗口与菜单、独立 MCP server（`adb-debug`）、独立技能目录
-> `.workbuddy/skills/adb-cmd/`、独立 `.unitypackage`。装了本工具不装它，本工具行为不变；
-> 反之亦然。两套服务可同时在同一个工程里跑。
->
-> 为什么拆：抓 logcat 只依赖主机上的 `adb`，与「下发指令控制编辑器」是两件事、两拨使用场景；
-> 混在一起会让只想要其中一个的人被迫接受另一套的复杂度（端口、令牌、指令开关、包体积）。
->
-> 现在去哪：
->
-> - 菜单 **Tools / ADB 调试 / ADB 调试台**（服务段 + 抓取段）
-> - 指令 `adb.logcat` **已删除**，改走独立服务：`POST /v1/logcat`（`action=start|stop|restart|status`），
->   或技能 `adb-cmd` 的 `adb_logcat` 工具
-> - 参数、输出形态、堆栈合并规则、三条已知边界，都在 `Assets/Editor/AdbDebugger/README.md`
+ADB 抓取在**完全独立的第二个工具** `Aketsuki_AdbDebugger`（目录 `Assets/Editor/AdbDebugger/`）里，
+与本工具**零依赖**：独立 asmdef（`references: []`，物理上引用不到本工具）、独立窗口与菜单、
+独立 `.unitypackage`。**它自己不带 MCP、不带端口、不带桥**——AI 侧入口就是本工具的这五条指令：
+
+| 指令 | 用途 |
+| --- | --- |
+| `adb.devices` | 现场跑 `adb devices -l`（`refresh:false` 读缓存） |
+| `adb.logcat.start` | 开始抓，可顺手改 `serial` / `tag` / `level` / `backfill` |
+| `adb.logcat.stop` | 停止（缓冲里的日志不丢） |
+| `adb.logcat.status` | 状态、设备、各项计数、`notice` / `lastError` |
+| `adb.logcat.read` | 取走缓冲里的日志（**取走即删**，`max` 默认 200 / 上限 2000） |
+
+实现位置 `Commands/Adb/`，**里面没有一行 ADB 逻辑**：`AdbBridgeAdapter` 用 `Type.GetType` 反射调
+`AdbExternalApi.Invoke(string, IDictionary<string,string>)`，把返回的 JSON 交给 `JsonValue.Parse`，
+再作为指令 `Data` 结构化返回。这与 `AddressablesBridge` 处理可选包同一个套路。
+
+**为什么必须是反射**：本工具跑在预定义程序集（没有 asmdef），ADB 是独立 asmdef。直接引用会让
+"没装 ADB 就编译失败"，连带整个指令系统不能用。反射把它降级成运行时依赖：
+
+- 没装 ADB 包 → 这五条指令失败并说明"没找到 ADB 调试台"，其余指令完全不受影响；
+- 装了 → 自动出现 MCP 工具 `unity_adb_devices` / `unity_adb_logcat_start` …（服务端按已注册指令生成，桥不用改）。
+
+参数、输出形态、堆栈合并规则、已知边界，都在 `Assets/Editor/AdbDebugger/README.md`。
 
 ## 6. 自动激活机制（重点：低开销）
 
