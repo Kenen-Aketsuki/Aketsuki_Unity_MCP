@@ -140,7 +140,8 @@ python Tools/build_unitypackage.py --module adb --bundle    # → Tools/UnityPac
 6. **端点发现很慢**：一次 `status` 实测 ~18 秒。原因见 `IMPR-014`（9 个空端口各等 2 秒）。
    不影响正确性，但你等的时候别以为卡死了。
 7. **运行时指令默认关闭**（`CommandSystemSettings.RuntimeCommandsEnabled=false`，按工程存）。
-   关着时连 `runtime.play/stop` 都失败，逃生口是常规指令 `editor.play` / `editor.stop`。
+   关着时连 `runtime.play/stop` 都失败，逃生口是常规指令 `editor.play` / `editor.stop` ——
+   但后者现在是敏感操作，默认要人确认（见下一条）。
 8. **ADB 相关的三件事要分清**：
    - 抓取本身（设备扫描、进程、堆栈合并、`suppressStack` 临时改全局堆栈设置）在
      `Assets/Editor/AdbDebugger/`，边界见它的 README。
@@ -152,6 +153,11 @@ python Tools/build_unitypackage.py --module adb --bundle    # → Tools/UnityPac
      以后加同类可选插件照那三步做。
    - `adb.logcat.read` 的缓冲 **2000 条、取走即删**；日志同时进 Unity 控制台（`[ADB] ` 前缀），
      所以 `console.read contains:"[ADB]"` 也能读到。
+9. **敏感操作确认是异步的**：`editor.play` / `editor.stop` / `scene.open` 默认**不执行**，
+   只返回「待确认 + `consentId`」，要用 `consent.fetch` 查结果；控制台「全权委托」打开才直接放行。
+   **绝对不要改回 `ShowModal()` 同步等待** —— 模态循环里 `EditorApplication.update` 不触发、
+   自定义窗也不重绘，倒计时两个驱动源同时失效，实测把编辑器卡死 180 秒（详见
+   `Assets/Editor/ExternalCommandSystem/README.md` §5.6 与 `FEAT-014`）。
 
 ## 8. 未决事项（接手前先看这段）
 

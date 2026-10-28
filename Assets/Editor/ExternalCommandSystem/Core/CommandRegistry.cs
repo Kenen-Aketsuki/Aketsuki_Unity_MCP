@@ -27,6 +27,14 @@ namespace CivilRev.CommandSystem
         /// <summary>运行时指令要求的 Play 状态（非运行时指令无意义，恒为 <see cref="RuntimePhase.Playing"/>）</summary>
         public RuntimePhase RuntimePhase => Attribute != null ? Attribute.RuntimePhase : RuntimePhase.Playing;
 
+        /// <summary>
+        /// 是否为敏感操作：未开「全权委托」时必须人工确认（见 <see cref="Editor.ConsentGate"/>）
+        /// </summary>
+        public bool RequiresConsent => Attribute != null && Attribute.RequiresConsent;
+
+        /// <summary>确认弹窗里的动作描述；为空时由门禁退回 <see cref="Description"/></summary>
+        public string ConsentMessage => Attribute != null ? Attribute.ConsentMessage : null;
+
         /// <summary>描述文本</summary>
         public string Description => Attribute != null ? Attribute.Description : string.Empty;
 

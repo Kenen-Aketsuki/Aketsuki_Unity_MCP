@@ -45,6 +45,8 @@ Assets/Script/ExternalCommandSystem/
     │   ├── CommandRegistry.cs  【注册表】ID -> 指令类
     │   ├── CommandReader.cs    【模块一】读取 .json 指令文件
     │   ├── CommandRunner.cs    【模块二】解析并执行指令
+    │   ├── RuntimeCommandGate.cs  运行时指令门禁（开关 + Play 状态，失败即拒）
+    │   ├── ConsentGate.cs      敏感操作门禁（未开全权委托则挂起等人工确认）
     │   ├── CommandPathUtil.cs  路径解析（绝对 / 工作空间 / 项目根 / Assets 相对）
     │   ├── SceneQuery.cs       场景节点查找（名字 / 层级路径 / 组件类型，含 inactive 与多场景）
     │   ├── HttpProtocol.cs     【HTTP 协议层】路由 / 令牌校验 / 响应构造（纯托管，可离线测试）
@@ -60,8 +62,9 @@ Assets/Script/ExternalCommandSystem/
     │   ├── ComponentCommands.cs   component.setField（含节点引用解析）
     │   ├── ListCommandsCommand.cs commands.list
     │   ├── EditorCommands.cs    asset.refresh / asset.save / scene.save / asset.compile
-    │   ├── SceneCommands.cs     scene.open（带 30s 许可弹窗）/ scene.list
-    │   ├── PermissionWindow.cs  模态许可弹窗（允许/拒绝 + 倒计时，超时自动拒绝）
+    │   ├── SceneCommands.cs     scene.open（敏感操作，需人工确认）/ scene.list
+    │   ├── ConsentWindow.cs     敏感操作确认窗（非模态，允许/拒绝 + 倒计时，超时自动拒绝）
+    │   ├── ConsentCommands.cs   consent.list / consent.fetch（查确认结果）
     │   ├── AssetImportCommand.cs  asset.importSprite（项目外图片导入为 Sprite，支持九宫格）
     │   ├── DiagnosticsCommands.cs  asset.compileReport / console.read（编译反馈闭环）
     │   ├── PrefabCommands.cs     ui.savePrefab（场景节点保存为 Prefab）
@@ -373,8 +376,8 @@ CommandRegistry.Default.RegisterInstance("my.cmd", new MyCommand(dependency));
 | `prefab.delete` | 删除 Prefab 资产文件（`AssetDatabase.DeleteAsset`，路径过白名单） | `prefab`(必填) |
 | `addressables.addEntry` | 把资产注册为 Addressable 条目（地址缺省=资产路径，组缺省 Default Group；未装 Addressables 的工程报友好错误不炸编译，全部走反射） | `asset`(必填), `address`, `group`, `labels` |
 | `addressables.removeEntry` | 移除 Addressable 条目（不动资产文件；条目不存在时报错） | `asset`(必填) |
-| `editor.play` | 进入 Play 模式（会触发域重载，服务随后自动恢复） | - |
-| `editor.stop` | 退出 Play 模式（幂等） | - |
+| `editor.play` | 进入 Play 模式（会触发域重载，服务随后自动恢复）。**敏感操作：默认需人工确认**，见 §5.6 | - |
+| `editor.stop` | 退出 Play 模式（幂等）。**敏感操作：默认需人工确认**，见 §5.6 | - |
 | `editor.state` | 查询编辑器状态（isPlaying/isPaused/isCompiling/isUpdating/willChangePlayMode） | - |
 | `var.set` | 设置共享变量 | `name`(必填), `value`(必填) |
 | `var.dump` | 打印所有共享变量 | `level` |
@@ -382,7 +385,7 @@ CommandRegistry.Default.RegisterInstance("my.cmd", new MyCommand(dependency));
 | `asset.save` | 保存资源（仅编辑器） | - |
 | `asset.importSprite` | 把项目外的 PNG 拷进工程并设为 Sprite（可配九宫格）；**Play 模式下阻断**（会触发 AssetDatabase 刷新） | `source`(必填), `destination`, `pattern`, `pixelsPerUnit`, `filterMode`, `maxSize`, `overwrite`, `border` |
 | `scene.save` | 保存当前场景（仅编辑器） | - |
-| `scene.open` | 打开指定场景；**触发即弹模态许可窗，请用户手动「允许/拒绝」（30s 超时视为拒绝）**，被拒绝/超时返回失败并中止当前批次（后续指令标记 Skipped，即使 `stopOnError=false`）。Play 模式下拒绝 | `path`(必填，完整 Assets 路径或场景名), `additive`(默认 false), `saveCurrent`(默认 true) |
+| `scene.open` | 打开指定场景；**敏感操作：默认需人工确认**（见 §5.6）。确认被拒/超时会中止当前批次（后续指令标记 Skipped，即使 `stopOnError=false`）。Play 模式下直接拒绝 | `path`(必填，完整 Assets 路径或场景名), `additive`(默认 false), `saveCurrent`(默认 true) |
 | `scene.list` | 枚举场景：Build Settings 中启用的场景 + 磁盘 Assets 下全部 `.unity`（标注 `inBuildSettings`） | - |
 | `scene.create` | 新建场景资产：用 `NewScene(Additive)` 加载空场景再 `SaveScene` 到目标路径（**不关当前场景，杜绝丢档**），父目录逐层 `CreateFolder`；`path` 可只写名字/相对路径，自动补 `Assets/` 与 `.unity` 并过白名单；已存在则报错。`open:true` 留在新场景，`addToBuildSettings:true` 加入 Build Settings | `path`(必填), `open`(默认 false), `addToBuildSettings`(默认 false) |
 | `scene.delete` | 删除场景资产文件（`AssetDatabase.DeleteAsset`，路径过白名单）；目标场景当前已打开则拒绝 | `path`(必填，完整 Assets 路径或场景名) |
@@ -398,6 +401,8 @@ CommandRegistry.Default.RegisterInstance("my.cmd", new MyCommand(dependency));
 | `ui.button` | Button 节点（Image+Button+子标签，不绑事件）；布局参数与 `ui.image` 通用，因此能锚到任意角落 | `name`, `parent`, `label`, `size`, `color`, `textColor`, `fontSize`, `tmp`, `tmpFont` |
 | `ui.savePrefab` | 把场景节点（含子树）保存为 Prefab（保留 Prefab 连接，可选删除场景实例）；缺省落到 `Assets/GameAssets/UI/` | `target`(必填), `path`, `overwrite`(默认 false), `removeSceneInstance`, `select` |
 | `command.cleanup` | 清理指令目录下"用过"的文件，防膨胀。作用域严格限制在指令目录与其 `_done` 子目录内（删前二次校验，绝不越界）。`target`：`done`(默认，只清 `_done`)/`files`(只清根下未归档 `.json`)/`all`；`olderThanMinutes` 按修改时间过滤；`dryRun` 只统计不删 | `target`, `olderThanMinutes`, `dryRun` |
+| `consent.list` | 列出敏感操作确认记录（pending / allowed / rejected / expired / failed），新的在前 | `limit`(默认 10，上限 50) |
+| `consent.fetch` | 查询某次确认的结果；返回成功只代表"查到了记录"，结论看 `data.state` | `id`(必填，即上一条指令返回的 `consentId`) |
 
 > **指令文件生命周期（防膨胀）**：`command.cleanup` 用于事后批量清理已攒下的指令文件；控制台窗口另有「执行后删除文件」(`DeleteAfterRun`) 开关——开启后 `CommandAutoRunner` 在指令文件执行成功后**直接删除该文件**，且**优先于**「归档到 `_done`」。`DeleteAfterRun` 是全局偏好（默认关），与 `ArchiveAfterRun` 同处控制台；HTTP 下发路径本就不落盘文件，无需清理。
 
@@ -768,6 +773,76 @@ HTTP 与 MCP 侧按已注册指令生成。
 - 剔除记录只用于日志与报错文案（`CommandRegistry.Skipped` / `SkipReason`），**不要拿它拼指令列表**。
 - 插件版本过旧（类型在、方法签名对不上）同样算不可用，`OptionalDependency` 会指出缺哪个签名。
 
+
+## 5.6 敏感操作确认（`RequiresConsent` + 全权委托）
+
+目标：**AI 不能自作主张改动用户的"现场"**。
+
+进/出 Play、切换场景这三件事，一旦被误调，用户手上的工作会直接消失，且没有任何撤销手段。
+所以它们默认要人点一次「允许」；嫌烦就在控制台开「全权委托」，之后直接放行。
+
+### 三道摆放
+
+| 位置 | 作用 |
+| --- | --- |
+| `[Command(..., RequiresConsent = true, ConsentMessage = "...")]` | 声明这条指令是敏感操作，并给出"会发生什么"的一句话 |
+| `ConsentGate`（`Core/ConsentGate.cs`） | 在 `CommandRunner.ExecuteEntry` 里统一拦：未开全权委托就登记请求 + 弹窗，**不执行** |
+| 控制台「敏感操作确认」区 | 「全权委托」开关 + 确认超时（默认 30s，最小 5s），按工程隔离 |
+
+`ConsentMessage` 要写清后果（"退出 Play 模式：运行中的游戏会立即结束……"），
+别只写指令描述 —— 人判断要不要点是靠这句话。
+
+### 为什么是异步的（别改回模态窗，实测过）
+
+第一版用 `EditorWindow.ShowModal()` 同步等人点，结果**把编辑器彻底卡死**：
+
+1. 模态循环期间 `EditorApplication.update` **不再触发**；
+2. 自定义窗的 `OnGUI` 也不会主动重绘；
+3. 倒计时同时依赖这两个源 → 两个都死 → **超时永远不走**；
+4. 指令和主线程一起僵住，HTTP 队列堆积，`/v1/status` 还能返回但任何指令都不执行。
+
+实测：发一条 `editor.stop`，卡了 180 秒仍未超时，只能人工点掉窗口。
+旧版 `scene.open` 所谓"30s 超时"因此从未真正生效过——用户点得快，没撞上而已。
+
+现在的语义（两段式）：
+
+```jsonc
+// ① 下发敏感指令 → 立即返回"待确认"，批次中止，编辑器不阻塞
+{ "id": "editor.play" }
+// → 跳过：已弹出确认窗等待人工点「允许」（30 秒后自动拒绝）
+//   data.consentId = "c1005130120ae"
+
+// ② 人点完 允许/拒绝/超时 之后，查结果
+{ "id": "consent.fetch", "params": { "id": "c1005130120ae" } }
+// → data.state: pending | allowed | rejected | expired | failed
+```
+
+要点：
+
+- **指令不会被自动重放**：人点「允许」后由确认窗单独执行那一条（`delayCall`，避开 GUI 回调里的域重载），
+  原来那一批的其余指令已经中止，AI 要重新规划后续步骤。
+- **`consent.fetch` 返回成功 ≠ 那条指令执行成功**：成功只代表"查到了记录"，
+  结论看 `data.state` 与 `data.resultMessage`。
+- **记录会落盘**：`<指令目录>/consent-results.json`。因为允许 `editor.play` 后立刻域重载，
+  内存里的静态列表会被清空；落盘后 `ConsentGate` 启动时重新加载，AI 才查得到"到底执行了没有"。
+  Pending 项不落盘（其上下文本来就不能跨域重载恢复）。
+- **`/v1/status` 有 `consent` 块**：`fullDelegation` / `timeoutSeconds` / `pendingCount`，
+  客户端据此解释"指令为什么没执行"。
+
+> `PermissionWindow.cs`（旧的自定义模态许可窗）已删除。它正是上表那个卡死的来源，
+> 留着只会有人再调一次。要弹确认窗，走 `ConsentGate` + `ConsentWindow`。
+
+### 加一条新的敏感指令
+
+打一个标记就够，不需要改任何门禁代码：
+
+```csharp
+[Command("scene.saveAll", EditorOnly = true,
+    RequiresConsent = true,
+    ConsentMessage = "保存所有打开的场景（会写盘，覆盖未保存的改动）")]
+```
+
+---
 
 ## 6. 自动激活机制（重点：低开销）
 

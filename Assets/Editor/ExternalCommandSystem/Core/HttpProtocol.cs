@@ -190,6 +190,14 @@ namespace CivilRev.CommandSystem
         /// <para>客户端据此提前判断——例如 <c>runtime.play</c> 只能在编辑模式调用。</para>
         /// </summary>
         public string PlayState;
+
+        /// <summary>
+        /// 是否属于敏感操作：未开「全权委托」时会弹窗等人点「允许」，超时按拒绝。
+        /// <para>
+        /// 客户端据此提前告知模型"这条会卡在人工确认上"，避免它把超时当成执行失败反复重试。
+        /// </para>
+        /// </summary>
+        public bool RequiresConsent;
     }
 
     /// <summary><c>/v1/ping</c> 与 <c>/v1/status</c> 响应里身份块的字段名</summary>
@@ -291,6 +299,15 @@ namespace CivilRev.CommandSystem
         /// </para>
         /// </summary>
         JsonValue RuntimeCommands { get; }
+
+        /// <summary>
+        /// 敏感操作确认的启用状态摘要（fullDelegation / timeoutSeconds / commandCount）。
+        /// <para>
+        /// 供 <c>/v1/status</c> 一眼看出"editor.play 为什么卡在弹窗上"：
+        /// 全权委托没开 = 有一条模态窗正在等人点「允许」，而不是指令卡死。
+        /// </para>
+        /// </summary>
+        JsonValue Consent { get; }
 
         /// <summary>把一段指令文本交给执行器（由主线程调用）</summary>
         CommandRunReport RunFromText(string text, bool dryRun);
@@ -513,6 +530,14 @@ namespace CivilRev.CommandSystem
                 payload.Set("runtimeCommands", runtime);
             }
 
+            // 敏感操作（进/出 Play、开场景）：全权委托没开时会弹窗等人确认，
+            // 客户端看到这个块就能解释"指令为什么停了十几秒还没回"。
+            var consent = env.Consent;
+            if (consent != null)
+            {
+                payload.Set("consent", consent);
+            }
+
             WriteIdentity(payload, env);
             return HttpResponse.Ok(payload);
         }
@@ -548,6 +573,10 @@ namespace CivilRev.CommandSystem
                     if (info.Runtime)
                     {
                         item.Set("playState", JsonValue.Of(info.PlayState ?? string.Empty));
+                    }
+                    if (info.RequiresConsent)
+                    {
+                        item.Set("requiresConsent", JsonValue.True);
                     }
                     items.Add(item);
                 }
@@ -768,6 +797,13 @@ namespace CivilRev.CommandSystem
 
             if (!report.HasError)
             {
+                // 有跳过但一条都没真跑（典型：敏感操作等人工确认、或全批次被 dry-run 拦下）时，
+                // 说"全部成功"会把人带偏——它其实什么都没做。
+                if (report.Succeeded == 0 && report.Skipped > 0)
+                {
+                    return $"{report.Total} 条指令都没有真正执行（{report.Skipped} 条被跳过）";
+                }
+
                 return report.Skipped > 0
                     ? $"{report.Total} 条指令全部成功（其中 {report.Skipped} 条跳过）"
                     : $"{report.Total} 条指令全部成功";

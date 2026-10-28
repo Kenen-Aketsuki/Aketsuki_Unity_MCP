@@ -230,7 +230,8 @@ namespace CivilRev.CommandSystem.Editor
                         Usage = descriptor.Usage,
                         EditorOnly = descriptor.IsEditorOnly,
                         Runtime = descriptor.IsRuntime,
-                        PlayState = RuntimeCommandGate.DescribePhase(descriptor.RuntimePhase)
+                        PlayState = RuntimeCommandGate.DescribePhase(descriptor.RuntimePhase),
+                        RequiresConsent = descriptor.RequiresConsent
                     });
                 }
 
@@ -282,6 +283,27 @@ namespace CivilRev.CommandSystem.Editor
                 }
 
                 return RuntimeCommandGate.SummaryJson(count);
+            }
+        }
+
+        /// <summary>
+        /// 敏感操作（进/出 Play、开场景）的确认状态摘要。
+        /// <para>与运行时摘要同理：只读主线程快照，因为本属性在 HTTP 监听线程被访问。</para>
+        /// </summary>
+        JsonValue IHttpEnvironment.Consent
+        {
+            get
+            {
+                var count = 0;
+                foreach (var descriptor in CommandRegistry.Default.All)
+                {
+                    if (descriptor.RequiresConsent)
+                    {
+                        count++;
+                    }
+                }
+
+                return ConsentGate.SummaryJson(count);
             }
         }
 

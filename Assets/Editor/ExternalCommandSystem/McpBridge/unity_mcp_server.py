@@ -388,6 +388,9 @@ def command_to_tool(command):
     parts.append("对应指令 ID：`%s`。" % command_id)
     if command.get("editorOnly"):
         parts.append("（仅编辑器可用）")
+    if command.get("requiresConsent"):
+        parts.append("⚠ 敏感操作：执行前 Unity 会弹模态确认窗，等人点「允许」，"
+                     "超时按拒绝并中止当批后续指令；控制台勾选「全权委托」后可跳过确认。")
 
     schema = {
         "type": "object",
