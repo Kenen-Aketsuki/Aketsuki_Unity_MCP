@@ -85,6 +85,16 @@ ADB 工具只写一处：`Assets/Editor/AdbDebugger/`（20 个文件，含 `.met
 **它没有技能目录、没有桥**——`deploy.py --module adb <目标>` 只同步这些 C# 与文档；
 **不带 `--module` 就是 mcp**。`--prune` 只清本模块目录里的孤儿，不会碰另一个工具的目录。
 
+**两个模块的部署范围不一样（IMPR-016 用户批注，2026-10-28 定）：**
+
+| 模块 | 部署到 | 理由 |
+| --- | --- | --- |
+| `--module mcp` | 三个目标全量 | 每个工程都要用指令系统 |
+| `--module adb` | **只 `project_island_back`** | 只有那个工程装了 ADB 调试台；另外两个「只更新 MCP」 |
+
+所以改了 ADB 就跑 `python Tools/deploy.py --module adb project_island_back`，
+不要顺手带上另外两个（它们此刻装着的 ADB 拷贝是历史遗留，不必再更新，也不要去删）。
+
 第 2 处是 MCP **真正拉起**的那份，不写它，AI 读到的指令说明就永远停在旧版（IMPR-007 的坑）。
 `--check` / `--list` / `--dry-run` 都会报这两处状态。目标那份比仓库新（mtime 更晚）时**不覆盖**，
 只报冲突 —— 那通常意味着有人在工程里改过，`--force-skill` 才硬写。
@@ -100,6 +110,10 @@ ADB 工具只写一处：`Assets/Editor/AdbDebugger/`（20 个文件，含 `.met
 离线编译工具**不在这个仓库**：`C:\Users\poi77\.workbuddy\tools\unity-offline-compile\unity_offline_compile.py`
 （跨程序集同时改动时用同目录的 `merged_offline_compile.py`）。它不写工程的 `Temp/`、`Library/`，
 编辑器开着也能跑，比 `Unity -batchmode` 安全。**换机器就没了，先备份。**
+
+改栈帧判定（ADB 那条 `UnityStackFrame` 正则）**先跑** `python Tools/test_stack_frame.py`：
+19 条正例 / 15 条反例，还会校验脚本里的正则副本与 C# 源码是否一致（IMPR-017 用户批注：
+脚本可以持久化，但**不进 Unity 包**，所以它只在仓库 `Tools/` 下）。
 
 ## 6. 分发给别人
 
@@ -172,9 +186,11 @@ python Tools/build_unitypackage.py --module adb --bundle    # → Tools/UnityPac
 | IMPR-014 | **待拍板** | 端点发现要不要在"信息文件命中的编辑器已自证身份"时提前收手，省掉那 18 秒 |
 | BUG-007 / BUG-008 | **已改未实测** | 设备端 C# 栈帧判定（`.ctor` / lambda / 本地函数是 BUG-008 补的三种写法）。过了编译与 32 条正则用例、三处部署，真机等下次抓日志确认"一条日志只占一行" |
 | BUG-009 | **已改未实测** | 空闲时不检查抑制窗口 → 全局堆栈设置停在 None。静态推导 + 编译验证，需要在 Unity 里静默几秒后打一条 Log 验一次 |
-| IMPR-015 | **待拍板** | 上面这两条的真机复验由谁什么时候做（我倾向顺其自然） |
-| IMPR-016 | **待拍板** | ADB 模块的部署范围：本轮起改成三处全量（上一轮只部署了 island_back），等确认口径 |
-| IMPR-017 | **待拍板** | 要不要把栈帧正则的 32 条用例固化成 `Tools/test_stack_frame.py` |
+| IMPR-015 | 已执行（用户批注） | 真机复验：用户会把 Unity 与模拟器一起开着，下一轮用模拟真机跑一次 logcat 即可 |
+| IMPR-016 | 已执行（用户批注） | ADB **只部署 island_back**，另外两个只更新 MCP。口径已写进本文件 §4 |
+| IMPR-017 | 已执行（用户批注） | `Tools/test_stack_frame.py`（34 条用例），**不进 Unity 包**；改栈帧正则先跑它 |
+| BUG-010 | **已改未实测** | `runtime.hierarchy` 的 name 模式：limit 改为「命中上限」、遍历不限量。过了真机编译与部署，真机复验要进 Play 模式（`runtime.*` 双门禁 + `editor.play` 需人工确认，脚本跑不了），见 `待拍板-2026-10-28.md` |
+| IMPR-007(2026) | 已实测 | `component.setField(s)` 支持数组 / `List<T>`：island_back 上用 `List<Transform>`（节点路径）与 `Color[]` 实跑通过 |
 | Phase 2 | 未开工 | 跨帧执行器、`runtime.screenshot`、断言原语、`runtime.invoke`。见 `FEAT-001` 末尾 |
 
 ## 9. 不能做的事（踩过的）
