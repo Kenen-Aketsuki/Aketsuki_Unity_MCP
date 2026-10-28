@@ -293,6 +293,13 @@ Unity 没启动时 `tools/list` 仍会在半秒内返回那 5 个元工具，调
 | `runtime.play` | 进入 Play（受开关约束；会触发域重载） | `onDirty`: `abort`（默认）/ `save` |
 | `runtime.stop` | 退出 Play（受开关约束；编辑模式下幂等返回成功） | — |
 | `runtime.hierarchy` | 运行时层级快照（**含运行时实例、inactive、DontDestroyOnLoad**） | `root` / `scene` / `name` / `depth` / `includeInactive` / `limit` |
+
+> **`limit` 在两种模式下量的东西不一样（BUG-010）**：不给 `name` 的树模式，limit 是**序列化节点数**
+> 预算（防响应体爆炸）；给了 `name` 的命中模式，limit 是**命中条数**上限，遍历不限量——
+> 早先两种模式共用「遍历节点数」预算，`limit=20` 等于「只看前 20 个节点」，
+> 命中区在后面就必然查不到，还会被误读成「场景里没有这个节点」。
+> 两种模式都在 data 里给 `visited`（实际遍历数）与 `limitAppliesTo`（`nodes` / `matches`）；
+> 命中模式的 message 区分「确实没有」与「命中已达上限，可能还有」。
 | `runtime.click` | EventSystem 注入点击 | `target` 或 `position` / `button` / `clicks` / `direct` |
 | `runtime.scroll` | 向 ScrollRect 注入拖拽序列 | `target` / `direction` / `amount` / `mode` / `steps` |
 | `runtime.input` | 写 TMP/UGUI 输入框并触发提交回调 | `target` / `text` / `append` / `submit` |

@@ -2,10 +2,10 @@
 id: BUG-010
 type: bug
 title: runtime.hierarchy 的 name 过滤模式下 limit 限制的是「遍历节点数」而非「命中数」，小 limit 必然假阴性且断言「没有该节点」
-status: open
+status: done
 source: project_island_back
 created: 2026-10-28
-updated: 2026-10-28
+updated: 2026-10-29
 files: ExternalCommandSystem/Commands/Runtime/RuntimeHierarchyCommand.cs
 proposal: false
 ---
@@ -78,3 +78,30 @@ return CommandResult.Ok($"运行时层级里没有名字含 '{nameFilter}' 的�
 改动最小，但「小 limit 查不到」这个坑还在，只是不再误导。
 
 **顺带**：`limit=400` 默认值对 UI 工程偏大（一次 730 KB），如果 A 方案实施，可以顺带给节点 JSON 加个 `compact` 选项或默认砍掉 `components` 数组，否则「命中 400 个」照样撑爆响应体。
+
+---
+
+## 执行结果（2026-10-29）
+
+**按 A 方案实现**，`RuntimeHierarchyCommand.cs`：
+
+1. **命中模式的 `limit` 改为「命中上限」**：`WalkMatches` 的收手条件从 `_visited >= _limit` 换成
+   `_matched >= _limit`，遍历本身不再限量（树模式保持原样——那里要防的是响应体爆炸）。
+2. **顺手修掉空转**：命中满了之后立刻整体收手，不再对每个兄弟节点各调一次再空转返回
+   （原文里提到的性能细节）。根节点循环同样加了提前 break。
+3. **不再断言「没有」**：`matchCount=0` 时的 message 改成
+   「没有名字含 'X' 的节点（**已遍历 N 个节点，未截断**）」——遍历不限量，所以这回是真的没有，
+   并把覆盖规模报出来；命中满了才说「命中已达 limit=N，可能还有未列出的节点；调大 limit，
+   或用 root / scene 收窄范围」。
+4. **data 补两个字段**：`visited`（实际遍历节点数）与 `limitAppliesTo`（`nodes` / `matches`），
+   调用方不用猜 limit 量的是哪个。
+
+**验证**：`project_island_back` 真机编译通过（`send.py compile --force`，0 error / 0 warning，
+`Assembly-CSharp-Editor.dll` 于 00:07 重建，字节里能查到新字符串 `limitAppliesTo` / `命中已达 limit=`），
+已部署 island_back / majotavern / CivelRev 三处并校验一致。
+
+**未做真机复验**：`runtime.hierarchy` 要进 Play 模式，而 `runtime.*` 默认双门禁关闭、
+`editor.play` 又带人工确认（FEAT-014），无人值守的自动化跑不了。已记进 `HANDOVER.md` §8
+（「已改未实测」）与本轮 `待拍板-2026-10-28.md`。
+
+**顺带项没做**（要扩能力，先记账）：`compact` 选项 / 默认砍 `components`，见本轮待拍板 IMPR-018。
