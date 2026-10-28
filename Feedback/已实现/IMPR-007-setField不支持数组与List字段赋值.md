@@ -2,10 +2,10 @@
 id: IMPR-007
 type: improve
 title: component.setField / setFields 不支持数组与 List 字段赋值，枚举数组只能绕过指令手改 .unity 文件
-status: open
+status: done
 source: project_island_back
 created: 2026-10-28
-updated: 2026-10-28
+updated: 2026-10-29
 files: ExternalCommandSystem/Commands/ComponentCommands.cs
 proposal: false
 ---
@@ -78,3 +78,34 @@ proposal: false
 这条一补，所有「数组/列表字段」都一起能配（不止枚举数组），`ConvertStruct` 里注释说的那句话也才算名副其实。
 
 顺带：`WritableMemberNames` 对数组返回空列表时，报错文案应该改成提示「该字段是数组，请传 [a,b,c]」之类，别再吐一个空冒号。
+
+---
+
+## 执行结果（2026-10-29）
+
+`ComponentCommands.cs` 的 `ConvertValue` 补了数组 / `List<T>` 分支（位置在枚举分支之后、结构体之前）：
+
+1. `ArrayOrListElementType()`：识别一维数组与 `List<>`，返回元素类型；**多维数组返回 null**
+   （一层 JSON 数组表达不了，宁可报错也不要静默填一半）。
+2. `ConvertSequence()`：**新建一个**数组 / List 再整个赋回字段，逐元素递归 `ConvertValue`
+   （字段名在报错里带下标，如 `redDotKeys[2]`）。不写进原实例，于是"期望 n 个、实际 m 个"
+   这种静默截断在结构上不可能发生，长度天然等于入参。
+3. 元素递归回 `ConvertValue`，所以**枚举数组、Vector/Color 数组、结构体数组、组件引用数组**
+   （元素走 `ResolveReference`）同一条路径全覆盖——`ConvertStruct` 注释里那句
+   「数组 / 颜色 / 嵌套子结构体都能正确转换」这才算名副其实。
+4. **报错文案**：给数组字段传了非数组 → 「字段 X 的类型是 `Color[]`，value 请写成数组（如 [...]）；
+   当前给的是 字符串 'not-an-array'」；落到兜底报错时，`UnsupportedTypeHint()` 对数组/列表
+   直接点明要传数组，不再吐一个空冒号。
+
+**真机实测**（`project_island_back`，临时节点 `__Impr007Probe`，验完已删除）：
+
+| 用例 | 指令 | 结果 |
+| --- | --- | --- |
+| `List<Transform>` + 节点路径 | `setFields` 写 `hideInMaxStar: ["Island Camera","Island UI Camera"]` | 成功；`component.get` 回读就是这两个 Transform |
+| 结构体数组 | `setField` 写 `color_Tag: ["#FF0000","#00FF00"]`（`Color[]`） | 成功；回读 `[[1,0,0,1],[0,1,0,1]]` |
+| 传错类型 | `color_Tag` 给字符串 | 按预期报错，且是新文案 |
+
+**验证**：真机编译通过（同上），三处部署一致。枚举数组没有单独实测（没找到现成的枚举数组字段），
+但它走的是与标量枚举同一个 `ParseEnum` 递归，没有新增代码路径。
+
+原文里那个「改 .unity 文本 + 刷新两次」的绕过流程可以作废了。
