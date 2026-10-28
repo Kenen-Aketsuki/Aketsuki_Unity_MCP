@@ -88,6 +88,27 @@ namespace CivilRev.CommandSystem
         public string Usage { get; set; } = string.Empty;
 
         /// <summary>
+        /// 标记该指令属于「敏感操作」：未开启控制台的「全权委托」时，必须由人点「允许」才会执行。
+        /// <para>
+        /// 哪些算敏感：<b>会改变编辑器整体状态、且 AI 自作主张就很难挽回</b>——进/出 Play 模式、
+        /// 切换当前场景。这类指令一旦被 AI 误调，用户手上的工作现场（运行中的游戏、未保存的场景）
+        /// 会直接消失，事后没有任何撤销手段。
+        /// </para>
+        /// <para>
+        /// 门禁实现在 <see cref="Editor.ConsentGate"/>，位置与 <see cref="Runtime"/> 一致（都在
+        /// <c>CommandRunner.ExecuteEntry</c>），因此 HTTP / file.run / 控制台三条路径都拦得住。
+        /// 不同的是：运行时指令是"开关没开就失败"，敏感操作是"开关没开就弹窗问人"。
+        /// </para>
+        /// </summary>
+        public bool RequiresConsent { get; set; }
+
+        /// <summary>
+        /// 确认弹窗里展示的动作描述（如"退出 Play 模式，运行中的游戏会立即结束"）。
+        /// <para>留空时退回 <see cref="Description"/>。写清楚"会发生什么"，人才判断得动。</para>
+        /// </summary>
+        public string ConsentMessage { get; set; }
+
+        /// <summary>
         /// 标记一个指令类
         /// </summary>
         /// <param name="id">全局唯一指令 ID，大小写不敏感</param>

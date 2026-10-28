@@ -221,6 +221,12 @@ Unity 没启动时 `tools/list` 仍会在半秒内返回那 5 个元工具，调
 | `adb.logcat.status` | 在不在跑、连的哪台、各项计数、最近的错误 | — |
 | `adb.logcat.read` | 取走缓冲里的日志（**取走即删**） | `max`（默认 200，上限 2000） |
 
+> **`adb.devices` 返回空、用户又说自己在用模拟器时，不是设备坏了。** 模拟器不是 USB 设备，
+> 没人 `adb connect` 它就不会出现在列表里。这五条指令**没有 connect 能力**，直接让用户打开
+> `Tools / ADB 调试 / ADB 调试台`，在「连接本机模拟器」里填端口（MuMu 7555、MuMu 12 16384、
+> 夜神 62001、通用 5555），连上后 `adb.devices` 立刻能看到。
+> 不要反复重试 `adb.devices`，也不要建议用户手工敲 `adb connect`——窗口里那个按钮做的正是这件事。
+
 典型流程：
 
 ```json
@@ -374,6 +380,45 @@ Unity 没启动时 `tools/list` 仍会在半秒内返回那 5 个元工具，调
 - `dispatch.pointerClick` 为空 → 按到了但没人实现 `IPointerClickHandler`（纯装饰节点）
 - `button.listenerCount = 0` → 按钮存在但没绑回调
 - 被透明层挡住却确实要点 → `direct: true`，跳过射线直接对目标触发点击
+
+## 敏感操作确认（`editor.play` / `editor.stop` / `scene.open`）
+
+这三条**默认不会立刻执行**：它们会改变用户手上的现场（退出 Play = 游戏没了、换场景 = 当前场景没了），
+所以要先由人点一次「允许」。控制台勾了「全权委托」才直接放行。
+
+### 两段式调用（必须按这个来）
+
+```jsonc
+// ① 直接下发
+{ "id": "editor.play" }
+```
+
+返回长这样（**指令没有执行**，批次已中止）：
+
+```
+#0 editor.play [跳过] 'editor.play' 是敏感操作，已弹出确认窗等待人工点「允许」（30 秒后自动拒绝）。
+                     用 consent.fetch id="c1005130120ae" 取结果；……
+data: { "pending": true, "consentId": "c1005130120ae", "timeoutSeconds": 30, "remainingSeconds": 30 }
+```
+
+```jsonc
+// ② 轮询结果（人点完才有结论）
+{ "id": "consent.fetch", "params": { "id": "c1005130120ae" } }
+// data.state: pending | allowed | rejected | expired | failed
+```
+
+### 纪律
+
+1. **别重复下发**。看到 `pending` 就去轮询，不要连发三条 `editor.play` —— 那会弹三个确认窗，全等着人点。
+2. **`consent.fetch` 返回成功 ≠ 指令执行成功**。成功只代表查到了记录，结论看 `data.state`。
+   `rejected` / `expired` 都是"没执行"，别当成失败去重试（重试又是一次弹窗）。
+3. **批次被中止了**：待确认那一条之后的所有指令都会 `Skipped`（即使 `stopOnError=false`），
+   拿到 `allowed` 后要重新下发后续步骤。
+4. **别自己去点那个窗**（也点不到）。等 `allowed`，或者提示用户开「全权委托」。
+5. 记录只保留最近 20 条，且 pending 项不跨域重载保留——`consent.list` 查不到就是太旧了。
+
+> 用户明确说过"别每次都问我"时，让他自己开：控制台 →「敏感操作确认」→「全权委托」。
+> 你不能替他开（那等于自己给自己授权）。
 
 ## 端点与语义
 

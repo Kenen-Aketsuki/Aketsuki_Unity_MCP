@@ -70,6 +70,8 @@ namespace CivilRev.CommandSystem.Editor
             EditorGUILayout.Space();
             DrawRuntimeSection();
             EditorGUILayout.Space();
+            DrawConsentSection();
+            EditorGUILayout.Space();
             EditorGUILayout.Space();
             DrawCommandListSection();
             EditorGUILayout.Space();
@@ -398,6 +400,77 @@ namespace CivilRev.CommandSystem.Editor
                 EditorGUILayout.LabelField("（未注册任何运行时指令）", EditorStyles.miniLabel);
             }
             EditorGUI.indentLevel--;
+        }
+
+        #endregion
+
+        #region 敏感操作确认区
+
+        /// <summary>
+        /// 「全权委托」开关与超时设置。
+        /// <para>
+        /// 与运行时指令分开成区的理由：那是"授权 AI 操作运行中的游戏"，这是"授权 AI 动我的现场"——
+        /// 进/出 Play、换场景都会让用户手上的工作直接消失，且没有撤销。
+        /// 默认关闭，勾上等于"以后别再问我了"，所以文案必须把后果写清楚。
+        /// </para>
+        /// </summary>
+        private void DrawConsentSection()
+        {
+            EditorGUILayout.LabelField("敏感操作确认（进/出 Play、打开场景）", EditorStyles.boldLabel);
+
+            var enabled = CommandSystemSettings.FullDelegationEnabled;
+            var newEnabled = EditorGUILayout.Toggle(ConsentGate.ToggleLabel, enabled);
+            if (newEnabled != enabled)
+            {
+                CommandSystemSettings.FullDelegationEnabled = newEnabled;
+                CommandLog.Info(newEnabled
+                    ? "已开启全权委托：editor.play / editor.stop / scene.open 将直接执行，不再弹窗确认"
+                    : "已关闭全权委托：editor.play / editor.stop / scene.open 执行前会弹窗，等人工点「允许」");
+            }
+
+            if (newEnabled)
+            {
+                EditorGUILayout.HelpBox(
+                    "已开启全权委托：AI 可以不经确认直接进/出 Play 模式、直接切换场景。" +
+                    "退出 Play 会让运行中的游戏立即结束且无法撤销——确认这是你要的，用完记得关掉。",
+                    MessageType.Warning);
+            }
+            else
+            {
+                EditorGUILayout.HelpBox(
+                    "默认关闭。关闭时 editor.play / editor.stop / scene.open 会弹出模态确认窗，" +
+                    "由人点「允许」才执行；倒计时结束未响应一律按拒绝，并中止当批后续指令。",
+                    MessageType.None);
+            }
+
+            var timeout = CommandSystemSettings.ConsentTimeoutSeconds;
+            var newTimeout = EditorGUILayout.IntField("确认超时（秒）", timeout);
+            if (newTimeout != timeout)
+            {
+                CommandSystemSettings.ConsentTimeoutSeconds = newTimeout;
+            }
+
+            if (newTimeout < 5)
+            {
+                EditorGUILayout.LabelField("小于 5 秒会按 30 秒处理（防止手滑等于自动拒绝）", EditorStyles.miniLabel);
+            }
+
+            var consentCount = 0;
+            var builder = new System.Text.StringBuilder();
+            foreach (var descriptor in CommandRegistry.Default.All)
+            {
+                if (!descriptor.RequiresConsent)
+                {
+                    continue;
+                }
+
+                consentCount++;
+                builder.Append(consentCount == 1 ? descriptor.Id : "、" + descriptor.Id);
+            }
+
+            EditorGUILayout.LabelField(
+                consentCount == 0 ? "（没有标记为敏感操作的指令）" : $"受此开关控制：{builder}",
+                EditorStyles.miniLabel);
         }
 
         #endregion

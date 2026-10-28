@@ -50,6 +50,12 @@ namespace CivilRev.AdbDebugger
         /// <summary>adb 可执行文件路径（**全局**，机器事实）</summary>
         private const string KeyAdbPath = Prefix + "AdbPath";
 
+        /// <summary>本机模拟器的 adb 调试端口（**全局**：一台机器上的 MuMu 只有一个，属机器事实）</summary>
+        private const string KeyEmulatorPort = Prefix + "EmulatorPort";
+
+        /// <summary>MuMu / Nemu 的默认端口；MuMu 12 是 16384，夜神 62001，通用 5555</summary>
+        public const string DefaultEmulatorPort = "7555";
+
         private static string _hash;
 
         /// <summary>本工程专属后缀：EditorPrefs 不区分工程，只能自己加</summary>
@@ -186,6 +192,24 @@ namespace CivilRev.AdbDebugger
             set { EditorPrefs.SetString(KeyAdbPath, value ?? string.Empty); }
         }
 
+        /// <summary>
+        /// 本机模拟器的 adb 调试端口，例如 <c>7555</c>。
+        /// <para>
+        /// <b>为什么单独存一个端口：</b>模拟器不是 USB 设备，没人 <c>adb connect</c> 就永远不出现在
+        /// <c>adb devices</c> 里。端口每次开实例还可能变（MuMu 6 是 7555，MuMu 12 从 16384 起、
+        /// 多开每个实例 +32），所以把上次填的记住，省得每次翻文档。
+        /// </para>
+        /// </summary>
+        public static string EmulatorPort
+        {
+            get
+            {
+                var value = EditorPrefs.GetString(KeyEmulatorPort, DefaultEmulatorPort);
+                return string.IsNullOrEmpty(value) ? DefaultEmulatorPort : value;
+            }
+            set { EditorPrefs.SetString(KeyEmulatorPort, (value ?? string.Empty).Trim()); }
+        }
+
         /// <summary>清空本工具的全部设置（调试用）</summary>
         public static void ResetAll()
         {
@@ -197,6 +221,7 @@ namespace CivilRev.AdbDebugger
             EditorPrefs.DeleteKey(Scoped(KeyStackLines));
             EditorPrefs.DeleteKey(Scoped(KeySuppressStack));
             EditorPrefs.DeleteKey(KeyAdbPath);
+            EditorPrefs.DeleteKey(KeyEmulatorPort);
         }
     }
 }

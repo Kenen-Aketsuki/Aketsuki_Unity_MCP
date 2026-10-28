@@ -25,6 +25,15 @@ namespace CivilRev.AdbDebugger
         private bool _manualSerial;
         private int _devicesVersion = -1;
 
+        /// <summary>「连接本机模拟器」区块默认展开：模拟器用户每次开工程都要用</summary>
+        private bool _emulatorFoldout = true;
+
+        /// <summary>端口输入框的当前文本（设置里存的是上一次填的值）</summary>
+        private string _portText;
+
+        private string _connectMessage = string.Empty;
+        private bool _connectOk = true;
+
         [MenuItem(MenuPath)]
         public static void Open()
         {
@@ -37,6 +46,7 @@ namespace CivilRev.AdbDebugger
         {
             EditorApplication.update += OnEditorUpdate;
             _devicesVersion = AdbDevices.Version;
+            _portText = AdbDebuggerSettings.EmulatorPort;
             AdbDevices.RequestScan();
         }
 
@@ -54,6 +64,24 @@ namespace CivilRev.AdbDebugger
         /// <summary>扫描在后台线程完成，不能直接 <c>Repaint</c>；靠这里回到主线程再看版本号变化</summary>
         private void OnEditorUpdate()
         {
+            bool connected;
+            string connectTarget;
+            string connectMessage;
+            if (AdbDevices.TryTakeConnectResult(out connected, out connectTarget, out connectMessage))
+            {
+                _connectOk = connected;
+                _connectMessage = connectMessage;
+
+                if (connected)
+                {
+                    // 连上就切过去并重扫：下拉里立刻能选中，不用用户再点一次「刷新」
+                    ApplySerial(connectTarget);
+                    AdbDevices.RequestScan();
+                }
+
+                Repaint();
+            }
+
             if (AdbDevices.IsScanning)
             {
                 return;
@@ -182,7 +210,7 @@ namespace CivilRev.AdbDebugger
                 EditorGUILayout.HelpBox(AdbDevices.LastError, MessageType.Warning);
             }
 
-            _manualSerial = EditorGUILayout.Foldout(_manualSerial, "手动输入序列号（adb connect 出来的网络设备）", true);
+            _manualSerial = EditorGUILayout.Foldout(_manualSerial, "手动输入序列号（直接指定 serial）", true);
             if (_manualSerial)
             {
                 EditorGUI.indentLevel++;
@@ -195,12 +223,70 @@ namespace CivilRev.AdbDebugger
                 EditorGUI.indentLevel--;
             }
 
+            // 模拟器不是 USB 设备：没人 adb connect 就永远不出现在列表里，所以这里给一个明确的入口。
+            _emulatorFoldout = EditorGUILayout.Foldout(_emulatorFoldout, "连接本机模拟器（adb connect）", true);
+            if (_emulatorFoldout)
+            {
+                EditorGUI.indentLevel++;
+
+                EditorGUILayout.BeginHorizontal();
+                var port = EditorGUILayout.TextField("端口", _portText ?? string.Empty);
+                if (!string.Equals(port, _portText, StringComparison.Ordinal))
+                {
+                    _portText = port;
+                    AdbDebuggerSettings.EmulatorPort = port;
+                }
+
+                using (new EditorGUI.DisabledScope(AdbDevices.IsConnecting))
+                {
+                    if (GUILayout.Button(AdbDevices.IsConnecting ? "连接中" : "连接", GUILayout.Width(56)))
+                    {
+                        ConnectEmulator();
+                    }
+                }
+
+                EditorGUILayout.EndHorizontal();
+
+                EditorGUILayout.LabelField(
+                    "7555 = MuMu / Nemu · 16384 = MuMu 12 · 62001 = 夜神 · 5555 = 通用。连的是 127.0.0.1:<端口>",
+                    EditorStyles.miniLabel);
+
+                if (!string.IsNullOrEmpty(_connectMessage))
+                {
+                    EditorGUILayout.HelpBox(_connectMessage, _connectOk ? MessageType.Info : MessageType.Warning);
+                }
+
+                EditorGUI.indentLevel--;
+            }
+
             if (AdbDevices.ScannedAt != DateTime.MinValue)
             {
                 EditorGUILayout.LabelField(
                     "上次扫描 " + AdbDevices.ScannedAt.ToString("HH:mm:ss") + " · " + AdbDevices.Summary(),
                     EditorStyles.miniLabel);
             }
+        }
+
+        /// <summary>
+        /// 把端口框的内容变成 <c>adb connect</c> 的目标。只填 <c>7555</c> 就补成 <c>127.0.0.1:7555</c>，
+        /// 直接粘 <c>192.168.1.20:5555</c> 也照用（局域网里的真机 / 别的机器上的模拟器）。
+        /// </summary>
+        private void ConnectEmulator()
+        {
+            var raw = (_portText ?? string.Empty).Trim();
+            if (raw.Length == 0)
+            {
+                _connectOk = false;
+                _connectMessage = "先填端口（MuMu 一般是 7555）";
+                return;
+            }
+
+            var target = raw.IndexOf(':') >= 0 ? raw : "127.0.0.1:" + raw;
+
+            // 先摆成普通提示：失败时后台结果会把它覆盖成警告
+            _connectOk = true;
+            _connectMessage = "正在连接 " + target + "…";
+            AdbDevices.RequestConnect(target);
         }
 
         private void ApplySerial(string serial)

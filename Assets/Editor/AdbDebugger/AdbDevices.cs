@@ -240,6 +240,213 @@ namespace CivilRev.AdbDebugger
             return devices;
         }
 
+        // ---------------------------------------------------------------- 网络设备（模拟器）
+
+        /// <summary>
+        /// <c>adb connect</c> 的上限。连不通的端口通常 1–3 秒就拒，8 秒是给卡死的 adb server 留的。
+        /// </summary>
+        private const int ConnectTimeoutMs = 8000;
+
+        private static int _connecting;
+        private static bool _connectFinished;
+        private static bool _connectSucceeded;
+        private static string _connectTarget = string.Empty;
+        private static string _connectMessage = string.Empty;
+
+        /// <summary>正在后台执行 <c>adb connect</c></summary>
+        public static bool IsConnecting
+        {
+            get { return Volatile.Read(ref _connecting) != 0; }
+        }
+
+        /// <summary>
+        /// 后台连一台网络设备（模拟器）。主线程调用，立刻返回。
+        /// <para>
+        /// <b>为什么必须异步：</b><c>adb connect</c> 打到一个没开的端口时要等 TCP 超时才返，
+        /// 最坏几秒；在 <c>OnGUI</c> 里同步跑会把窗口冻住，还会连带卡住整个编辑器的主线程泵。
+        /// </para>
+        /// <para>
+        /// 结果不在这里回调——后台线程碰不了 EditorPrefs / Repaint。UI 每帧用
+        /// <see cref="TryTakeConnectResult"/> 取。
+        /// </para>
+        /// </summary>
+        public static void RequestConnect(string hostPort)
+        {
+            var target = (hostPort ?? string.Empty).Trim();
+            if (target.Length == 0)
+            {
+                return;
+            }
+
+            if (Interlocked.CompareExchange(ref _connecting, 1, 0) != 0)
+            {
+                return;
+            }
+
+            lock (Gate)
+            {
+                _connectTarget = target;
+                _connectMessage = string.Empty;
+                _connectSucceeded = false;
+                _connectFinished = false;
+            }
+
+            string source;
+            var adb = AdbLocator.Resolve(out source); // EditorPrefs 只能主线程读，先在主线程定好路径
+
+            var thread = new Thread(() =>
+            {
+                var ok = false;
+                var message = string.Empty;
+                try
+                {
+                    ok = ConnectCore(adb, source, target, out message);
+                }
+                catch (Exception exception)
+                {
+                    message = "连接 " + target + " 失败：" + exception.Message;
+                }
+
+                lock (Gate)
+                {
+                    _connectSucceeded = ok;
+                    _connectMessage = message;
+                    _connectFinished = true;
+                }
+
+                Interlocked.Exchange(ref _connecting, 0);
+                Interlocked.Increment(ref _version);
+            })
+            {
+                IsBackground = true,
+                Name = "AdbDebugger.Connect"
+            };
+
+            thread.Start();
+        }
+
+        /// <summary>取走一次连接结果（取走即清）。没有新结果时返回 false。</summary>
+        public static bool TryTakeConnectResult(out bool ok, out string target, out string message)
+        {
+            lock (Gate)
+            {
+                ok = _connectSucceeded;
+                target = _connectTarget;
+                message = _connectMessage;
+
+                if (!_connectFinished)
+                {
+                    return false;
+                }
+
+                _connectFinished = false;
+                return true;
+            }
+        }
+
+        /// <summary>跑 <c>adb connect host:port</c>，按 adb 的自然语言输出判定成败</summary>
+        private static bool ConnectCore(string adb, string source, string target, out string message)
+        {
+            if (string.IsNullOrEmpty(adb))
+            {
+                message = MissingAdbMessage(source);
+                return false;
+            }
+
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = adb,
+                Arguments = "connect " + target,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+                StandardOutputEncoding = Encoding.UTF8,
+                StandardErrorEncoding = Encoding.UTF8
+            };
+
+            using (var process = new Process { StartInfo = startInfo })
+            {
+                var stderr = new StringBuilder();
+                process.ErrorDataReceived += (sender, args) =>
+                {
+                    if (!string.IsNullOrEmpty(args.Data))
+                    {
+                        stderr.AppendLine(args.Data);
+                    }
+                };
+
+                try
+                {
+                    process.Start();
+                    process.BeginErrorReadLine();
+                }
+                catch (Exception exception)
+                {
+                    message = "执行 adb connect 失败：" + exception.Message + "（adb=" + adb + "）";
+                    return false;
+                }
+
+                var output = process.StandardOutput.ReadToEndAsync();
+                if (!process.WaitForExit(ConnectTimeoutMs))
+                {
+                    try
+                    {
+                        process.Kill();
+                    }
+                    catch (Exception)
+                    {
+                        // 进程可能刚退，杀失败无所谓
+                    }
+
+                    message = "adb connect " + (ConnectTimeoutMs / 1000) +
+                              " 秒没返回（adb server 可能卡住，试试 adb kill-server）";
+                    return false;
+                }
+
+                var text = string.Empty;
+                try
+                {
+                    if (output.Wait(2000))
+                    {
+                        text = output.Result;
+                    }
+                }
+                catch (Exception)
+                {
+                    // 读流失败时只靠 stderr 判定
+                }
+
+                var combined = (text + "\n" + stderr).Trim();
+                var lower = combined.ToLowerInvariant();
+
+                // adb 的成败只有自然语言输出，没有靠得住的退出码；
+                // 中文系统的报错是「由于目标计算机积极拒绝」，所以两种都要认。
+                if (lower.Contains("cannot connect") ||
+                    lower.Contains("failed to connect") ||
+                    lower.Contains("unable to connect") ||
+                    combined.Contains("无法连接") ||
+                    combined.Contains("积极拒绝"))
+                {
+                    message = "连不上 " + target + "：" +
+                              (combined.Length > 0 ? combined : "adb 没有说明原因") +
+                              "\n常见原因：模拟器没启动 / 端口填错 / adb 版本与模拟器自带的不一致（换成模拟器目录下的 adb.exe）";
+                    return false;
+                }
+
+                if (lower.Contains("connected to"))
+                {
+                    message = lower.Contains("already connected") ? "已连过 " + target : "已连接 " + target;
+                    return true;
+                }
+
+                message = combined.Length > 0
+                    ? "adb 返回：" + combined
+                    : "adb 没有返回任何结果（" + target + "）";
+                return false;
+            }
+        }
+
         /// <summary>一行摘要，例：<c>2 台设备（1 台可用）</c></summary>
         public static string Summary()
         {

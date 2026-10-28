@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Threading;
+using CivilRev.CommandSystem.Editor;
 
 namespace CivilRev.CommandSystem
 {
@@ -305,11 +306,16 @@ namespace CivilRev.CommandSystem
         #region 单条执行
 
         /// <summary>执行一条指令：查表 → 建实例 → 传参 → 执行 → 捕获异常</summary>
+        /// <param name="consentGranted">
+        /// 人工确认已拿到（由 <see cref="ConsentGate.Approve"/> 重新执行时传入 <c>true</c>）。
+        /// <para>为 <c>false</c> 时，敏感指令会在门禁处弹出确认请求并立即返回「待确认」。</para>
+        /// </param>
         public CommandResult ExecuteEntry(
             CommandEntry entry,
             CommandScript source,
             IDictionary<string, object> variables,
-            int depth)
+            int depth,
+            bool consentGranted = false)
         {
             var descriptor = Registry.Find(entry.Id);
             if (descriptor == null)
@@ -346,6 +352,28 @@ namespace CivilRev.CommandSystem
                     CommandLog.Info($"[dry-run] {entry.Id} {entry.Params.ToJson(false)}");
                 }
                 return CommandResult.Skip("dry-run", null);
+            }
+
+            // 敏感操作（进/出 Play、打开场景）的人工确认门禁。
+            // 放在 dry-run 之后：空跑不产生副作用，没必要为一个"不会发生"的动作打断人。
+            // 与运行时门禁的区别：那个是"开关没开就失败"，这个是"开关没开就弹窗问一次"。
+            //
+            // 注意这里是**异步**的：不等人点，直接返回「待确认」并把指令挂起。
+            // 早期用 ShowModal 同步等，实测会让编辑器彻底卡死（模态循环里 update 不触发，
+            // 倒计时走不动），所以改由用户点「允许」时再单独执行。
+            if (!consentGranted)
+            {
+                var pendingConsent = ConsentGate.RequestIfNeeded(descriptor, entry, source, entry.Id);
+                if (pendingConsent != null)
+                {
+                    RequestAbort();
+                    return CommandResult.Skip(
+                        $"'{entry.Id}' 是敏感操作，已弹出确认窗等待人工点「允许」" +
+                        $"（{pendingConsent.TimeoutSeconds} 秒后自动拒绝）。" +
+                        $"用 consent.fetch id=\"{pendingConsent.Id}\" 取结果；" +
+                        $"控制台勾选「{ConsentGate.ToggleLabel}」后可跳过确认。",
+                        ConsentGate.PendingJson(pendingConsent));
+                }
             }
 
             ICommand instance;

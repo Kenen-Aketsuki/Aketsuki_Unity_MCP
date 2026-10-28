@@ -37,6 +37,8 @@ namespace CivilRev.CommandSystem.Editor
         private const string KeyFileAccessRoots = Prefix + "FileAccessRoots";
         private const string KeyWatchdogSeconds = Prefix + "WatchdogSeconds";
         private const string KeyRuntimeCommandsEnabled = Prefix + "RuntimeCommandsEnabled";
+        private const string KeyFullDelegation = Prefix + "FullDelegationEnabled";
+        private const string KeyConsentTimeout = Prefix + "ConsentTimeoutSeconds";
 
         /// <summary>记录"全局旧值已被哪个工程继承"，保证迁移只发生一次</summary>
         private const string KeyLegacyOwner = Prefix + "LegacyPrefsOwner";
@@ -222,6 +224,51 @@ namespace CivilRev.CommandSystem.Editor
             }
         }
 
+        /// <summary>
+        /// 「全权委托」开关：<b>默认关闭</b>，按工程隔离。
+        /// <para>
+        /// 关着时，带 <see cref="CommandAttribute.RequiresConsent"/> 的指令（进/出 Play 模式、打开场景）
+        /// 会弹出模态确认窗，由人点「允许 / 拒绝」，超时视为拒绝。
+        /// 打开后这些指令<b>直接执行、不再询问</b>——把它当成"我知道 AI 会动我的现场，我认了"。
+        /// </para>
+        /// <para>
+        /// 为什么默认关：AI 退出一次 Play 就能把用户跑到一半的游戏清掉，且没有撤销。
+        /// 这与"顺手改个字段"不是一个量级，默认必须由人显式授权。
+        /// </para>
+        /// </summary>
+        public static bool FullDelegationEnabled
+        {
+            get
+            {
+                MigrateLegacyOnce();
+                return EditorPrefs.GetBool(Scoped(KeyFullDelegation), false);
+            }
+            set
+            {
+                MigrateLegacyOnce();
+                EditorPrefs.SetBool(Scoped(KeyFullDelegation), value);
+            }
+        }
+
+        /// <summary>
+        /// 敏感操作确认窗的倒计时（秒，默认 30）。超时一律按「拒绝」处理。
+        /// <para>按工程隔离：不同工程的现场轻重不同，允许各调各的。最小 5 秒，防止手滑设成 1 秒等于自动拒绝。</para>
+        /// </summary>
+        public static int ConsentTimeoutSeconds
+        {
+            get
+            {
+                MigrateLegacyOnce();
+                var value = EditorPrefs.GetInt(Scoped(KeyConsentTimeout), 30);
+                return value < 5 ? 30 : value;
+            }
+            set
+            {
+                MigrateLegacyOnce();
+                EditorPrefs.SetInt(Scoped(KeyConsentTimeout), value < 5 ? 30 : value);
+            }
+        }
+
         /// <summary>取得实际生效的指令目录（未配置时返回默认值）</summary>
         public static string EffectiveWatchDirectory
         {            get
@@ -292,6 +339,8 @@ namespace CivilRev.CommandSystem.Editor
             EditorPrefs.DeleteKey(Scoped(KeyHttpToken));
             EditorPrefs.DeleteKey(Scoped(KeyFileAccessRoots));
             EditorPrefs.DeleteKey(Scoped(KeyRuntimeCommandsEnabled));
+            EditorPrefs.DeleteKey(Scoped(KeyFullDelegation));
+            EditorPrefs.DeleteKey(Scoped(KeyConsentTimeout));
 
             EditorPrefs.DeleteKey(KeyVerbose);
             EditorPrefs.DeleteKey(KeyArchive);

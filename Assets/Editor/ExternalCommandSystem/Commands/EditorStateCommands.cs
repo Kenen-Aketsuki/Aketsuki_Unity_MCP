@@ -10,7 +10,9 @@ namespace CivilRev.CommandSystem.Editor
     /// </para>
     /// </summary>
     [Command("editor.play", Description = "进入 Play 模式（会触发域重载，服务随后自动恢复）",
-        Usage = "", EditorOnly = true)]
+        Usage = "", EditorOnly = true,
+        RequiresConsent = true,
+        ConsentMessage = "进入 Play 模式：编辑器会编译并域重载，游戏开始运行，当前编辑现场会被打断。")]
     public sealed class EditorPlayCommand : ICommand
     {
         public CommandResult Execute(CommandContext context)
@@ -37,7 +39,9 @@ namespace CivilRev.CommandSystem.Editor
 
     /// <summary>退出 Play 模式（未在 Play 中时为幂等 no-op）。</summary>
     [Command("editor.stop", Description = "退出 Play 模式（幂等）",
-        Usage = "", EditorOnly = true)]
+        Usage = "", EditorOnly = true,
+        RequiresConsent = true,
+        ConsentMessage = "退出 Play 模式：运行中的游戏会立即结束，未保存的运行时状态全部丢失，无法撤销。")]
     public sealed class EditorStopCommand : ICommand
     {
         public CommandResult Execute(CommandContext context)

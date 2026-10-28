@@ -11,18 +11,19 @@ namespace CivilRev.CommandSystem.Editor
     /// <summary>
     /// 打开指定场景。
     /// <para>
-    /// 触发即弹出模态许可窗，请用户在编辑器中手动「允许 / 拒绝」（默认 30 秒超时视为拒绝）。
-    /// 被拒绝或超时时，返回失败并请求中止当前批次（<c>runner.RequestAbort</c>），
-    /// 后续指令将标记为 Skipped，避免在错误的场景上继续操作——即使 <c>stopOnError=false</c> 也会中止。
+    /// <b>需要人工确认</b>：确认由统一门禁 <see cref="ConsentGate"/> 在前置阶段弹窗（「允许 / 拒绝」，
+    /// 默认 30 秒超时视为拒绝）；控制台勾选「全权委托」后直接放行、不再询问。
+    /// 拒绝或超时时整批中止（后续指令标记为 Skipped），避免在错误的场景上继续操作——
+    /// 即使 <c>stopOnError=false</c> 也会中止。
     /// </para>
     /// <para>参数：path（必填，完整 Assets 路径或场景名）、additive（默认 false）、saveCurrent（默认 true）。</para>
     /// </summary>
-    [Command("scene.open", Description = "打开指定场景（弹窗请求用户手动允许；拒绝/超时中止本批次）",
-        Usage = "path: string, additive: bool, saveCurrent: bool", EditorOnly = true)]
+    [Command("scene.open", Description = "打开指定场景（需人工确认；拒绝/超时中止本批次）",
+        Usage = "path: string, additive: bool, saveCurrent: bool", EditorOnly = true,
+        RequiresConsent = true,
+        ConsentMessage = "打开场景：当前场景会被关闭或叠加（是否保存由 saveCurrent 决定，有未保存改动且 saveCurrent=false 时直接拒绝）。")]
     public sealed class SceneOpenCommand : ICommand
     {
-        private const int PermissionTimeoutSeconds = 30;
-
         public CommandResult Execute(CommandContext context)
         {
             if (context.DryRun)
@@ -42,19 +43,7 @@ namespace CivilRev.CommandSystem.Editor
                 return CommandResult.Fail($"找不到场景：{input}（支持完整 Assets 路径或场景名）");
             }
 
-            var decision = PermissionWindow.Request(
-                $"AI 请求打开场景：\n\n{resolved}\n\n是否允许打开该场景？",
-                PermissionTimeoutSeconds);
-
-            if (decision != PermissionWindow.Decision.Allow)
-            {
-                var reason = decision == PermissionWindow.Decision.Reject ? "用户拒绝" : "超时未响应";
-                // 中止当前批次：后续指令将标记为 Skipped（即便 stopOnError=false 也不会在错误场景上继续）
-                context.Runner?.RequestAbort();
-                return CommandResult.Fail($"打开场景被取消（{reason}），已中止后续指令");
-            }
-
-            // 用户允许：必要时先保存当前场景，避免 Unity 弹二次保存对话框
+            // 用户已在门禁里确认过（或被「全权委托」放行），这里只管保存与切换
             var saveCurrent = context.Args.GetBool("saveCurrent", true);
             if (AnySceneDirty())
             {
