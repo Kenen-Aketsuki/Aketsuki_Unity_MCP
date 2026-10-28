@@ -24,13 +24,24 @@ namespace CivilRev.CommandSystem.Editor
     /// <para>
     /// <b>为什么要有 limit：</b>运行时的对象池 + 特效 + 飘字可能瞬间上千个节点，
     /// 全量序列化出来能撑到几 MB，直接把响应体顶掉（HTTP 上限 4 MB）。
-    /// 默认 400 个节点封顶，并在结果里明确 <c>truncated</c>，需要更多就显式调大。
+    /// 默认 400 封顶，并在结果里明确 <c>truncated</c>，需要更多就显式调大。
+    /// </para>
+    ///
+    /// <para>
+    /// <b>limit 在两种模式下量的是不同的东西（BUG-010）：</b>
+    /// <list type="bullet">
+    /// <item>树模式（不给 <c>name</c>）：limit 是<b>序列化节点数</b>预算，走满即截断，因为要防的是响应体爆炸。</item>
+    /// <item>命中模式（给了 <c>name</c>）：limit 是<b>命中条数</b>上限，遍历不限量。
+    /// 此前两种模式共用「遍历节点数」预算，<c>limit=20</c> 等于「只看前 20 个节点」，
+    /// 命中区在后面就必然空手而归，还会让调用方误判成「场景里没有这个节点」。</item>
+    /// </list>
+    /// 两种模式都在 data 里给 <c>visited</c>（实际遍历节点数）与 <c>limitAppliesTo</c>，便于分辨。
     /// </para>
     ///
     /// <para>
     /// 参数：root（从某个节点开始，支持 <c>[scene:X]</c> 前缀；默认全部）、
     /// scene（只看某个场景，写法同 <c>[scene:...]</c> 里的选择器）、name（按名字子串过滤，给了就返回**扁平命中列表**）、
-    /// depth（0=不限）、includeInactive（默认 true）、limit（默认 400）
+    /// depth（0=不限）、includeInactive（默认 true）、limit（默认 400；树模式=节点数，name 模式=命中数）
     /// </para>
     /// </summary>
     [Command("runtime.hierarchy",
@@ -88,6 +99,8 @@ namespace CivilRev.CommandSystem.Editor
 
                 data.Set("sceneCount", JsonValue.Of(1));
                 data.Set("nodeCount", JsonValue.Of(_visited));
+                data.Set("visited", JsonValue.Of(_visited));
+                data.Set("limitAppliesTo", JsonValue.Of("nodes"));
                 data.Set("truncated", JsonValue.Of(_truncated));
                 data.Set("scenes", JsonValue.FromArray(new[] { single }));
                 return CommandResult.Ok(
@@ -128,6 +141,8 @@ namespace CivilRev.CommandSystem.Editor
 
             data.Set("sceneCount", JsonValue.Of(scenes.Count));
             data.Set("nodeCount", JsonValue.Of(_visited));
+            data.Set("visited", JsonValue.Of(_visited));
+            data.Set("limitAppliesTo", JsonValue.Of("nodes"));
             data.Set("truncated", JsonValue.Of(_truncated));
             data.Set("scenes", groups);
 
@@ -145,6 +160,13 @@ namespace CivilRev.CommandSystem.Editor
                 var group = scenes[i];
                 for (var j = 0; j < group.Roots.Count; j++)
                 {
+                    if (_matched >= _limit)
+                    {
+                        // 还有根没走：后面可能压着命中，明确记为截断（BUG-010）
+                        _truncated = true;
+                        break;
+                    }
+
                     WalkMatches(group.Roots[j], nameFilter, group, matches);
                 }
             }
@@ -154,23 +176,34 @@ namespace CivilRev.CommandSystem.Editor
             // _visited 是遍历节点数，命中数必须单独计——混用会报出"命中 19 个"却只有 1 条记录（实测踩过）
             data.Set("matchCount", JsonValue.Of(_matched));
             data.Set("truncated", JsonValue.Of(_truncated));
+            data.Set("visited", JsonValue.Of(_visited));
+            data.Set("limitAppliesTo", JsonValue.Of("matches"));
             data.Set("matches", matches);
 
             if (_matched == 0)
             {
-                return CommandResult.Ok($"运行时层级里没有名字含 '{nameFilter}' 的节点{TruncatedHint()}", data);
+                // 遍历是不限量的，所以这里真的是"没有"，不是"没看到"——
+                // 但要把遍历规模报出来，调用方才知道这个结论覆盖了多少节点（BUG-010）
+                return CommandResult.Ok(
+                    $"运行时层级里没有名字含 '{nameFilter}' 的节点（已遍历 {_visited} 个节点，未截断）", data);
             }
 
             var sceneHint = scenes.Count > 1 ? $"（分布在 {scenes.Count} 个场景，同名时请用 matches 里的 qualifiedPath 精确指定）" : string.Empty;
             return CommandResult.Ok(
-                $"运行时层级里命中 {_matched} 个名字含 '{nameFilter}' 的节点{sceneHint}{TruncatedHint()}", data);
+                $"运行时层级里命中 {_matched} 个名字含 '{nameFilter}' 的节点{sceneHint}{MatchTruncatedHint()}", data);
         }
 
+        /// <summary>
+        /// 命中模式的遍历：<c>limit</c> 只砍<b>命中条数</b>，遍历本身不限量（BUG-010）。
+        /// <para>
+        /// 命中满了之后要立刻整体收手——否则每个兄弟节点都会被叫进来一次再空转返回，
+        /// 一颗几千节点的树白白多走几遍。
+        /// </para>
+        /// </summary>
         private void WalkMatches(Transform node, string nameFilter, SceneGroup group, JsonValue matches)
         {
-            if (node == null || _visited >= _limit)
+            if (node == null || _matched >= _limit)
             {
-                _truncated = _truncated || node != null;
                 return;
             }
 
@@ -178,6 +211,13 @@ namespace CivilRev.CommandSystem.Editor
 
             if (node.name.IndexOf(nameFilter, System.StringComparison.OrdinalIgnoreCase) >= 0)
             {
+                if (_matched >= _limit)
+                {
+                    // 命中已经够了：记一次截断，不再往下走
+                    _truncated = true;
+                    return;
+                }
+
                 var item = NodeJson(node);
                 item.Set("scene", JsonValue.Of(group.Label));
                 item.Set("sceneHandle", JsonValue.Of(group.Scene.handle));
@@ -187,8 +227,22 @@ namespace CivilRev.CommandSystem.Editor
 
             for (var i = 0; i < node.childCount; i++)
             {
+                if (_matched >= _limit)
+                {
+                    // 子树里可能还有命中，但已经不收了 → 明确记为截断，别让调用方以为"只有这些"
+                    _truncated = _truncated || node.childCount > 0;
+                    return;
+                }
+
                 WalkMatches(node.GetChild(i), nameFilter, group, matches);
             }
+        }
+
+        private string MatchTruncatedHint()
+        {
+            return _truncated
+                ? $"（命中已达 limit={_limit}，可能还有未列出的节点；调大 limit，或用 root / scene 收窄范围）"
+                : string.Empty;
         }
 
         #endregion
