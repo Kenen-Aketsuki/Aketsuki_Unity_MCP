@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Reflection;
@@ -22,7 +23,8 @@ namespace CivilRev.CommandSystem
     /// <item><c>value</c> 值。字段类型是 UnityEngine.Object 派生时，按「节点引用」解析成序列化引用：
     /// 节点名 / 层级路径（"A/B"）/ 类型选择器（"type:Canvas#1"）/ 对象形式（{"path":"..."}），
     /// 或按「资源引用」解析："asset:Assets/..."（全路径）/"asset:裸文件名"（精确匹配）/
-    /// {"asset":"..."}。数字 0 或 null 表示置空。其余按目标类型转换（数字 / 布尔 / 字符串 / 枚举 / 向量 / 颜色）</item>
+    /// {"asset":"..."}。数字 0 或 null 表示置空。其余按目标类型转换（数字 / 布尔 / 字符串 / 枚举 / 向量 / 颜色）；
+    /// 数组与 <c>List&lt;T&gt;</c> 字段传 JSON 数组，逐元素按同一套规则转换（IMPR-007）</item>
     /// <item><c>prefab</c> 可选。给了就改这个 **Prefab 资源**而不是场景：<c>target</c> 按 Prefab 内的
     /// 节点路径解析（空串 = Prefab 根），改完自动 <c>SaveAsPrefabAsset</c> 落盘</item>
     /// </list>
@@ -926,6 +928,22 @@ namespace CivilRev.CommandSystem
                 return ToColor(value, context, fieldName);
             }
 
+            // IMPR-007：数组 / List<T> 字段整体赋值。
+            // 元素递归回 ConvertValue，所以枚举数组、Vector3[]、组件引用数组（走 ResolveReference）、
+            // 结构体数组（走下面的 ConvertStruct）全都同一条路径覆盖。
+            var elementType = ArrayOrListElementType(targetType);
+            if (elementType != null)
+            {
+                if (!value.IsArray)
+                {
+                    throw new CommandArgumentException(context.CommandId, "value",
+                        $"字段 {fieldName} 的类型是 {targetType.Name}，value 请写成数组（如 [\"a\", \"b\"]）；" +
+                        $"当前给的是 {DescribeJsonKind(value)}");
+                }
+
+                return ConvertSequence(value, targetType, elementType, context, fieldName, nodeResolver);
+            }
+
             // C8：结构体整体赋值（ColorBlock / SpriteState / Navigation / Vector*/Rect 等）。
             // value 为对象时按字段名逐个灌入；数组形式由上面的 Vector/Color 分支处理。
             if (value.IsObject && targetType.IsValueType && targetType != typeof(string))
@@ -934,7 +952,118 @@ namespace CivilRev.CommandSystem
             }
 
             throw new CommandArgumentException(context.CommandId, "value",
-                $"暂不支持给类型 {targetType.Name} 赋值（字段 {fieldName}）。该类型可写的子字段：{string.Join("、", WritableMemberNames(targetType))}");
+                $"暂不支持给类型 {targetType.Name} 赋值（字段 {fieldName}）。{UnsupportedTypeHint(targetType)}");
+        }
+
+        /// <summary>
+        /// 数组或 <c>List&lt;T&gt;</c> 的元素类型；两者都不是时返回 null（IMPR-007）。
+        /// <para>只认一维数组：多维数组没法用一层 JSON 数组表达，宁可直接报错也不要静默填一半。</para>
+        /// </summary>
+        private static Type ArrayOrListElementType(Type targetType)
+        {
+            if (targetType.IsArray)
+            {
+                return targetType.GetArrayRank() == 1 ? targetType.GetElementType() : null;
+            }
+
+            if (targetType.IsGenericType && targetType.GetGenericTypeDefinition() == typeof(List<>))
+            {
+                return targetType.GetGenericArguments()[0];
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// 把 JSON 数组逐元素转成目标序列（IMPR-007）。
+        /// <para>
+        /// 每次都<b>新建一个</b>数组 / List 再整个赋回字段：写进原实例会踩到「长度对不上」的静默截断，
+        /// 也拿不到"期望 n 个、实际 m 个"这种能自查的信息——新建就没这个歧义，长度天然等于入参。
+        /// </para>
+        /// </summary>
+        private static object ConvertSequence(JsonValue value, Type targetType, Type elementType,
+            CommandContext context, string fieldName, Func<string, Transform> nodeResolver)
+        {
+            var count = value.Count;
+            var items = new object[count];
+            for (var i = 0; i < count; i++)
+            {
+                items[i] = ConvertValue(value[i], elementType, context, fieldName + "[" + i + "]", nodeResolver);
+            }
+
+            if (targetType.IsArray)
+            {
+                var array = Array.CreateInstance(elementType, count);
+                for (var i = 0; i < count; i++)
+                {
+                    array.SetValue(items[i], i);
+                }
+
+                return array;
+            }
+
+            var list = (IList)Activator.CreateInstance(targetType);
+            for (var i = 0; i < count; i++)
+            {
+                list.Add(items[i]);
+            }
+
+            return list;
+        }
+
+        private static string DescribeJsonKind(JsonValue value)
+        {
+            if (value == null || value.IsNull)
+            {
+                return "null";
+            }
+
+            if (value.IsObject)
+            {
+                return "对象";
+            }
+
+            if (value.IsArray)
+            {
+                return "数组";
+            }
+
+            if (value.IsString)
+            {
+                return "字符串 '" + value.AsString() + "'";
+            }
+
+            if (value.IsBoolean)
+            {
+                return "布尔 " + (value.AsBool() ? "true" : "false");
+            }
+
+            return value.IsNumber ? "数字 " + value.AsDouble().ToString(CultureInfo.InvariantCulture) : value.Type.ToString();
+        }
+
+        /// <summary>
+        /// 「这个类型写不进去」时给人看的提示（IMPR-007）。
+        /// <para>
+        /// 数组 / List 的可写成员列表是空的（反射看不到元素），以前的报错会吐一个空冒号，
+        /// 连"该写什么"都猜不出来——现在直接点明要传数组。
+        /// </para>
+        /// </summary>
+        private static string UnsupportedTypeHint(Type targetType)
+        {
+            var elementType = ArrayOrListElementType(targetType);
+            if (elementType != null)
+            {
+                var sample = elementType.Name;
+                if (elementType.IsEnum)
+                {
+                    var names = Enum.GetNames(elementType);
+                    sample = names.Length > 0 ? names[0] : elementType.Name;
+                }
+
+                return $"该字段是 {targetType.Name}，value 请写成数组（如 [\"{sample}\"]）";
+            }
+
+            return $"该类型可写的子字段：{string.Join("、", WritableMemberNames(targetType))}";
         }
 
         /// <summary>
