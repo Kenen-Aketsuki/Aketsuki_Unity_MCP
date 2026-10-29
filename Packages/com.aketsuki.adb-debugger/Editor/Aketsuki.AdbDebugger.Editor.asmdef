@@ -1,6 +1,6 @@
 {
-    "name": "CivilRev.AdbDebugger.Editor",
-    "rootNamespace": "CivilRev.AdbDebugger",
+    "name": "Aketsuki.AdbDebugger.Editor",
+    "rootNamespace": "Aketsuki.AdbDebugger",
     "references": [],
     "includePlatforms": [
         "Editor"

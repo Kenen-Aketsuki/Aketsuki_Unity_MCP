@@ -5,7 +5,7 @@ using System.Text;
 using UnityEditor;
 using UnityEngine;
 
-namespace CivilRev.AdbDebugger
+namespace Aketsuki.AdbDebugger
 {
     /// <summary>
     /// ADB 调试工具自己的设置，**独立于指令系统**（不引用它的任何类型）。
@@ -23,6 +23,8 @@ namespace CivilRev.AdbDebugger
     /// </summary>
     public static class AdbDebuggerSettings
     {
+        // 前缀故意保留 `CivilRev.`：这是存储契约，不是命名空间。改了等于把所有人的
+        // 设备/tag/端口/开关一次性重置（EditorPrefs 里按旧键存着，读不到就当没存过）。
         private const string Prefix = "CivilRev.AdbDebug.";
 
         public const int DefaultBackfill = 20;

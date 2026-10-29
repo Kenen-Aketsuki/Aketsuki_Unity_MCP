@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Text;
 
-namespace CivilRev.AdbDebugger
+namespace Aketsuki.AdbDebugger
 {
     /// <summary>
     /// 手写 JSON 输出器（只写不读）。

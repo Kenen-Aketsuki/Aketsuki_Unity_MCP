@@ -1,7 +1,6 @@
 {
-  "$comment": "Tools/deploy.py 的部署目标。root 是 Unity 工程根（含 Assets/ 与 ProjectSettings/ 的那一层），不是工作区根。改了这里不用改脚本。",
+  "$comment": "Tools/deploy.py 的部署目标。root 是 Unity 工程根（含 Assets/ 与 ProjectSettings/ 的那一层），不是工作区根。改了这里不用改脚本。 targets[].excludeModules 可按模块排除某个工程（如 project_lilith 不装 adb）；排除后 deploy.py 会打印『跳过』而不是静默略过。",
   "$removed": "project_island 已由用户手动卸载（2026-10-25 13:37 删掉 Assets/Editor/ExternalCommandSystem，git 从未跟踪），IMPR-009 批注为『这个工程暂时不需要这个工具了』，故不列为目标。不要顺手加回来——加回来等于把用户删掉的东西重新装上门。",
-  "source": "Assets/Editor/ExternalCommandSystem",
   "targets": [
     {
       "name": "project_island_back",
@@ -14,6 +13,16 @@
       "root": "D:/Wrok_proj/majotavern",
       "unity": "2022.3.62f2c1",
       "note": "工作区根与工程根同一层"
+    },
+    {
+      "name": "project_lilith",
+      "root": "D:/Wrok_proj/project_lilith",
+      "unity": "2021.3.45f2c1",
+      "note": "工作区根与工程根同一层（.workbuddy 在工程根下）；Unity 一直开着，部署后要发 asset.refresh",
+      "excludeModules": [
+        "adb"
+      ],
+      "excludeNote": "用户 2026-10-29 定：这个工程只要指令系统，ADB 调试工具不装（别顺手装回去）"
     },
     {
       "name": "CivelRev",

@@ -807,6 +807,16 @@ def main(argv=None):
     name = args.name or PKG_NAME
     print("模块：%s（%s）" % (args.module, CS_SOURCE))
 
+    if not os.path.isdir(CS_SOURCE):
+        # 2026-10-29：两个模块都已改成 embedded UPM 包，资产形态的源目录不复存在。
+        # 硬失败，别让人以为"只是路径没配对"然后手动改回去打出一个撞 CS0101 的包。
+        raise SystemExit(
+            "该模块已改为 UPM 包形态，不再从这里打包。\n"
+            "  源目录：Packages/com.aketsuki.unity-mcp、Packages/com.aketsuki.adb-debugger\n"
+            "  分发：直接给包目录或 git URL，或用 Tools/deploy.py 部署到目标工程\n"
+            "  .unitypackage 是把资产塞进 Assets 的旧形态，与包形态的同名程序集会在目标工程里\n"
+            "  各定义一遍（CS0101），两者不能共存。")
+
     output = args.output or os.path.join(
         HERE, "UnityPackage", "%s-%s.unitypackage" % (name, args.version))
 

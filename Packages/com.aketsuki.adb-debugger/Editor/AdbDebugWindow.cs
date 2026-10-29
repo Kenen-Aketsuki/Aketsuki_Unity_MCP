@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using UnityEditor;
 using UnityEngine;
 
-namespace CivilRev.AdbDebugger
+namespace Aketsuki.AdbDebugger
 {
     /// <summary>
     /// ADB 调试台的独立窗口。

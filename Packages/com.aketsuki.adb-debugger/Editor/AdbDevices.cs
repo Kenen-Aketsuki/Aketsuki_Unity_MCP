@@ -4,7 +4,7 @@ using System.Diagnostics;
 using System.Text;
 using System.Threading;
 
-namespace CivilRev.AdbDebugger
+namespace Aketsuki.AdbDebugger
 {
     /// <summary>
     /// 一台 Android 设备或模拟器（来自 <c>adb devices -l</c> 的一行）。

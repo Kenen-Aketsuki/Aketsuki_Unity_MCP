@@ -8,17 +8,17 @@
 
 **本仓库只有这套工具**：没有任何游戏逻辑、场景、美术资源、第三方游戏依赖。
 
-> **仓库里有两个并列的工具**（2026-10-27 拆的，FEAT-007）：
+> **仓库里有两个并列的工具**（2026-10-27 拆的，FEAT-007；两个都已包化，2026-10-29）：
 >
-> | 工具 | 目录 | 干什么 | 包名 | 对外接口 |
+> | 工具 | 目录 | 干什么 | 包名（UPM） | 对外接口 |
 > | --- | --- | --- | --- | --- |
-> | Unity MCP 指令系统 | `Assets/Editor/ExternalCommandSystem/` | 下发指令控制编辑器 / 运行时 | `Aketsuki_Unity_MCP` | HTTP 57831 + MCP 桥 |
-> | ADB 调试 | `Assets/Editor/AdbDebugger/` | 抓 Android 真机 logcat 进控制台 | `Aketsuki_AdbDebugger` | **没有**（只开窗口） |
+> | Unity MCP 指令系统 | `Packages/com.aketsuki.unity-mcp/` | 下发指令控制编辑器 / 运行时 | `com.aketsuki.unity-mcp` | HTTP 57831 + MCP 桥 |
+> | ADB 调试 | `Packages/com.aketsuki.adb-debugger/` | 抓 Android 真机 logcat 进控制台 | `com.aketsuki.adb-debugger` | **没有**（只开窗口） |
 >
-> 两者**零依赖**（ADB 是独立 asmdef，`references: []`），各有独立分发包，可只装其一。
+> 两者**零依赖**（ADB 是独立 asmdef，`references: []`），各有独立包，可只装其一。
 > ADB 不自带 MCP——AI 要用就装指令系统，调它的 `adb.devices` / `adb.logcat.*` 五条指令
 > （反射适配，见 `Commands/Adb/`）。ADB 自己的文档在
-> [`Assets/Editor/AdbDebugger/README.md`](Assets/Editor/AdbDebugger/README.md)。
+> [`Packages/com.aketsuki.adb-debugger/README.md`](Packages/com.aketsuki.adb-debugger/README.md)。
 
 > **⚠️ HTTP 200 ≠ 指令成功（DOC-001）。** 指令业务失败时服务端仍返回 200，
 > 成败在 body 的 `ok` / `records[].status`；批量看 `succeeded`/`failed`。
@@ -30,28 +30,29 @@
 
 ```
 Aketsuki_Unity_MCP/                     ← Unity 工程根（用 Unity 直接打开这里）
-├── Assets/Editor/AdbDebugger/       ★ 另一个独立工具：ADB logcat → Unity 控制台（见其 README）
-├── Assets/Editor/ExternalCommandSystem/
-│   ├── Core/          JSON/         指令框架、HTTP 协议层、路径与场景查询
-│   ├── Commands/                    内置指令（gameobject / component / prefab / ui / scene / asset ...）
-│   ├── CommandHttpServer.cs         监听 + 跨线程队列 + 主线程泵
-│   ├── CommandToolsWindow.cs        控制台窗口
-│   ├── McpSetup.cs                  MCP 桥安装器（菜单 ①~⑤）
-│   ├── McpBridge/                   Python 桥：send.py / unity_mcp_server.py / SKILL.md
-│   ├── Project/                     工程客制化专区（不进包，本仓库为空占位）
-│   └── README.md                    ★ 完整文档（协议、指令清单、扩展方式、打包维护）
+├── Packages/
+│   ├── com.aketsuki.unity-mcp/        ★ 指令系统（UPM 包）
+│   │   ├── Editor/Core/  JSON/       指令框架、HTTP 协议层、路径与场景查询
+│   │   ├── Editor/Commands/          内置指令（gameobject / component / prefab / ui / scene / asset / adb ...）
+│   │   ├── Editor/CommandHttpServer.cs        监听 + 跨线程队列 + 主线程泵
+│   │   ├── Editor/CommandToolsWindow.cs       控制台窗口
+│   │   ├── Editor/McpSetup.cs                 MCP 桥安装器（菜单 ①~⑤）
+│   │   ├── Editor/McpBridge/                   Python 桥：send.py / unity_mcp_server.py / SKILL.md
+│   │   ├── Editor/Project/            工程客制化专区（不进包，本仓库为空占位）
+│   │   └── Editor/README.md           ★ 完整文档（协议、指令清单、扩展方式、打包维护）
+│   └── com.aketsuki.adb-debugger/     ★ 另一个独立工具（UPM 包）：ADB logcat → Unity 控制台
 ├── Packages/manifest.json           只留 textmeshpro + ugui
 ├── ProjectSettings/                 Unity 2021.3.16f1c1
 ├── Feedback/                        反馈表：其它工程踩到的 bug / 缺的指令
 │   ├── 待拍板/  未实现/  已实现/      移动文件 = 改状态（待拍板里由你直接写决策）
 │   └── 索引.md                       由 Tools/feedback_index.py 生成
 └── Tools/
-    ├── deploy.py                    把工具同步部署到各工程（Tools/deploy_targets.json 驱动）
+    ├── deploy.py                    把两个包同步部署到各工程（Tools/deploy_targets.json 驱动）
     ├── deploy_targets.json          部署目标清单：工程根、Unity 版本
-    ├── build_unitypackage.py        打成 .unitypackage（排除 Project/，三次校验防泄漏）
-    ├── install_unitypackage.py      解包直接落地到别的工程（不经过 Unity 导入器）
-    ├── verify_unitypackage.py       无头 Unity 建空工程 → 导入 → 补 UGUI/TMP 再编译，断言可用
     ├── compile_adb.py               离线编译 ADB 程序集（asmdef 没有 csproj，先借主程序集的引用）
+    ├── build_unitypackage.py        【已停用】资产形态打包器，源目录已不存在，运行即报错退出
+    ├── install_unitypackage.py      【已停用】配套安装器
+    ├── verify_unitypackage.py       【已停用】配套校验器
     └── feedback_index.py            重建 Feedback/索引.md + 校验状态/编号/必填字段
 ```
 
@@ -75,12 +76,12 @@ python .workbuddy/skills/unity-cmd/scripts/send.py compile --wait 300
 
 ## 搬到别的工程
 
-整套 `Assets/Editor/ExternalCommandSystem/` 直接拷走即可：它**零工程编译依赖**
+整套 `Packages/com.aketsuki.unity-mcp/Editor/` 直接拷走即可：它**零工程编译依赖**
 （唯一可选的挂钩 `MainUIRootBuilder` 是按类型名反射发现，找不到就走内置默认）。
 搬过一次之后，把工程登记进 [`Tools/deploy_targets.json`](Tools/deploy_targets.json)，
 以后都用 `Tools/deploy.py` 增量同步（见下一节），别再手工拷。
 真正的接口细节、指令清单、新增指令的写法、`.unitypackage` 打包与校验，全部在
-[`Assets/Editor/ExternalCommandSystem/README.md`](Assets/Editor/ExternalCommandSystem/README.md)。
+[`Packages/com.aketsuki.unity-mcp/Editor/README.md`](Packages/com.aketsuki.unity-mcp/Editor/README.md)。
 
 ## 部署到多个工程
 
@@ -97,11 +98,16 @@ python Tools/deploy.py --force-refresh     # 编辑器在后台不响应时，�
 python Tools/deploy.py --prune             # 顺带删掉目标侧的孤儿文件（默认只报告）
 
 python Tools/deploy.py --module adb --list  # ADB 工具（不带 --module 就是指令系统）
-python Tools/deploy.py --module adb         # 部署 ADB（20 个文件，没有桥）
+python Tools/deploy.py --module adb         # 部署 ADB（27 个文件，没有桥）
 ```
 
-当前登记：`project_island_back`、`majotavern`、`CivelRev`（工程根在 `CivelRev/Demo/CivilizationRevival`，
-比工作区根低一层——配置里写的是**工程根**，不是 `.workbuddy` 所在的那层）。
+当前登记：`project_island_back`、`majotavern`、`project_lilith`、`CivelRev`
+（工程根在 `CivelRev/Demo/CivilizationRevival`，比工作区根低一层——配置里写的是**工程根**，
+不是 `.workbuddy` 所在的那层）。
+
+目标可以按模块分别开关：条目里写 `"excludeModules": ["adb"]` 就表示这个工程只装指令系统。
+`project_lilith` 就是这么配的（只要指令系统，不装 ADB）——全量 `--module adb` 时脚本会打出
+「跳过 project_lilith」而不是悄悄当没看见。要改主意就编辑 `deploy_targets.json`，没有绕过开关。
 
 规则（脚本头部注释里有完整理由）：
 
@@ -120,37 +126,22 @@ python Tools/deploy.py --module adb         # 部署 ADB（20 个文件，没有
 
 ## 打包分发
 
-> **日常同步不用这里**——本机的三个目标工程走上面的 `deploy.py`（直接读本仓库源码，永远是实时的）。
-> 打包三件套只用于「目标机器上没有本仓库」的场景：给别人的工程装一份、或存档一个可交付的安装包。
-> 包内是**打包那一刻的快照**，改完代码要重新打包，否则分发出去的是旧的。
+两个工具都是 **UPM 包**（embedded package），分发 = 给包目录本身，没有额外的打包步骤：
 
-```bash
-python Tools/build_unitypackage.py                  # → Tools/UnityPackage/UnityCommandBridge.unitypackage
-python Tools/build_unitypackage.py --list-only      # 只看会打进哪些资产
-python Tools/verify_unitypackage.py --with-ui \
-    --unity "C:/Program Files/Unity/Hub/Editor/2021.3.16f1c1/Editor/Unity.exe"
-python Tools/install_unitypackage.py --project <目标工程根>   # 目标工程正开着编辑器时用这个
+| 想干什么 | 怎么做 |
+| --- | --- |
+| 装到本机其它工程 | `python Tools/deploy.py --module {mcp,adb} <目标> --verify`（直接读本仓库源码，永远实时） |
+| 给别人 | 把 `Packages/com.aketsuki.adb-debugger/` 整个目录拷过去；或推到 git 仓库后，在对方 `Packages/manifest.json` 里写 `"com.aketsuki.adb-debugger": "https://<repo>.git?path=/Packages/com.aketsuki.adb-debugger"` |
+| 留一个可归档的版本 | `git archive` 出 tar.gz，对方用 `"file:xxx.tgz"` 装 |
 
-python Tools/build_unitypackage.py --bundle                   # 指令系统：目录 + .zip
-python Tools/build_unitypackage.py --module adb --bundle      # ADB 工具：目录 + .zip
-python Tools/install_unitypackage.py --project <目标工程根>    # 同目录只有一个包时可省 --module
-```
+要点：
 
-`--bundle` 除了 `.unitypackage` 还会生成**同名压缩包**（根目录名 = 目录名，解压即得整个包），
-里面三段分明：**Unity 侧工具** = `.unitypackage`；**AI 侧工具** = `ai/`
-（`scripts/unity_mcp_server.py`、`scripts/send.py`、`SKILL.md`，与包内 `McpBridge/` 逐字节同源）；
-**部署文档** = `DEPLOY.md` + `manifest.json`。ADB 包不提供 MCP，因此**没有** `ai/`，
-`manifest.json` 里 `aiSide: null`。
-
-安装器**不写死路径**：装到哪、桥同步到哪个技能目录、同步哪几份文件，全从包内 `package.json`
-的 `installRoot` / `skillName` / `skillFiles` 读，所以两个工具的包共用同一份 `install.py`。
-ADB 包的 `skillFiles` 是**空列表**（显式声明"本包没有桥"），安装器据此不碰 `.workbuddy/`。
-同目录有多个包时用 `--module` 或 `-p` 指定，它不会替你猜。
-
-包内只有 `Assets/Editor/ExternalCommandSystem/`（含 `McpBridge/` 三个桥脚本），
-`Project/`（工程客制化）**强制排除**：收集阶段跳过、目录条目跳过、写包终检断言，
-`verify_unitypackage.py` 再对成品做一次独立断言。桥脚本以磁盘上的 `.meta` 为准，
-GUID 稳定，重复导入不会产生重复资产（打包器对重复 pathname 直接报错）。
+- **包内不留工程耦合内容**：MCP 包的 `Editor/Project/`（工程客制化）永远不进别人的工程；
+  ADB 包没有这个目录。`deploy.py` 按前缀排除，`--prune` 也不会清它。
+- **`.meta` 一起带走**：GUID 稳定，重复导入不会产生重复资产。
+- **旧形态已停用**：`build_unitypackage.py` / `install_unitypackage.py` / `verify_unitypackage.py`
+  是 `.unitypackage`（资产形态）那一套，源目录已不存在，脚本会直接报错退出。
+  两种形态**不能共存**——同程序集在两处定义，一片 CS0101。
 
 ## 反馈表
 

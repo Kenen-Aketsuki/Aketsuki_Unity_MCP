@@ -11,7 +11,7 @@ Unity **编辑器扩展** + 一层 **Python 桥**，让你（或 AI）用 HTTP /
 
 | 消费者 | 入口 | 谁在用 |
 | --- | --- | --- |
-| HTTP 直连 | `Assets/Editor/ExternalCommandSystem/McpBridge/send.py` | 脚本、人、这个会话里的我 |
+| HTTP 直连 | `Packages/com.aketsuki.unity-mcp/Editor/McpBridge/send.py` | 脚本、人、这个会话里的我 |
 | MCP（stdio 桥） | `.../McpBridge/unity_mcp_server.py` | WorkBuddy 会话，65 个 typed 工具 |
 | Unity 菜单 | `工具 / 指令系统 / 指令控制台` | 你，手工开关与调试 |
 
@@ -22,13 +22,13 @@ Unity **编辑器扩展** + 一层 **Python 桥**，让你（或 AI）用 HTTP /
 >
 > | 工具 | 目录 | 干什么 | 包名 | 对外接口 |
 > | --- | --- | --- | --- | --- |
-> | 指令系统（本文档主角） | `Assets/Editor/ExternalCommandSystem/` | 下发指令控制编辑器 / 运行时 | `Aketsuki_Unity_MCP` | HTTP 57831 + MCP 桥 |
-> | ADB 调试 | `Assets/Editor/AdbDebugger/` | 抓 Android 真机 logcat 进控制台 | `Aketsuki_AdbDebugger` | **没有**（只开窗口） |
+> | 指令系统（本文档主角） | `Packages/com.aketsuki.unity-mcp/Editor/` | 下发指令控制编辑器 / 运行时 | `Aketsuki_Unity_MCP` | HTTP 57831 + MCP 桥 |
+> | ADB 调试 | `Packages/com.aketsuki.adb-debugger/Editor/` | 抓 Android 真机 logcat 进控制台 | `Aketsuki_AdbDebugger` | **没有**（只开窗口） |
 >
 > 两者**零依赖**（ADB 的 asmdef 是 `references: []`，物理上引用不到对方），可单独安装。
 > ADB 那份**不自带 MCP**：要让 AI 抓日志，装指令系统，用它的 `adb.*` 五条指令——
 > 那是指令系统里的一层反射适配（`Commands/Adb/`），调 ADB 模块的 `AdbExternalApi`。
-> ADB 自己的文档在 `Assets/Editor/AdbDebugger/README.md`，本文档不重复。
+> ADB 自己的文档在 `Packages/com.aketsuki.adb-debugger/README.md`，本文档不重复。
 > 工具侧一切按 `--module {mcp,adb}` 区分（`deploy.py` / `build_unitypackage.py` / `install_unitypackage.py`）。
 
 ## 2. 10 分钟上手
@@ -37,7 +37,7 @@ Unity **编辑器扩展** + 一层 **Python 桥**，让你（或 AI）用 HTTP /
 cd D:/Wrok_proj/Aketsuki_Unity_MCP
 
 # ① 服务活着吗（Unity 编辑器必须开着，且菜单里开过 HTTP 指令服务）
-python Assets/Editor/ExternalCommandSystem/McpBridge/send.py \
+python Packages/com.aketsuki.unity-mcp/Editor/McpBridge/send.py \
        --project-root D:/Wrok_proj/project_island_back status
 
 # ② 有哪些指令（条数不写死，随代码变；参数说明由服务端 CommandAttribute 提供，不会漂）
@@ -57,8 +57,8 @@ python Tools/deploy.py <目标> --verify      # 部署 + 让目标编辑器编�
 
 | 想知道 | 读这个 | 别读 |
 | --- | --- | --- |
-| 指令系统的架构、路径规则、UI 指令参数 | `Assets/Editor/ExternalCommandSystem/README.md` | 根目录 `README.md`（那只是仓库门面） |
-| AI 该怎么用（自愈流程、运行时门禁、多场景、客户端语义） | `Assets/Editor/ExternalCommandSystem/McpBridge/SKILL.md` | — |
+| 指令系统的架构、路径规则、UI 指令参数 | `Packages/com.aketsuki.unity-mcp/Editor/README.md` | 根目录 `README.md`（那只是仓库门面） |
+| AI 该怎么用（自愈流程、运行时门禁、多场景、客户端语义） | `Packages/com.aketsuki.unity-mcp/Editor/McpBridge/SKILL.md` | — |
 | 反馈 / bug / 改进项的登记与流转 | `Feedback/README.md` + `Feedback/索引.md` | 各工程 `.workbuddy/` 下的散装清单（已废弃，见 DOC-002） |
 | 部署器为什么这么写（行尾、.meta、原子写） | `Tools/deploy.py` 顶部 docstring | — |
 | 历史决策（每条为什么这么做） | `Feedback/已实现/` 下的工单与 `已拍板-*.md` | git log（只看标题看不出代价） |
@@ -78,10 +78,10 @@ python Tools/deploy.py <目标> --verify      # 部署 + 让目标编辑器编�
 用不上就删掉那条，别看到报错又去装回来。
 
 **部署一次写两处**，两个都要管：
-1. `<工程>/Assets/Editor/ExternalCommandSystem/`（服务端 C#，145 个文件，含 `.meta`）
+1. `<工程>/Packages/com.aketsuki.unity-mcp/Editor/`（服务端 C#，145 个文件，含 `.meta`）
 2. `<工程>/.workbuddy/skills/unity-cmd/`（MCP 桥脚本 + `SKILL.md`，3 个文件）
 
-ADB 工具只写一处：`Assets/Editor/AdbDebugger/`（20 个文件，含 `.meta`）。
+ADB 工具只写一处：`Packages/com.aketsuki.adb-debugger/Editor/`（27 个文件，含 `.meta`）。
 **它没有技能目录、没有桥**——`deploy.py --module adb <目标>` 只同步这些 C# 与文档；
 **不带 `--module` 就是 mcp**。`--prune` 只清本模块目录里的孤儿，不会碰另一个工具的目录。
 
@@ -117,29 +117,17 @@ ADB 工具只写一处：`Assets/Editor/AdbDebugger/`（20 个文件，含 `.met
 
 ## 6. 分发给别人
 
+两个工具都是 UPM 包，分发就是给包目录，没有打包步骤：
+
 ```bash
-python Tools/build_unitypackage.py --bundle                 # → Tools/UnityPackage/Aketsuki_Unity_MCP-<版本>/
-python Tools/build_unitypackage.py --module adb --bundle    # → Tools/UnityPackage/Aketsuki_AdbDebugger-<版本>/
+python Tools/deploy.py --module adb <目标> --verify   # 本机其它工程（推荐：直接读源码，永远实时）
+# 给别人：拷 Packages/com.aketsuki.{unity-mcp,adb-debugger} 整个目录；
+#         或 git URL 写进对方的 Packages/manifest.json
 ```
 
-产出目录 + 同名压缩包：`.unitypackage` + `ai/` + `install.py` + `DEPLOY.md` + `manifest.json`
-→ `Aketsuki_XXX-<版本>.zip`（根目录名 = 目录名，解压即得整个包）。
-
-三段分清楚：**Unity 侧工具** = `.unitypackage`；**AI 侧工具** = `ai/`（`scripts/unity_mcp_server.py`、
-`scripts/send.py`、`SKILL.md`，与包内 `McpBridge/` 同源，`install.py` 会把它同步进技能目录）；
-**部署文档** = `DEPLOY.md` + `manifest.json`。ADB 包没有 AI 侧（它不提供 MCP），`ai/` 目录不存在，
-`manifest.json` 里 `aiSide: null` —— 这不是漏打包。
-
-**发出去必须给 zip**，不要只给 `.unitypackage`、也不要只给目录：光一个包，接收方得自己拆 tar.gz、
-按 guid 拼路径、还要知道"目标已有 `.meta` 不能覆盖"；给目录则会在邮件/网盘里被拆散，
-`.meta` 这种点开头的文件还常被人手工打包时漏掉（少了 `.meta`，Unity 会重新生成 GUID，场景引用全丢）。
-`install.py`（= 仓库里的 `Tools/install_unitypackage.py`）会顺带写 `.workbuddy/skills/<skillName>/`，
-**装哪个工具、装到哪、桥同步哪几份，全从包内 `package.json` 读**（`installRoot` /
-`entrypoints.mcpBridge` / `skillName` / `skillFiles`），脚本里没有写死路径 —— 两个包共用同一个安装器。
-同目录里有两个包时用 `--module` 或 `-p` 指定，别指望它猜。
-
-包装完 ≠ 能用：还要在 `~/.workbuddy/mcp.json` 加一条带 `--project-root` 的条目，
-并在连接器管理页点"信任"。这件事包里做不了，必须人来做。
+旧的三件套（`build_unitypackage.py` / `install_unitypackage.py` / `verify_unitypackage.py`，
+`.unitypackage` 资产形态）**已停用**：源目录不复存在，运行即报错退出。
+资产形态与包形态不能共存——同名程序集两处定义，一片 CS0101。
 
 ## 7. 已知边界（不是 bug，是设计取舍）
 
@@ -158,12 +146,12 @@ python Tools/build_unitypackage.py --module adb --bundle    # → Tools/UnityPac
    但后者现在是敏感操作，默认要人确认（见下一条）。
 8. **ADB 相关的三件事要分清**：
    - 抓取本身（设备扫描、进程、堆栈合并、`suppressStack` 临时改全局堆栈设置）在
-     `Assets/Editor/AdbDebugger/`，边界见它的 README。
+     `Packages/com.aketsuki.adb-debugger/Editor/`，边界见它的 README。
    - AI 侧入口是本文档这套指令里的 `adb.devices` / `adb.logcat.start|stop|status|read`
      （`Commands/Adb/`），**全部走反射**调 `AdbExternalApi`：没装 ADB 包时这五条**根本不注册**——
      `/v1/commands`、控制台窗口、MCP 工具列表里都没有 `unity_adb_*`，其余指令不受影响，也不会编译失败。
      硬调会得到"指令已从列表里剔除：<装什么>"而不是"未注册的指令 ID"。
-     机制见 `Assets/Editor/ExternalCommandSystem/README.md` §5.5（`ICommandAvailability` + `OptionalDependency`），
+     机制见 `Packages/com.aketsuki.unity-mcp/Editor/README.md` §5.5（`ICommandAvailability` + `OptionalDependency`），
      以后加同类可选插件照那三步做。
    - `adb.logcat.read` 的缓冲 **2000 条、取走即删**；日志同时进 Unity 控制台（`[ADB] ` 前缀），
      所以 `console.read contains:"[ADB]"` 也能读到。
@@ -171,7 +159,7 @@ python Tools/build_unitypackage.py --module adb --bundle    # → Tools/UnityPac
    只返回「待确认 + `consentId`」，要用 `consent.fetch` 查结果；控制台「全权委托」打开才直接放行。
    **绝对不要改回 `ShowModal()` 同步等待** —— 模态循环里 `EditorApplication.update` 不触发、
    自定义窗也不重绘，倒计时两个驱动源同时失效，实测把编辑器卡死 180 秒（详见
-   `Assets/Editor/ExternalCommandSystem/README.md` §5.6 与 `FEAT-014`）。
+   `Packages/com.aketsuki.unity-mcp/Editor/README.md` §5.6 与 `FEAT-014`）。
 
 ## 8. 未决事项（接手前先看这段）
 
@@ -209,6 +197,6 @@ python Tools/build_unitypackage.py --module adb --bundle    # → Tools/UnityPac
 ## 10. 走完这一屏还缺什么
 
 - 想改指令行为 → `Feedback/README.md` 的流程，一条一个文件、带 `source`、编号由脚本校验。
-- 想加新指令 → `Assets/Editor/ExternalCommandSystem/README.md` §4「扩展一个新指令」。
+- 想加新指令 → `Packages/com.aketsuki.unity-mcp/Editor/README.md` §4「扩展一个新指令」。
 - 想知道某个设计为什么这么怪 → 先搜 `Feedback/已实现/` 的标题，再搜代码注释；
   大部分坑都在注释里写明了"别退回去"。

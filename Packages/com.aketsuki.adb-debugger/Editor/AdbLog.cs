@@ -1,6 +1,6 @@
 using UnityEngine;
 
-namespace CivilRev.AdbDebugger
+namespace Aketsuki.AdbDebugger
 {
     /// <summary>
     /// ADB 工具自己的日志出口。

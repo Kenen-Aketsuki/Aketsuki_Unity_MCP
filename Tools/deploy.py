@@ -58,28 +58,44 @@ CONFIG_PATH = os.path.join(HERE, "deploy_targets.json")
 MODULES = {
     "mcp": {
         "title": "Unity MCP 指令系统",
-        "src_rel": "Assets/Editor/ExternalCommandSystem",
-        "bridge": "McpBridge",
+        # 2026-10-29 起是 UPM 包形态（embedded package）：源根 = 包根，
+        # 目标落地到 <工程>/Packages/com.aketsuki.unity-mcp/，不再是 Assets 下的资产。
+        "src_rel": "Packages/com.aketsuki.unity-mcp",
+        # send.py 等桥脚本在包内的 Editor/McpBridge（包根下多一层 Editor）
+        "bridge": "Editor/McpBridge",
         "skill_dir_rel": ".workbuddy/skills/unity-cmd",
         "skill_files": [
             ("SKILL.md", "SKILL.md"),
             ("send.py", "scripts/send.py"),
             ("unity_mcp_server.py", "scripts/unity_mcp_server.py"),
         ],
-        "assembly": "Assembly-CSharp-Editor",
+        # 包内代码带 asmdef，不并入预定义程序集；改名后是 Aketsuki.UnityMcp.Editor
+        "assembly": "Aketsuki.UnityMcp.Editor",
         "has_project_dir": True,
+        # 工程客制化目录（相对包根）。包形态下在 Editor/ 里
+        "project_dir_rel": "Editor/Project",
+        # 旧的资产形态目录。切包时必须整体退役，否则同名类型会在两个程序集里重复定义
+        "legacy_rel": "Assets/Editor/ExternalCommandSystem",
+        # 桥脚本目录（相对目标 dest_root），验证与刷新时用来找 send.py
+        "bridge_rel": "Editor/McpBridge",
     },
     "adb": {
         "title": "ADB 调试",
-        "src_rel": "Assets/Editor/AdbDebugger",
+        # 2026-10-29 起也是 UPM 包形态：源根 = 包根，目标落地到
+        # <工程>/Packages/com.aketsuki.adb-debugger/，不再是 Assets 下的资产。
+        "src_rel": "Packages/com.aketsuki.adb-debugger",
         # 本工具**没有桥、没有技能目录**：它不提供 MCP，AI 侧入口是指令系统的 adb.* 指令
         # （Commands/Adb/ 里反射调 AdbExternalApi）。留空是有意的，别照 MCP 那份补回来。
         "bridge": "",
         "skill_dir_rel": "",
         "skill_files": [],
-        # 本工具带 asmdef，不并入 Assembly-CSharp-Editor，编译校验必须点名
-        "assembly": "CivilRev.AdbDebugger.Editor",
+        # 包内代码带 asmdef（2026-10-29 随切包改名，原 CivilRev.AdbDebugger.Editor）
+        "assembly": "Aketsuki.AdbDebugger.Editor",
         "has_project_dir": False,
+        "project_dir_rel": "Editor/Project",
+        # 旧的资产形态目录。切包时必须整体退役，否则同名类型会在两个程序集里重复定义（CS0101）
+        "legacy_rel": "Assets/Editor/AdbDebugger",
+        "bridge_rel": "",
     },
 }
 
@@ -93,12 +109,16 @@ SKILL_DIR_REL = ""
 SKILL_FILES = []
 ASSEMBLY = ""
 HAS_PROJECT_DIR = True
+PROJECT_DIR_REL = "Project"
+LEGACY_REL = ""
+BRIDGE_REL = ""
 
 
 def apply_module(name):
     """切换当前部署的模块（mcp / adb）"""
     global ACTIVE_MODULE, SRC_REL, SRC_ROOT, BRIDGE_ROOT
     global SKILL_DIR_REL, SKILL_FILES, ASSEMBLY, HAS_PROJECT_DIR
+    global PROJECT_DIR_REL, LEGACY_REL, BRIDGE_REL
 
     if name not in MODULES:
         raise SystemExit("未知模块：%s（可选：%s）" % (name, "、".join(MODULES)))
@@ -112,11 +132,14 @@ def apply_module(name):
     SKILL_FILES = module["skill_files"]
     ASSEMBLY = module["assembly"]
     HAS_PROJECT_DIR = module["has_project_dir"]
+    PROJECT_DIR_REL = module.get("project_dir_rel") or "Project"
+    LEGACY_REL = module.get("legacy_rel") or ""
+    BRIDGE_REL = module.get("bridge_rel") or ""
 
 
 apply_module("mcp")
 
-PROJECT_DIR_NAME = "Project"        # 工程专属，不参与内容同步
+PROJECT_DIR_NAME = "Project"        # 工程专属目录的名字（只用于判断"是不是客制化目录"）
 SKIP_DIR_NAMES = {"__pycache__", ".git", ".vs", ".idea"}
 SKIP_FILE_NAMES = {".DS_Store", "Thumbs.db"}
 
@@ -252,6 +275,21 @@ def select_targets(targets, wanted):
     return picked
 
 
+def filter_by_module(targets, module):
+    """剔掉对该模块声明了 excludeModules 的目标，返回 (保留, 跳过)。
+
+    目标工程不总是"两个工具都要"：比如 project_lilith 只装指令系统不装 ADB
+    （用户 2026-10-29 定）。写在 deploy_targets.json 的 excludeModules 里，
+    免得每次全量部署又把它装回去。**静默跳过会让人误以为装好了**，所以调用方
+    必须把跳过项打出来。
+    """
+    kept, skipped = [], []
+    for item in targets:
+        excluded = [str(m).strip().lower() for m in (item.get("excludeModules") or [])]
+        (skipped if module.lower() in excluded else kept).append(item)
+    return kept, skipped
+
+
 def unity_running(root):
     """Temp/UnityLockfile 存在 = 编辑器占着工程。"""
     return os.path.isfile(os.path.join(root, "Temp", "UnityLockfile"))
@@ -267,7 +305,8 @@ def probe_target(target):
         problems.append("不是 Unity 工程（缺 Assets/）")
     elif not os.path.isdir(os.path.join(root, "ProjectSettings")):
         problems.append("不是 Unity 工程（缺 ProjectSettings/）")
-    # 目标路径与源码路径一一对应：两个工具分别是 Assets/Editor/ExternalCommandSystem 与 .../AdbDebugger
+    # 目标路径与源码路径一一对应：两个工具现在都是包形态
+    # （Packages/com.aketsuki.unity-mcp 与 Packages/com.aketsuki.adb-debugger）
     dest = os.path.join(root, *SRC_REL.split("/"))
     return dest, problems
 
@@ -298,10 +337,13 @@ def meta_guid(data):
 
 def build_plan(dest_root):
     plan = Plan()
-    # Project/ 及其目录 meta 由 ensure_project_dir 统一处理：
+    # 工程专属目录及其 meta 由 ensure_project_dir 统一处理：
     # 目标是"有该目录就用它的、没有就建"，不能按文件内容直接推。
-    sources = [r for r in rel_files(SRC_ROOT, skip_top={PROJECT_DIR_NAME})
-               if r != PROJECT_DIR_NAME + ".meta"]
+    # 注意 PROJECT_DIR_REL 可能是多级的（包形态是 Editor/Project），不能只比顶层目录名。
+    project_prefix = PROJECT_DIR_REL.strip("/") + "/"
+    project_meta = PROJECT_DIR_REL.strip("/") + ".meta"
+    sources = [r for r in rel_files(SRC_ROOT)
+               if not r.startswith(project_prefix) and r != project_meta]
 
     src_set = set(sources)
     for rel in sources:
@@ -325,8 +367,9 @@ def build_plan(dest_root):
             plan.update.append((rel, src_abs))
 
     if os.path.isdir(dest_root):
-        for rel in rel_files(dest_root, skip_top={PROJECT_DIR_NAME}):
-            if rel.startswith(PROJECT_DIR_NAME + "/") or rel == PROJECT_DIR_NAME + ".meta":
+        for rel in rel_files(dest_root):
+            # 目标侧的工程客制化目录同样排除，否则 --prune 会把它当孤儿删掉
+            if rel.startswith(project_prefix) or rel == project_meta:
                 continue
             if rel not in src_set:
                 plan.orphan.append(rel)
@@ -488,27 +531,44 @@ def install_fresh(plan, dest_root, root, dry_run=False):
 
 
 
+def touch_manifest(root, dest_root):
+    """改 `Packages/manifest.json` 的 mtime，强制 Package Manager 重解析。
+
+    embedded package **写进盘不算装好**：不重解析的话 Unity 既不会加载它，也不会为它编出
+    dll；更坑的是 `asset.compile` 会回一句"没有检测到新的编译：Unity 认为无需重编"并退出 0，
+    看着像成功。判据只有两个：`packages-lock.json` 出现该包且 `source` 为 `embedded`，
+    以及 `Library/ScriptAssemblies/<程序集>.dll` 真的产出。
+    """
+    manifest = os.path.join(root, "Packages", "manifest.json")
+    if not os.path.isfile(manifest):
+        print("    ! 目标工程没有 Packages/manifest.json，无法强制重解析")
+        return False
+    os.utime(manifest, None)
+    print("    已 touch Packages/manifest.json（强制重解析 %s）" % os.path.basename(dest_root))
+    return True
+
+
 def ensure_project_dir(dest_root, dry_run=False):
-    """确保目标工程有自己的 Project/（工程专属目录 + 占位说明）。"""
+    """确保目标工程有自己的工程客制化目录（含占位说明）。"""
     if not HAS_PROJECT_DIR:
         # ADB 调试工具没有工程客制化目录，别给它凭空造一个
         return
 
-    proj = os.path.join(dest_root, PROJECT_DIR_NAME)
+    proj = os.path.join(dest_root, *PROJECT_DIR_REL.strip("/").split("/"))
     readme = os.path.join(proj, "README.md")
     created = []
     if not os.path.isdir(proj):
         if not dry_run:
             os.makedirs(proj)
-        created.append(PROJECT_DIR_NAME + "/")
+        created.append(PROJECT_DIR_REL + "/")
     if not os.path.isfile(readme):
-        src_readme = os.path.join(SRC_ROOT, PROJECT_DIR_NAME, "README.md")
+        src_readme = os.path.join(SRC_ROOT, *(PROJECT_DIR_REL.strip("/") + "/README.md").split("/"))
         if os.path.isfile(src_readme):
             if not dry_run:
                 write_atomic(readme, read_bytes(src_readme))
-            created.append(PROJECT_DIR_NAME + "/README.md")
+            created.append(PROJECT_DIR_REL + "/README.md")
     # 目录的 .meta 只在缺的时候补，避免改 GUID
-    for rel in ("Project.meta", "Project/README.md.meta"):
+    for rel in (PROJECT_DIR_REL.strip("/") + ".meta", PROJECT_DIR_REL.strip("/") + "/README.md.meta"):
         src_abs = os.path.join(SRC_ROOT, rel.replace("/", os.sep))
         dst_abs = os.path.join(dest_root, rel.replace("/", os.sep))
         if os.path.isfile(src_abs) and not os.path.isfile(dst_abs):
@@ -541,6 +601,54 @@ def prune_orphans(plan, dest_root):
                 pass
     if removed:
         print("    已清理孤儿文件 %d 个：%s" % (len(removed), ", ".join(removed)))
+    return removed
+
+
+def retire_legacy(target, dry_run=False):
+    """把旧的资产形态目录整体退役。
+
+    UPM 包形态下，同一批类型已经搬进 Packages/ 下的独立程序集。如果 Assets/ 里还留着旧副本，
+    两个程序集会各定义一遍 Aketsuki.UnityMcp.*，Unity 直接报一片 CS0101「命名空间已包含定义」。
+    所以切包时旧目录**必须**消失，这不是"顺手清理"。
+
+    用整体 rename 而不是逐个删文件：Unity 的文件监视器会在删除过程中扫盘，读到删了一半的
+    清单就会报一屏 CS2001。一次性移走，它看到的是"目录整体消失"。
+    移走的目标放在 Temp/ 下 —— Unity 不管那里，也方便出事时捞回来。
+    """
+    if not LEGACY_REL:
+        return []
+
+    root = target["root"]
+    legacy = os.path.join(root, *LEGACY_REL.split("/"))
+    meta = legacy + ".meta"
+    removed = []
+
+    if not os.path.isdir(legacy):
+        # 目录没了但 .meta 还在：残留的 meta 会让 Unity 认为该目录仍然存在
+        if os.path.isfile(meta):
+            print("    %s清掉残留的 %s.meta" % ("将" if dry_run else "已", LEGACY_REL))
+            if not dry_run:
+                os.remove(meta)
+            removed.append(LEGACY_REL + ".meta")
+        return removed
+
+    print("    %s退役旧资产形态：%s（整体移出 Assets，避免与新包同名类型重复定义）"
+          % ("将" if dry_run else "已", LEGACY_REL))
+    removed.append(LEGACY_REL + "/")
+    if os.path.isfile(meta):
+        removed.append(LEGACY_REL + ".meta")
+    if dry_run:
+        return removed
+
+    trash = os.path.join(root, "Temp", "UnityMcpLegacyRetired")
+    if os.path.isdir(trash):
+        shutil.rmtree(trash, ignore_errors=True)
+    parent = os.path.dirname(trash)
+    if parent and not os.path.isdir(parent):
+        os.makedirs(parent)
+    os.replace(legacy, trash)
+    if os.path.isfile(meta):
+        os.remove(meta)
     return removed
 
 
@@ -699,11 +807,14 @@ def trigger_refresh(target, dest_root, force=False):
     所以服务可达时补一发 asset.refresh；不可达且给了 --force-refresh 就聚焦 + Ctrl+R。
     """
     root = target["root"]
-    send = os.path.join(dest_root, "McpBridge", "send.py")
+    send = os.path.join(dest_root, *BRIDGE_REL.split("/"), "send.py")
     if not unity_running(root):
         print("    Unity 没开：文件已就位，下次打开工程会自动导入编译")
         return None
     if not os.path.isfile(send):
+        if ACTIVE_MODULE == "adb":
+            # ADB 工具没有桥脚本，没法代发 asset.refresh；包解析靠上面的 touch manifest
+            print("    包已就位；到目标工程里按 Ctrl+R 让它编译（本工具没有 send.py 可代劳）")
         return None
     ready, why = wait_endpoint(send, root, timeout=60)
     if not ready and force:
@@ -732,10 +843,92 @@ def trigger_refresh(target, dest_root, force=False):
     return False
 
 
+def verify_package_assembly(target, dest_root, since, timeout=300):
+    """包形态、无桥模块（ADB）的编译校验：等 dll 真的产出。
+
+    没有自带 send.py（那是指令系统的桥），所以只能看硬判据：
+      ① `Packages/packages-lock.json` 里该包存在且 `"source": "embedded"`；
+      ② `Library/ScriptAssemblies/<程序集>.dll` 的 mtime 晚于本次部署开始时间。
+    两条都过才算通过。
+
+    **只解析出不等于编出来了**（实测 island_back：lock 已 embedded，dll 还是没影）。
+    目标工程如果同时装着指令系统，就借它的 `asset.refresh` 主动推一把 ——
+    `asset.compile` 不会导入新文件，只会在旧状态上回一句"无需重编"。
+    """
+    root = target["root"]
+    pkg = os.path.basename(dest_root)
+    lock = os.path.join(root, "Packages", "packages-lock.json")
+    dll = os.path.join(root, "Library", "ScriptAssemblies", ASSEMBLY + ".dll")
+    send = os.path.join(root, "Packages", "com.aketsuki.unity-mcp", "Editor", "McpBridge", "send.py")
+
+    if since is None:
+        # 本次没写任何文件（--verify 单独重跑时常见）：只校验现状，不要求"比部署新"
+        print("    本次未写文件，只校验现状")
+        since = 0
+
+    if not unity_running(root):
+        print("    跳过编译校验：Unity 没开（包已就位，下次打开工程会解析并编译）")
+        return None
+
+    # 借指令系统的桥推一次导入；没装就等 Unity 自己扫（前台编辑器会扫）
+    if os.path.isfile(send):
+        try:
+            proc = subprocess.run([sys.executable, send, "send", "-", "--project-root", root],
+                                  input='{"commands":[{"id":"asset.refresh"}]}',
+                                  capture_output=True, text=True, timeout=120)
+            if proc.returncode == 0 and "asset.refresh" in (proc.stdout or ""):
+                print("    已请求 Unity 刷新资源数据库（导入新包文件）")
+            else:
+                print("    · 刷新请求没成功，等 Unity 自己扫：%s"
+                      % ((proc.stderr or proc.stdout or "").strip().splitlines() or ["?"])[-1][:120])
+        except subprocess.TimeoutExpired:
+            print("    · 刷新请求超时，等 Unity 自己扫")
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if os.path.isfile(dll) and os.path.getmtime(dll) >= since - 1:
+            break
+        time.sleep(2)
+
+    if not os.path.isfile(lock):
+        print("    ! 找不到 Packages/packages-lock.json：Package Manager 还没解析过这个工程")
+        return False
+
+    resolved = False
+    data = ""
+    try:
+        data = read_bytes(lock).decode("utf-8", "replace")
+        resolved = ('"%s"' % pkg) in data and '"source": "embedded"' in data
+    except Exception as error:                      # noqa: BLE001 —— 读失败就判未解析
+        print("    ! 读不了 packages-lock.json：%s" % error)
+
+    if not resolved:
+        print("    ✗ packages-lock.json 里没有 %s 的 embedded 记录：Package Manager 没解析它"
+              % pkg)
+        print("      去编辑器里 Window / Package Manager 刷新一次，或按 Ctrl+R")
+        return False
+    print("    ✓ packages-lock.json 已记为 embedded：%s" % pkg)
+
+    if not os.path.isfile(dll):
+        print("    ✗ 没有 %s：包已解析但程序集没编出来（源码有错，或编辑器还在后台）"
+              % (ASSEMBLY + ".dll"))
+        print("      去编辑器 Console 看编译错误；`asset.compile` 回'无需重编'不算通过")
+        return False
+    mtime = os.path.getmtime(dll)
+    if mtime < since - 1:
+        print("    ✗ %s 比本次部署还旧（%s）：Unity 没重编这个程序集"
+              % (ASSEMBLY + ".dll", time.strftime("%H:%M:%S", time.localtime(mtime))))
+        print("      去编辑器里按 Ctrl+R，或重开工程")
+        return False
+    print("    ✓ %s 已重新编译（%s）"
+          % (ASSEMBLY + ".dll", time.strftime("%H:%M:%S", time.localtime(mtime))))
+    return True
+
+
 def run_verify(target, dest_root, force=False):
     """让目标工程的 Unity 编译一遍并回传错误。编辑器没开就只能跳过。"""
     root = target["root"]
-    send = os.path.join(dest_root, "McpBridge", "send.py")
+    send = os.path.join(dest_root, *BRIDGE_REL.split("/"), "send.py")
     if not unity_running(root):
         print("    跳过编译校验：Unity 没开（文件已就位，下次打开工程会自动导入并编译）")
         return None
@@ -817,8 +1010,8 @@ def main(argv=None):
     )
     parser.add_argument("targets", nargs="*", help="目标名字（支持子串匹配）；省略=全部")
     parser.add_argument("--module", choices=sorted(MODULES), default="mcp",
-                        help="部署哪个工具：mcp（默认，Assets/Editor/ExternalCommandSystem）"
-                             " 或 adb（Assets/Editor/AdbDebugger）")
+                        help="部署哪个工具：mcp（默认，Packages/com.aketsuki.unity-mcp 这个 UPM 包）"
+                             " 或 adb（Packages/com.aketsuki.adb-debugger 这个 UPM 包）")
     parser.add_argument("--list", action="store_true", help="只列出目标与状态")
     parser.add_argument("--check", action="store_true", help="只报告差异，不写文件")
     parser.add_argument("--dry-run", action="store_true", help="显示将写入哪些文件，不动磁盘")
@@ -842,6 +1035,15 @@ def main(argv=None):
         raise SystemExit("源目录不存在：%s" % SRC_ROOT)
 
     targets = select_targets(load_targets(), args.targets)
+    targets, skipped = filter_by_module(targets, args.module)
+    for item in skipped:
+        print("· 跳过 %s：它声明了不装 %s（%s）"
+              % (item["name"], args.module,
+                 item.get("excludeNote") or "deploy_targets.json 的 excludeModules"))
+    if not targets:
+        raise SystemExit("没有可部署的目标：全部被 excludeModules 排除了。"
+                         "\n真要装，先把目标在 deploy_targets.json 里的 excludeModules 去掉 —— "
+                         "这是刻意设的门，别用 --force 之类绕过（没有那个开关）。")
     check_only = args.check or args.list
     dry_run = args.dry_run or check_only
     failures = 0
@@ -856,6 +1058,10 @@ def main(argv=None):
         plan = build_plan(dest_root)
         report_target(target, plan, True, problems)
 
+        # 旧资产形态必须先退役，再装新包：顺序反了就会出现"新旧两套同名类型同时在盘上"，
+        # Unity 中途扫到就是一片 CS0101。check 模式也报告，方便看出还没切。
+        retire_legacy(target, dry_run=dry_run)
+
         skill_root = target.get("skill_root") or target["root"]
         skill_plan = None if args.no_skill else build_skill_plan(
             target["root"], force=args.force_skill, skill_root=skill_root)
@@ -865,13 +1071,23 @@ def main(argv=None):
         if check_only:
             continue
 
-        project_ok = os.path.isdir(os.path.join(dest_root, PROJECT_DIR_NAME))
+        # 没有工程客制化目录的模块（ADB）不存在"目标侧该有但没建"这回事，
+        # 否则每次部署都会误判成需要写入。
+        project_ok = (not HAS_PROJECT_DIR) or os.path.isdir(
+            os.path.join(dest_root, *PROJECT_DIR_REL.strip("/").split("/")))
         fresh = not os.path.isdir(dest_root)
+        deploy_started = time.time()
+        wrote = fresh or plan.dirty
         if not plan.dirty and project_ok and not fresh:
             print("    无需写入")
         else:
             if fresh:
                 install_fresh(plan, dest_root, target["root"], dry_run=dry_run)
+                # 包文件落到 Packages/ 下 ≠ Unity 会加载它：Package Manager 不重解析，
+                # 程序集根本不会出现（实测：dll 不产出、/v1/ping 还是旧 service 名）。
+                # 改 manifest.json 的 mtime 是唯一可靠的重解析触发器。
+                if not dry_run:
+                    touch_manifest(target["root"], dest_root)
             elif plan.dirty:
                 apply_plan(plan, dest_root, target["root"], dry_run=dry_run)
             if not args.no_project:
@@ -910,7 +1126,13 @@ def main(argv=None):
                     print("    ✓ MCP 桥校验通过（%d 个文件与仓库一致）" % len(after_skill.same))
 
         if args.verify:
-            if run_verify(target, dest_root, force=args.force_refresh) is False:
+            if ACTIVE_MODULE == "adb":
+                # 没有 send.py，走不了 HTTP：只能看 packages-lock 与 dll 两条硬判据
+                result = verify_package_assembly(target, dest_root,
+                                                 deploy_started if wrote else None)
+            else:
+                result = run_verify(target, dest_root, force=args.force_refresh)
+            if result is False:
                 failures += 1
         elif not dry_run:
             trigger_refresh(target, dest_root, force=args.force_refresh)
