@@ -9,7 +9,7 @@ namespace Aketsuki.UnityMcp.Editor
     ///
     /// <para>
     /// <b>为什么是反射而不是引用：</b>ADB 调试台是一个**可以单独安装**的独立包
-    /// （asmdef <c>CivilRev.AdbDebugger.Editor</c>）。指令系统跑在预定义程序集里，
+    /// （asmdef <c>Aketsuki.AdbDebugger.Editor</c>）。指令系统跑在预定义程序集里，
     /// 直接引用它会导致"没装 ADB 的程序集就编译失败"，整个指令系统跟着不能用。
     /// 反射把它降级成运行时依赖：没装就不注册这几条指令，其余照常。
     /// </para>
@@ -28,10 +28,16 @@ namespace Aketsuki.UnityMcp.Editor
     internal static class AdbBridgeAdapter
     {
         /// <summary>插件程序集名（= asmdef 名，不含 .dll）</summary>
-        internal const string AssemblyName = "CivilRev.AdbDebugger.Editor";
+        /// <remarks>
+        /// 2026-10-29 与 ADB 包一起从 <c>CivilRev.AdbDebugger.Editor</c> 改名为
+        /// <c>Aketsuki.AdbDebugger.Editor</c>（ADB 包同时切成了 UPM 形态）。
+        /// 这两个常量是**唯一**的跨包契约：改了就必须和 ADB 包同版本发布，
+        /// 否则指令侧会一直报"没找到 ADB 调试台"。
+        /// </remarks>
+        internal const string AssemblyName = "Aketsuki.AdbDebugger.Editor";
 
         /// <summary>对外契约的类型全名（不含程序集）</summary>
-        internal const string TypeName = "CivilRev.AdbDebugger.AdbExternalApi";
+        internal const string TypeName = "Aketsuki.AdbDebugger.AdbExternalApi";
 
         /// <summary>对外契约的方法名</summary>
         internal const string MemberName = "Invoke";

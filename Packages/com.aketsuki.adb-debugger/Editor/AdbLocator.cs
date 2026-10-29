@@ -2,7 +2,7 @@ using System;
 using System.IO;
 using UnityEditor;
 
-namespace CivilRev.AdbDebugger
+namespace Aketsuki.AdbDebugger
 {
     /// <summary>
     /// 找 <c>adb</c> 可执行文件的位置。

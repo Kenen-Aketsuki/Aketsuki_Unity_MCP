@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Text;
 
-namespace CivilRev.AdbDebugger
+namespace Aketsuki.AdbDebugger
 {
     /// <summary>
     /// 本工具唯一对外的入口，给「Unity MCP 指令系统」的 <c>adb.*</c> 指令调用。
@@ -29,7 +29,7 @@ namespace CivilRev.AdbDebugger
     public static class AdbExternalApi
     {
         /// <summary>指令侧按这个名字反射查找本类型（改类名等于破坏契约，别改）</summary>
-        public const string ApiTypeName = "CivilRev.AdbDebugger.AdbExternalApi";
+        public const string ApiTypeName = "Aketsuki.AdbDebugger.AdbExternalApi";
 
         /// <summary>指令侧按这个签名反射查找（改签名等于破坏契约，别改）</summary>
         public const string InvokeMethodName = "Invoke";

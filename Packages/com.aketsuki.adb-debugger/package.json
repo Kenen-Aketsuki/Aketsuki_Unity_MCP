@@ -1,0 +1,19 @@
+{
+  "name": "com.aketsuki.adb-debugger",
+  "version": "2.2.0",
+  "displayName": "Aketsuki ADB Debugger",
+  "description": "把 Android 真机 / 模拟器的 adb logcat 逐条打进 Unity 控制台。纯编辑器工具，零外部依赖，不提供任何网络接口；装上「Unity MCP 指令系统」后额外可用 adb.* 指令让 AI 抓日志。",
+  "unity": "2021.3",
+  "keywords": [
+    "adb",
+    "logcat",
+    "android",
+    "editor",
+    "debug"
+  ],
+  "author": {
+    "name": "Aketsuki"
+  },
+  "license": "Apache-2.0",
+  "dependencies": {}
+}

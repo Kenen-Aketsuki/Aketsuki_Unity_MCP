@@ -1,5 +1,11 @@
 {
   "dependencies": {
+    "com.aketsuki.adb-debugger": {
+      "version": "file:com.aketsuki.adb-debugger",
+      "depth": 0,
+      "source": "embedded",
+      "dependencies": {}
+    },
     "com.aketsuki.unity-mcp": {
       "version": "file:com.aketsuki.unity-mcp",
       "depth": 0,

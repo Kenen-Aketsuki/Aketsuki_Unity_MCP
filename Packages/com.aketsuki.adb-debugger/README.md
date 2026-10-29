@@ -1,17 +1,17 @@
 # ADB 调试（独立工具，无 MCP）
 
 把 Android 真机 / 模拟器的 `adb logcat` 逐条打进 Unity 控制台。**这是一个独立工具**，
-与本工程的「Unity MCP 指令系统」（`Assets/Editor/ExternalCommandSystem/`）是并列关系：
+与本工程的「Unity MCP 指令系统」（`Packages/com.aketsuki.unity-mcp/`）是并列关系：
 
 - **本工具不提供任何对外接口**：没有端口、没有令牌、没有信息文件、没有 MCP server、没有 python 桥；
-- **本工具不引用指令系统的任何类型**（有自己的 asmdef `CivilRev.AdbDebugger.Editor`）；
+- **本工具不引用指令系统的任何类型**（有自己的 asmdef `Aketsuki.AdbDebugger.Editor`）；
 - 可以只装这一个（纯手工看日志），也可以两个都装（那就多了 AI 侧的五条 `adb.*` 指令）。
 
 ## 本体构成
 
 | 文件 | 职责 |
 | --- | --- |
-| `AdbDebuggerSettings.cs` | 全部设置（按工程隔离，`adb.exe` 路径全局）；EditorPrefs 前缀 `CivilRev.AdbDebug.` |
+| `AdbDebuggerSettings.cs` | 全部设置（按工程隔离，`adb.exe` 路径全局）；EditorPrefs 前缀 `CivilRev.AdbDebug.`（**故意保留旧名**，是存储契约不是命名空间） |
 | `AdbLocator.cs` | 五级定位 `adb.exe`：手填 → `ANDROID_HOME`/`ANDROID_SDK_ROOT` → Unity 的 `AndroidSdkRoot` → 编辑器自带 SDK → `PATH` |
 | `AdbDevices.cs` | 设备检索：跑 `adb devices -l`、解析、缓存（后台线程），给窗口下拉与 `adb.devices` 指令用 |
 | `AdbLogcatService.cs` | 抓取主体：进程生命周期、读线程→队列→主线程、堆栈续行合并、C# 堆栈抑制、留一份给指令读的缓冲 |
@@ -122,24 +122,32 @@ Proxy_TaskGuide:Update()
 
 ## 安装到别的工程
 
-两条路，都**不需要**指令系统在场：
+本包是 UPM 包（embedded package），两条路都**不需要**指令系统在场：
 
 ```bash
-# ① 从本仓库部署（开发用）
+# ① 从本仓库部署（开发用，会一并退役旧资产形态）
 python Tools/deploy.py --module adb <目标工程> --verify
 
-# ② 分发包（给别人）
-python Tools/build_unitypackage.py --module adb --bundle --version <版本>
-#   → Tools/UnityPackage/Aketsuki_AdbDebugger-<版本>/（包 + install.py + DEPLOY.md + manifest.json）
-python Tools/install_unitypackage.py --project <目标工程>
+# ② Package Manager 手动装：把包目录放到 <工程>/Packages/com.aketsuki.adb-debugger，
+#    或在 Packages/manifest.json 里加一行：
+#      "com.aketsuki.adb-debugger": "file:<包目录或 git URL>"
 ```
 
-包内 `package.json` 记着 `installRoot`；`skillFiles` 显式为空列表 = **本包不写 `.workbuddy`**。
-两个工具的包共用同一个安装器，同目录存在两个包时用 `--module` 或 `-p` 指定。
+装完有两条硬判据，别只看"文件落到盘上了"：
+
+1. `Packages/packages-lock.json` 里出现 `"source": "embedded"`（或 `"git"`）；
+2. `Library/ScriptAssemblies/Aketsuki.AdbDebugger.Editor.dll` 真的产出。
+
+**包文件写进盘并不等于 Unity 加载它**——Package Manager 不重解析就什么都不会发生，
+`touch Packages/manifest.json` 可以强制重算。
+
+> 2.2.0 起不再提供 `.unitypackage` 分发包。旧版（2.1 及以前）的资产形态与 UPM 形态
+> **不能同时存在**：两处各定义一遍 `Aketsuki.AdbDebugger.*`，报一屏 CS0101。
+> 从资产形态升级时 `Assets/Editor/AdbDebugger/` 必须整体删掉（含 `.meta`）。
 
 ## 可单独删除
 
-删掉 `Assets/Editor/AdbDebugger/` 整个目录（连同 `.meta`）即可，指令系统完全不受影响
+删掉整个包目录 `Packages/com.aketsuki.adb-debugger/` 即可，指令系统完全不受影响
 （那五条 `adb.*` 指令会开始报"没找到 ADB 调试台"，但其余照常）；
 反过来删指令系统，本工具也照常工作。
 

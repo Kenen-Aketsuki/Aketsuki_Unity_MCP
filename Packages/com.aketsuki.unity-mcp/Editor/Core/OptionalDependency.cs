@@ -53,8 +53,8 @@ namespace Aketsuki.UnityMcp
         /// <summary>
         /// 声明一个可选插件：要调它的**静态方法**。
         /// </summary>
-        /// <param name="typeName">类型全名（不含程序集），例如 <c>CivilRev.AdbDebugger.AdbExternalApi</c></param>
-        /// <param name="assemblyName">程序集名（不含 .dll），例如 <c>CivilRev.AdbDebugger.Editor</c></param>
+        /// <param name="typeName">类型全名（不含程序集），例如 <c>Aketsuki.AdbDebugger.AdbExternalApi</c></param>
+        /// <param name="assemblyName">程序集名（不含 .dll），例如 <c>Aketsuki.AdbDebugger.Editor</c></param>
         /// <param name="memberName">静态方法名</param>
         /// <param name="signature">方法参数类型；传 null 表示无参</param>
         /// <param name="installHint">

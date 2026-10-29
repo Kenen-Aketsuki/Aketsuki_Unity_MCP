@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""编译校验 ADB 调试工具的 asmdef 程序集（CivilRev.AdbDebugger.Editor）。
+"""编译校验 ADB 调试工具的 asmdef 程序集（Aketsuki.AdbDebugger.Editor）。
 
     python Tools/compile_adb.py --project D:/proj/SomeGame
 
@@ -28,8 +28,9 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 
-ASSEMBLY = "CivilRev.AdbDebugger.Editor"
-SRC_REL = "Assets/Editor/AdbDebugger"
+ASSEMBLY = "Aketsuki.AdbDebugger.Editor"
+# 2026-10-29 起是 UPM 包形态（embedded package），不再是 Assets 下的资产目录
+SRC_REL = "Packages/com.aketsuki.adb-debugger/Editor"
 
 OFFLINE_COMPILER_CANDIDATES = [
     os.path.expanduser("~/.workbuddy/tools/unity-offline-compile/unity_offline_compile.py"),
@@ -73,7 +74,7 @@ def build_adb_project(project_root, reference_csproj):
 
     prop = text[text.index("<PropertyGroup>"):text.index("</PropertyGroup>") + len("</PropertyGroup>")]
     prop = re.sub(r"<AssemblyName>[^<]*</AssemblyName>",
-                  "<AssemblyName>Offline_CivilRev_AdbDebugger_Editor</AssemblyName>", prop)
+                  "<AssemblyName>Offline_Aketsuki_AdbDebugger_Editor</AssemblyName>", prop)
 
     # 只保留 Unity / 第三方引用：指向工程内 ScriptAssemblies 的都不要，本程序集不依赖它们
     refs = [item for item in re.findall(r"    <Reference Include=.*?</Reference>", text, re.S)
@@ -93,7 +94,7 @@ def build_adb_project(project_root, reference_csproj):
     name = os.path.basename(project_root.rstrip("\\/"))
     target_dir = os.path.expanduser("~/.workbuddy/tools/unity-offline-compile/work/%s/proj" % name)
     os.makedirs(target_dir, exist_ok=True)
-    csproj = os.path.join(target_dir, "offline_CivilRev.AdbDebugger.Editor.csproj")
+    csproj = os.path.join(target_dir, "offline_Aketsuki.AdbDebugger.Editor.csproj")
     io.open(csproj, "w", encoding="utf-8", newline="\n").write(content)
     return csproj, None
 
