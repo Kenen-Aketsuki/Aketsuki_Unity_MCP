@@ -1,5 +1,14 @@
 {
   "dependencies": {
+    "com.aketsuki.unity-mcp": {
+      "version": "file:com.aketsuki.unity-mcp",
+      "depth": 0,
+      "source": "embedded",
+      "dependencies": {
+        "com.unity.ugui": "1.0.0",
+        "com.unity.textmeshpro": "3.0.6"
+      }
+    },
     "com.unity.ext.nunit": {
       "version": "1.0.6",
       "depth": 2,
