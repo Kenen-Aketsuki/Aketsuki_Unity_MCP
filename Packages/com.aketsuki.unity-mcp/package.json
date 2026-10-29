@@ -1,0 +1,21 @@
+{
+  "name": "com.aketsuki.unity-mcp",
+  "version": "0.1.0",
+  "displayName": "Aketsuki Unity MCP",
+  "description": "在 Unity 编辑器内提供一条 HTTP 指令通道，让 AI 直接操作场景、Prefab、UI 与运行时对象。附带 MCP 桥（Python）安装器。",
+  "unity": "2021.3",
+  "keywords": [
+    "mcp",
+    "ai",
+    "editor",
+    "automation",
+    "command"
+  ],
+  "author": {
+    "name": "Aketsuki"
+  },
+  "dependencies": {
+    "com.unity.ugui": "1.0.0",
+    "com.unity.textmeshpro": "3.0.6"
+  }
+}
