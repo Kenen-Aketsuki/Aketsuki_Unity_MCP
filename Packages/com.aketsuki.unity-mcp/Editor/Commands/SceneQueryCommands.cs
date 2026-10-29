@@ -181,6 +181,20 @@ namespace Aketsuki.UnityMcp.Editor
         /// <summary>节点信息（不含 children，由调用方按需补）。含可回喂字段：instanceId / selectPath / siblingIndex / parentPath。</summary>
         public static JsonValue NodeToJson(Transform node)
         {
+            return NodeToJson(node, true);
+        }
+
+        /// <summary>
+        /// 节点信息，可裁剪 <c>components</c>（IMPR-018）。
+        /// <para>
+        /// <c>includeComponents=false</c> 时 <c>components</c> 里只留 <c>Transform</c> / <c>RectTransform</c>——
+        /// 位置/尺寸/锚点是判断"点哪里"的必要信息，而 <c>Button</c> / <c>Image</c> / 业务脚本这些
+        /// 在遍历上千个节点的快照里只是噪音：<c>limit=400</c> 的树在 UI 工程上一次能回 730 KB，
+        /// 全靠每个节点那份完整组件名数组。
+        /// </para>
+        /// </summary>
+        public static JsonValue NodeToJson(Transform node, bool includeComponents)
+        {
             var item = JsonValue.NewObject();
             item.Set("name", JsonValue.Of(node.name));
             item.Set("path", JsonValue.Of(SceneQuery.BuildPath(node)));
@@ -207,10 +221,19 @@ namespace Aketsuki.UnityMcp.Editor
                     continue;
                 }
 
+                // 裁剪模式下只保留 Transform / RectTransform（RectTransform 是 Transform 的子类，
+                // 一次 is 判断同时覆盖 UI 与非 UI 节点）
+                if (!includeComponents && !(component is Transform))
+                {
+                    continue;
+                }
+
                 components.Add(JsonValue.Of(component.GetType().Name));
             }
 
             item.Set("components", components);
+            // 固定携带：调用方据此知道"这个数组是完整的还是只剩 Transform"，不必靠猜
+            item.Set("componentsComplete", JsonValue.Of(includeComponents));
             return item;
         }
 

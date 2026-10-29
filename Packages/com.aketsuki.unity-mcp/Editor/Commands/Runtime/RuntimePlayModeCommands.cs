@@ -21,11 +21,16 @@ namespace Aketsuki.UnityMcp.Editor
     /// <c>onDirty=abort</c>：有脏场景就失败并列出清单；显式传 <c>onDirty=save</c> 才替用户保存。
     /// </para>
     ///
-    /// <para>参数：onDirty（abort / save，默认 abort）</para>
+    /// <para>
+    /// <b>内存水位前置检查（IMPR-008）：</b>与 <c>editor.play</c> 同一道检查、同一套阈值——
+    /// OOM 的代价是 HTTP 服务消失、MCP 全断，哪条指令进的 Play 都一样。超阈值拒绝，<c>force:true</c> 放行。
+    /// 检查只作用于指令路径，编辑器自己的 Play 按钮不受影响。
+    /// </para>
+    /// <para>参数：onDirty（abort / save，默认 abort）、force（默认 false）</para>
     /// </summary>
     [Command("runtime.play",
-        Description = "进入 Play 模式（运行时指令组，受开关约束；会触发域重载）",
-        Usage = "onDirty: abort|save",
+        Description = "进入 Play 模式（运行时指令组，受开关约束；会触发域重载；内存水位过高时拒绝）",
+        Usage = "onDirty: abort|save, force: bool",
         EditorOnly = true, Runtime = true, RuntimePhase = RuntimePhase.NotPlaying)]
     public sealed class RuntimePlayCommand : ICommand
     {
@@ -44,6 +49,12 @@ namespace Aketsuki.UnityMcp.Editor
             {
                 // 正常路径由门禁挡下（phase=NotPlaying），这里只是兜底
                 return CommandResult.Ok("已在 Play 模式中，无需进入", data);
+            }
+
+            string memoryMessage;
+            if (PlayModeMemoryGuard.ShouldBlock(data, context.Args.GetBool("force", false), out memoryMessage))
+            {
+                return CommandResult.Fail(memoryMessage, data);
             }
 
             var onDirty = (context.Args.GetString("onDirty", "abort") ?? "abort").Trim().ToLowerInvariant();
@@ -101,6 +112,10 @@ namespace Aketsuki.UnityMcp.Editor
             EditorApplication.isPlaying = true;
             data.Set("isPlayingAfter", JsonValue.Of(EditorApplication.isPlaying));
             data.Set("willChangePlayMode", JsonValue.Of(EditorApplication.isPlayingOrWillChangePlaymode));
+            if (memoryMessage != null)
+            {
+                data.Set("memoryNotice", JsonValue.Of(memoryMessage));
+            }
 
             return CommandResult.Ok(
                 "已请求进入 Play 模式（会触发域重载，HTTP 服务随后自动恢复，请轮询 status 直到 playing=true）", data);

@@ -15,6 +15,9 @@ namespace Aketsuki.UnityMcp.Editor
         private string _path = string.Empty;
         private Vector2 _logScroll;
         private Vector2 _commandScroll;
+        // IMPR-009：窗口整体滚动。此前七大区块顺序平铺，窗口一压矮，
+        // 靠下的「已注册指令」「运行日志」就永久看不到——内部那两个固定高度滚动区救不了它。
+        private Vector2 _windowScroll;
         private bool _showSettings = true;
         private bool _showCommands;
         private bool _showRuntimeCommands;
@@ -62,6 +65,9 @@ namespace Aketsuki.UnityMcp.Editor
 
         private void OnGUI()
         {
+            // 整体包一层滚动（IMPR-009）：保留「指令列表 150px / 日志 160px」两个内部限高滚动区
+            // ——它们是刻意限高的，长列表不该把外层撑开；外层这层只负责"窗口矮的时候也能滚到底"。
+            _windowScroll = EditorGUILayout.BeginScrollView(_windowScroll);
             DrawExecuteSection();
             EditorGUILayout.Space();
             DrawSettingsSection();
@@ -76,6 +82,7 @@ namespace Aketsuki.UnityMcp.Editor
             DrawCommandListSection();
             EditorGUILayout.Space();
             DrawLogSection();
+            EditorGUILayout.EndScrollView();
         }
 
         #region 执行区

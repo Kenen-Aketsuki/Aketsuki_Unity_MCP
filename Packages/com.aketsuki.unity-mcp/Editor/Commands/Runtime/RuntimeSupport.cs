@@ -94,7 +94,13 @@ namespace Aketsuki.UnityMcp.Editor
         /// </summary>
         internal static JsonValue NodeJson(Transform node)
         {
-            var item = SceneQueryCommandsUtil.NodeToJson(node);
+            return NodeJson(node, true);
+        }
+
+        /// <summary>带裁剪开关的节点信息（IMPR-018）：<paramref name="includeComponents"/> 为 false 时组件只留 Transform。</summary>
+        internal static JsonValue NodeJson(Transform node, bool includeComponents)
+        {
+            var item = SceneQueryCommandsUtil.NodeToJson(node, includeComponents);
             item.Set("qualifiedPath", JsonValue.Of(SceneScope.QualifiedPath(node)));
             return item;
         }
