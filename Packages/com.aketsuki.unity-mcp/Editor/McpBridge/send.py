@@ -283,13 +283,17 @@ def load_primary_info(explicit_path=None):
 class Target(object):
     """一个候选端点及其探测结果。"""
 
-    def __init__(self, url, token, source, expected_project=None):
+    def __init__(self, url, token, source, expected_project=None, primary=False):
         self.url = url
         self.token = token or ""
         self.source = source
         self.payload = None      # /v1/status 的完整响应
         self.identity = None     # 身份 dict；服务端不提供时为 None
         self.error = None        # 探测失败原因
+        # 是否由"本工程主信息文件"产生（IMPR-014：只有它命中才允许提前收手）
+        self.primary = primary
+        # 是否已经探测过：提前收手后剩下的候选没被探测，诊断输出要如实标出来
+        self.probed = False
         # 信息文件里声称的归属工程。端口会被别的工程捡走，
         # 探测回来的身份若与它对不上，说明这个信息文件已经过期。
         self.expected_project = expected_project
@@ -311,6 +315,8 @@ class Target(object):
 
     def summary(self):
         """一行身份摘要，用于诊断输出。"""
+        if not self.probed:
+            return "未探测（已提前收手）"
         if not self.reachable:
             return "不可达（%s）" % (self.error or "未知原因")
         if not isinstance(self.identity, dict):
@@ -352,12 +358,12 @@ def collect_candidates(args, info):
     seen = set()
     candidates = []
 
-    def add(url, token, source, expected_project=None):
+    def add(url, token, source, expected_project=None, primary=False):
         normalized = normalize_url(url)
         if not normalized or normalized in seen:
             return
         seen.add(normalized)
-        candidates.append(Target(normalized, token, source, expected_project))
+        candidates.append(Target(normalized, token, source, expected_project, primary))
 
     token = args.token or (info or {}).get("token") or ""
     # 信息文件自己记着"我是哪个工程写的"，拿它校验端口有没有被顶替
@@ -367,9 +373,9 @@ def collect_candidates(args, info):
     if args.url:
         add(args.url, token, "命令行 --url")
 
-    # 2) 信息文件：正常情况下的目标
+    # 2) 信息文件：正常情况下的目标（primary=True，命中即可提前收手——见 strongly_identified）
     if info:
-        add(info.get("url") or info.get("port"), token, "信息文件", info_owner)
+        add(info.get("url") or info.get("port"), token, "信息文件", info_owner, primary=True)
 
     # 3) 其它信息文件：主文件（每工程一个）+ 各实例自述副本，能列出全部候选
     try:
@@ -398,6 +404,7 @@ def collect_candidates(args, info):
 
 def probe(target, timeout=PROBE_TIMEOUT):
     """问一句「你是谁」：GET /v1/status 并取出身份块。"""
+    target.probed = True
     client = Client(target.url, target.token, timeout)
     status, payload, raw = client.call("v1/status")
 
@@ -438,6 +445,40 @@ def probe(target, timeout=PROBE_TIMEOUT):
 def local_project_paths():
     """本工作区内的 Unity 工程绝对路径集合（规范化后用于比对身份块）。"""
     return {os.path.normcase(os.path.abspath(root)) for root in find_unity_project_roots(WS_ROOT)}
+
+
+def strongly_identified(item):
+    """这个候选是否「结构上不可能连错」——是就可以提前收手，不必再扫剩下的端口（IMPR-014）。
+
+    每次调用固定花 ~18 秒，钱全花在端口避让区间里那 9 个空端口上：每个等 2 秒连接失败。
+    而信息文件那一条是第一个被探测的，身份也常常完全对上。全量探测的收益只在
+    「信息文件已过期、端口被别的进程顶替」时才兑现，所以把收手条件定得极窄，
+    三条同时满足才收：
+
+    1. 候选来自**本工程的主信息文件**（不是端口扫描、也不是别的工程的自述副本）；
+    2. 身份明确 role=editor 且 interactive=true（服务端自证能执行指令）；
+    3. projectPath 规范化后与 --project-root 完全相等；没指定工程根时，
+       要求身份里确实带 projectPath（probe 已校验它与信息文件记录的归属一致）。
+
+    任何一条不满足就退回全量探测——宁可慢，不可连错工程。
+    """
+    if not item.reachable or not item.primary:
+        return False
+    if item.interactive is not True or item.role != "editor":
+        return False
+    if not isinstance(item.identity, dict):
+        return False
+
+    path = item.identity.get("projectPath")
+    if not path:
+        return False
+
+    path = os.path.normcase(os.path.abspath(path))
+    if EXPECTED_PROJECT:
+        return path == os.path.normcase(os.path.abspath(EXPECTED_PROJECT))
+    # 没指定工程根时，probe() 已经确认过「回来的 projectPath == 信息文件里记录的归属」，
+    # 端口被顶替的情况在那一步就被判死了，这里只需要它确实报了工程路径。
+    return True
 
 
 def choose_target(candidates):
@@ -518,8 +559,16 @@ def discover(args):
         return target, [target], None
 
     candidates = collect_candidates(args, info)
+    # 逐个探测，命中即收手（IMPR-014）：
+    # 主信息文件那条同时满足「身份自证 + 工程一致」时，端口避让区间里剩下的空端口
+    # 不可能给出更好的答案，再逐个等 2 秒只是白烧时间。
+    # 两种情况下不收手：--url 是用户的显式指定（优先级最高，必须走完整选址流程）；
+    # resolve 是诊断命令，它的价值正是"把所有候选列全"。
+    allow_early_stop = not args.url and args.command != "resolve"
     for item in candidates:
         probe(item)
+        if allow_early_stop and strongly_identified(item):
+            return item, candidates, None
 
     # `--url` 是用户的显式指定，拥有最高优先级：连不上就直接报错，绝不偷偷换成别的端点。
     # （曾经被"本工程编辑器"这一档盖掉：指了 57833，结果还是连回本机 57832。）

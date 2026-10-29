@@ -8,9 +8,16 @@ namespace Aketsuki.UnityMcp.Editor
     /// 注意：进 Play 会触发域重载，HTTP 指令服务会重启（新域按设置自动恢复）——
     /// 调用方要像等编译一样轮询 <c>status</c>。
     /// </para>
+    /// <para>
+    /// <b>内存水位前置检查（IMPR-008）：</b>长跑的编辑器进 Play 时会弹原生 OOM 框，
+    /// 结果是 HTTP 服务消失、MCP 全断，只能人工重启。所以这里先采样，
+    /// 超阈值直接拒绝并说明原因，<c>force: true</c> 可强行放行。
+    /// 检查<b>只作用于本指令</b>，编辑器自己的 Play 按钮不受影响。
+    /// </para>
+    /// <para>参数：force（默认 false；内存水位超阈值时仍要进 Play）</para>
     /// </summary>
-    [Command("editor.play", Description = "进入 Play 模式（会触发域重载，服务随后自动恢复）",
-        Usage = "", EditorOnly = true,
+    [Command("editor.play", Description = "进入 Play 模式（会触发域重载，服务随后自动恢复；内存水位过高时拒绝）",
+        Usage = "force: bool", EditorOnly = true,
         RequiresConsent = true,
         ConsentMessage = "进入 Play 模式：编辑器会编译并域重载，游戏开始运行，当前编辑现场会被打断。")]
     public sealed class EditorPlayCommand : ICommand
@@ -28,9 +35,23 @@ namespace Aketsuki.UnityMcp.Editor
                 return CommandResult.Ok("已在 Play 模式中，无需切换", true);
             }
 
+            var force = context.Args.GetBool("force", false);
+            var data = JsonValue.NewObject();
+            string memoryMessage;
+            if (PlayModeMemoryGuard.ShouldBlock(data, force, out memoryMessage))
+            {
+                return CommandResult.Fail(memoryMessage, data);
+            }
+
             UnityEditor.EditorApplication.isPlaying = true;
+            if (memoryMessage != null)
+            {
+                // force 放行的提示也要回传，别让"这条到底检没检查"变成疑问
+                data.Set("memoryNotice", JsonValue.Of(memoryMessage));
+            }
+
             return CommandResult.Ok(
-                "已请求进入 Play 模式（域重载后 HTTP 服务会自动恢复，请轮询 status）", true);
+                "已请求进入 Play 模式（域重载后 HTTP 服务会自动恢复，请轮询 status）", data);
 #else
             throw new CommandException($"指令 '{context.CommandId}' 只能在编辑器内执行");
 #endif
@@ -77,6 +98,8 @@ namespace Aketsuki.UnityMcp.Editor
             data.Set("isCompiling", JsonValue.Of(UnityEditor.EditorApplication.isCompiling));
             data.Set("isUpdating", JsonValue.Of(UnityEditor.EditorApplication.isUpdating));
             data.Set("willChangePlayMode", JsonValue.Of(UnityEditor.EditorApplication.isPlayingOrWillChangePlaymode));
+            // IMPR-008：进 Play 前可以先用本指令看一眼水位，不必等 editor.play 拒绝才知道
+            data.Set("memory", PlayModeMemoryGuard.Take().ToJson());
             return CommandResult.Ok(
                 UnityEditor.EditorApplication.isPlaying ? "Play 模式中" : "编辑模式", data);
 #else

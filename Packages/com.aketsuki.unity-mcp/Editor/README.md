@@ -62,7 +62,7 @@ Assets/Script/ExternalCommandSystem/
     │   ├── ComponentCommands.cs   component.setField（含节点引用解析）
     │   ├── ListCommandsCommand.cs commands.list
     │   ├── EditorCommands.cs    asset.refresh / asset.save / scene.save / asset.compile
-    │   ├── SceneCommands.cs     scene.open（敏感操作，需人工确认）/ scene.list
+    │   ├── SceneCommands.cs     scene.open（敏感操作，需人工确认）/ scene.reload（敏感操作，从磁盘重载）/ scene.list
     │   ├── ConsentWindow.cs     敏感操作确认窗（非模态，允许/拒绝 + 倒计时，超时自动拒绝）
     │   ├── ConsentCommands.cs   consent.list / consent.fetch（查确认结果）
     │   ├── AssetImportCommand.cs  asset.importSprite（项目外图片导入为 Sprite，支持九宫格）
@@ -377,9 +377,9 @@ CommandRegistry.Default.RegisterInstance("my.cmd", new MyCommand(dependency));
 | `prefab.delete` | 删除 Prefab 资产文件（`AssetDatabase.DeleteAsset`，路径过白名单） | `prefab`(必填) |
 | `addressables.addEntry` | 把资产注册为 Addressable 条目（地址缺省=资产路径，组缺省 Default Group；未装 Addressables 的工程报友好错误不炸编译，全部走反射） | `asset`(必填), `address`, `group`, `labels` |
 | `addressables.removeEntry` | 移除 Addressable 条目（不动资产文件；条目不存在时报错） | `asset`(必填) |
-| `editor.play` | 进入 Play 模式（会触发域重载，服务随后自动恢复）。**敏感操作：默认需人工确认**，见 §5.6 | - |
+| `editor.play` | 进入 Play 模式（会触发域重载，服务随后自动恢复）。**敏感操作：默认需人工确认**，见 §5.6。进 Play 前先采样内存水位，超阈值直接拒绝并说明代价，`force:true` 放行（**只作用于本指令**，编辑器自己的 Play 按钮不受影响），见 §5.7 | `force`(默认 false) |
 | `editor.stop` | 退出 Play 模式（幂等）。**敏感操作：默认需人工确认**，见 §5.6 | - |
-| `editor.state` | 查询编辑器状态（isPlaying/isPaused/isCompiling/isUpdating/willChangePlayMode） | - |
+| `editor.state` | 查询编辑器状态（isPlaying/isPaused/isCompiling/isUpdating/willChangePlayMode）；另附 `memory` 内存水位采样，可进 Play 前先查 | - |
 | `var.set` | 设置共享变量 | `name`(必填), `value`(必填) |
 | `var.dump` | 打印所有共享变量 | `level` |
 | `asset.refresh` | 刷新 AssetDatabase（仅编辑器）；**Play 模式下阻断**并报错「编辑器正处于预览状态，不允许编译与刷新」 | - |
@@ -387,6 +387,7 @@ CommandRegistry.Default.RegisterInstance("my.cmd", new MyCommand(dependency));
 | `asset.importSprite` | 把项目外的 PNG 拷进工程并设为 Sprite（可配九宫格）；**Play 模式下阻断**（会触发 AssetDatabase 刷新） | `source`(必填), `destination`, `pattern`, `pixelsPerUnit`, `filterMode`, `maxSize`, `overwrite`, `border` |
 | `scene.save` | 保存当前场景（仅编辑器） | - |
 | `scene.open` | 打开指定场景；**敏感操作：默认需人工确认**（见 §5.6）。确认被拒/超时会中止当前批次（后续指令标记 Skipped，即使 `stopOnError=false`）。Play 模式下直接拒绝 | `path`(必填，完整 Assets 路径或场景名), `additive`(默认 false), `saveCurrent`(默认 true) |
+| `scene.reload` | **从磁盘重载场景**：关掉内存里的场景、按路径重新打开，以 `.unity` 文件为准。有未保存改动时**默认拒绝**并列出脏场景清单，`force:true` 才真的丢弃。返回 `diskModifiedUtc`（磁盘 mtime，便于判断值不值得重载）。**敏感操作：默认需人工确认**（见 §5.6）；Play 模式下直接拒绝 | `path`(可选，默认当前活跃场景), `force`(默认 false) |
 | `scene.list` | 枚举场景：Build Settings 中启用的场景 + 磁盘 Assets 下全部 `.unity`（标注 `inBuildSettings`） | - |
 | `scene.create` | 新建场景资产：用 `NewScene(Additive)` 加载空场景再 `SaveScene` 到目标路径（**不关当前场景，杜绝丢档**），父目录逐层 `CreateFolder`；`path` 可只写名字/相对路径，自动补 `Assets/` 与 `.unity` 并过白名单；已存在则报错。`open:true` 留在新场景，`addToBuildSettings:true` 加入 Build Settings | `path`(必填), `open`(默认 false), `addToBuildSettings`(默认 false) |
 | `scene.delete` | 删除场景资产文件（`AssetDatabase.DeleteAsset`，路径过白名单）；目标场景当前已打开则拒绝 | `path`(必填，完整 Assets 路径或场景名) |
@@ -842,6 +843,28 @@ HTTP 与 MCP 侧按已注册指令生成。
     RequiresConsent = true,
     ConsentMessage = "保存所有打开的场景（会写盘，覆盖未保存的改动）")]
 ```
+
+---
+
+## 5.7 进 Play 前的内存水位检查（`PlayModeMemoryGuard`）
+
+连续跑了十几个小时的编辑器，工作集能涨到几十 GB。此时进 Play 会弹 Unity 原生 OOM 框，
+后果远不止"指令失败"：编辑器卡在弹框上、`.http-info` 消失、HTTP 服务没了、MCP 全部工具失联，
+**只能人工重启**。所以进 Play 之前先采样一次水位。
+
+| 档位 | 条件 | 结果 |
+| --- | --- | --- |
+| 提示（`level=warn`） | 工作集 > 16 GB，或系统可用 < 8 GB，或已运行 > 8 h | 照常进 Play，`data.memory` 带回采样 |
+| 拒绝（`level=block`） | 工作集 > 24 GB，或系统可用 < 4 GB | **指令失败**并说明代价；`force:true` 放行并回 `memoryNotice` |
+
+- **只作用于指令路径**：检查写在 `editor.play` / `runtime.play` 的处理逻辑里，
+  编辑器自己的 Play 按钮、菜单、快捷键一条都不碰。
+- `editor.state` 的 `memory` 块可以随时查水位与阈值，不必等 `editor.play` 拒绝才知道。
+
+> **踩过的坑**：`Process.GetCurrentProcess().WorkingSet64` 在部分 Unity 编辑器上**返回 0**
+> （同一个对象的 `StartTime` 却正常），只看它这道检查会形同虚设。
+> 现在先走 PSAPI 的 `GetProcessMemoryInfo`，取不到才退回 `WorkingSet64`，最后兜 `GC.GetTotalMemory`。
+> 别把它改回只读 `WorkingSet64`。
 
 ---
 

@@ -139,8 +139,11 @@ python Tools/deploy.py --module adb <目标> --verify   # 本机其它工程（�
 4. **`runtime.scroll` 没有松手惯性**；`amount` 基准是"可滚动范围"，不是视口高度。
 5. **多场景叠加必须点名场景**：`[scene:Level1]UIRoot/BtnStart` 或 `{"scene":…,"path":…}`。
    同名多命中一律失败并给候选，不猜。
-6. **端点发现很慢**：一次 `status` 实测 ~18 秒。原因见 `IMPR-014`（9 个空端口各等 2 秒）。
-   不影响正确性，但你等的时候别以为卡死了。
+6. **端点发现的耗时取决于是否命中快路径**（`IMPR-014`，2026-10-29 已落地）：
+   主信息文件那条同时满足「来自本工程信息文件 + `role=editor` 且 `interactive=true` +
+   `projectPath` 与 `--project-root` 完全相等」时**立刻收手**，一次 `status` 实测 **0.13 秒**；
+   任一条件不满足就退回全量探测（老行为，~18 秒）。`resolve` 子命令**永远全量探测**——
+   它的价值就是把候选列全，不为省时间牺牲诊断信息。
 7. **运行时指令默认关闭**（`CommandSystemSettings.RuntimeCommandsEnabled=false`，按工程存）。
    关着时连 `runtime.play/stop` 都失败，逃生口是常规指令 `editor.play` / `editor.stop` ——
    但后者现在是敏感操作，默认要人确认（见下一条）。
@@ -171,7 +174,13 @@ python Tools/deploy.py --module adb <目标> --verify   # 本机其它工程（�
 | IMPR-010 | 已执行（最小版） | 只做客户端侧等待（`send.py seq`），服务端跨帧执行器**没做** |
 | IMPR-011 | 已执行 | 改进清单归档成 `DOC-002`，原文件删除 |
 | IMPR-013 | 已执行 | 就是本文件 |
-| IMPR-014 | **待拍板** | 端点发现要不要在"信息文件命中的编辑器已自证身份"时提前收手，省掉那 18 秒 |
+| IMPR-014 | 已执行并实测（用户批注「可以」） | 端点发现提前收手：island_back 实测 `status` 从 ~18 秒降到 **0.13 秒**。收手条件三条同时满足才收（本工程信息文件 / 自证 `role=editor`+`interactive` / `projectPath` 全等），否则退回全量探测 |
+| IMPR-008(2026) | 已执行（用户批注「可以，但仅限于 MCP 指令」） | `editor.play` / `runtime.play` 进 Play 前采样内存水位，超阈值拒绝、`force:true` 放行；`editor.state` 带 `memory` 块可预查。**只作用于指令路径**，编辑器自己的 Play 按钮不受影响 |
+| FEAT-015 | 已执行（用户批注「可以」），真机只验到门禁 | `scene.reload`：从磁盘重载场景。注册与参数解析已在 island_back 真机确认，**真正执行被敏感操作门禁拦下**（要人点「允许」），未做一次真实重载 |
+| IMPR-018 | 已执行，**未真机实测**（要 Play 模式） | `runtime.hierarchy` 的 `components` 默认只留 Transform/RectTransform，`includeComponents:true` 才带全；节点上另给 `componentsComplete`。编辑期的 `scene.hierarchy` / `gameobject.find` 行为不变（仍带全） |
+| IMPR-019 | **重复单**，已关闭 | 与 2026-10-23 的 `IMPR-001` 是同一件事（`component.get` 的 `field` 支持点号嵌套）。island_back 真机实测 `m_Colors.normalColor` 与 `colors.normalColor` 都返回 `[1,1,1,1]`，工程侧需求单里"仍不支持"那句已划掉 |
+| IMPR-020 | 已执行（用户批注「"改了没验"的也写入交接文档」） | 就是本文件新增的「已改未实测」一节：31 号前不再安排真机复验专场，改成把清单与复验步骤写在这里 |
+| IMPR-009(2026) | 已执行 | 指令系统窗口整体包一层 `BeginScrollView`（ADB 调试台本来就有，未改）。**窗口外观未实测**：需要人在编辑器里把窗口压矮看一遍 |
 | BUG-007 / BUG-008 | **已改未实测** | 设备端 C# 栈帧判定（`.ctor` / lambda / 本地函数是 BUG-008 补的三种写法）。过了编译与 32 条正则用例、三处部署，真机等下次抓日志确认"一条日志只占一行" |
 | BUG-009 | **已改未实测** | 空闲时不检查抑制窗口 → 全局堆栈设置停在 None。静态推导 + 编译验证，需要在 Unity 里静默几秒后打一条 Log 验一次 |
 | IMPR-015 | 已执行（用户批注） | 真机复验：用户会把 Unity 与模拟器一起开着，下一轮用模拟真机跑一次 logcat 即可 |
@@ -180,6 +189,26 @@ python Tools/deploy.py --module adb <目标> --verify   # 本机其它工程（�
 | BUG-010 | **已改未实测** | `runtime.hierarchy` 的 name 模式：limit 改为「命中上限」、遍历不限量。过了真机编译与部署，真机复验要进 Play 模式（`runtime.*` 双门禁 + `editor.play` 需人工确认，脚本跑不了），见 `待拍板-2026-10-28.md` |
 | IMPR-007(2026) | 已实测 | `component.setField(s)` 支持数组 / `List<T>`：island_back 上用 `List<Transform>`（节点路径）与 `Color[]` 实跑通过 |
 | Phase 2 | 未开工 | 跨帧执行器、`runtime.screenshot`、断言原语、`runtime.invoke`。见 `FEAT-001` 末尾 |
+
+### 8.1 已改未实测清单（IMPR-020，用户批注：写进交接文档即可，31 号前不安排复验专场）
+
+下面这些**代码已落地、已编译、已部署**，但真机行为没有跑过。共同原因：都要人在场
+（进 Play 模式、抓设备日志、点确认窗、或把窗口拖矮看一眼）。接手的人按「怎么验」自己跑一遍，
+验完把本行删掉、把编号挪进上面的表并标成"已实测"。
+
+| 编号 | 要验的行为 | 卡在哪 | 怎么验 |
+| --- | --- | --- | --- |
+| BUG-005 | `runtime.scroll` 横向 `amount` 正负方向 | 要进 Play 模式 | 起一个带横向 ScrollRect 的界面，`amount=0.5` 应往后翻、`-0.5` 往回翻；看 `normalizedPosition.x` |
+| BUG-010 | `runtime.hierarchy` 的 name 模式：`limit=5` 也能命中排在后面的节点；`matchCount=0` 的文案 | 要进 Play 模式 | 随便开个场景，`{"name":"Btn","limit":5}`，看 `limitAppliesTo=matches` 与 `visited` 远大于 5 |
+| IMPR-018 | `runtime.hierarchy` 默认 `components` 只含 Transform；`includeComponents:true` 才带全 | 同上 | 同上两条对照跑，看 `components` 与 `componentsComplete` |
+| IMPR-008(2026) | 内存水位"拒绝"分支（不是"提示"分支） | 要把编辑器水位推过 24 GB，或临时下调阈值 | 让编辑器长跑到工作集 >24 GB 再 `editor.play`，应返回 `level=block` 的失败而不是弹 OOM 框；`force:true` 应放行并回 `memoryNotice` |
+| FEAT-015 | `scene.reload` 真的重载了 | 敏感操作门禁（要人点「允许」） | 控制台开「全权委托」或直接点窗；手改一个 `.unity` 字段后重载，`component.get` 应读到新值 |
+| IMPR-009(2026) | 指令系统窗口压矮后能整体滚到底 | 要人看窗口 | 打开「工具 / 指令系统 / 指令控制台」，把窗口高度拖到很小，确认「已注册指令」「运行日志」能滚到 |
+| BUG-007 / 008 | 一条设备端 `Debug.Log` 在控制台只占一行（`.ctor` / lambda / 本地函数三种写法） | 要设备或模拟器 | ADB 调试台连模拟器，`adb.logcat.start` → 打日志 → `adb.logcat.read` |
+| BUG-009 | 日志安静几秒后自己打的 Log 仍带调用栈 | 同上 | 同上，静默 10 秒后再打一条 |
+
+> 已经实测过的：IMPR-014（0.13 秒）、IMPR-019 / IMPR-001（嵌套读 `[1,1,1,1]`）、
+> IMPR-008 的采样与"提示"分支（island_back 真机 `workingSetGB=23.49`、`level=warn`）。
 
 ## 9. 不能做的事（踩过的）
 

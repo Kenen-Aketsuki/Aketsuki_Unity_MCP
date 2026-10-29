@@ -91,6 +91,113 @@ namespace Aketsuki.UnityMcp.Editor
     }
 
     /// <summary>
+    /// 从磁盘重载场景：丢掉内存里的改动，以 .unity 文件为准（FEAT-015）。
+    ///
+    /// <para>
+    /// <b>为什么需要它：</b>有些字段只能直接改 <c>.unity</c> 文本。改完之后编辑器<b>不会</b>自动重读磁盘，
+    /// <c>component.get</c> 读到的仍是内存里的旧值；此前唯一的办法是连调两次 <c>asset.refresh</c>
+    /// ——"调两次"是从现象里试出来的经验，没有机制保证，换时序就可能不成立。
+    /// 本指令把这件事变成一条语义确定的操作：<b>关掉内存里的场景、按路径重新打开</b>。
+    /// </para>
+    ///
+    /// <para>
+    /// <b>未保存改动默认拒绝：</b>重载等于丢弃，而"未保存改动"可能是人手动调了半小时的参数。
+    /// 所以脏场景一律拒绝并列出清单，显式 <c>force:true</c> 才真的丢。指令本身同时走
+    /// <see cref="ConsentGate"/>（与 <c>scene.open</c> 同级），未开「全权委托」时还要人点一次「允许」。
+    /// </para>
+    ///
+    /// <para>
+    /// 参数：path（可选，默认当前活跃场景）、force（默认 false；场景脏时是否仍丢弃内存改动）
+    /// </para>
+    /// </summary>
+    [Command("scene.reload",
+        Description = "从磁盘重载场景（丢弃内存中的未保存改动，以 .unity 为准；脏场景需 force）",
+        Usage = "path: string, force: bool", EditorOnly = true,
+        RequiresConsent = true,
+        ConsentMessage = "从磁盘重载场景：内存中未保存的改动会被丢弃，场景内容回到磁盘文件的状态。")]
+    public sealed class SceneReloadCommand : ICommand
+    {
+        public CommandResult Execute(CommandContext context)
+        {
+            if (context.DryRun)
+            {
+                return CommandResult.Skip("dry-run：将从磁盘重载场景（需用户允许），不实际重载");
+            }
+
+            if (EditorApplication.isPlaying)
+            {
+                return CommandResult.Fail("编辑器处于 Play 模式，无法重载场景；请先退出 Play 模式");
+            }
+
+            var input = context.Args.GetString("path", null);
+            var path = string.IsNullOrEmpty(input)
+                ? SceneManager.GetActiveScene().path
+                : ScenePathResolver.Resolve(input);
+
+            if (string.IsNullOrEmpty(path))
+            {
+                return string.IsNullOrEmpty(input)
+                    ? CommandResult.Fail("当前没有可重载的场景（活跃场景未保存到磁盘，请先 Save As 或直接传 path）")
+                    : CommandResult.Fail($"找不到场景：{input}（支持完整 Assets 路径或场景名）");
+            }
+
+            var fullPath = Path.GetFullPath(path);
+            var modifiedUtc = ReadModifiedUtc(fullPath);
+
+            var dirty = new List<string>();
+            for (var i = 0; i < EditorSceneManager.sceneCount; i++)
+            {
+                var scene = EditorSceneManager.GetSceneAt(i);
+                if (scene.isDirty)
+                {
+                    dirty.Add(string.IsNullOrEmpty(scene.path) ? "(未保存的新场景)" : scene.path);
+                }
+            }
+
+            var force = context.Args.GetBool("force", false);
+            if (dirty.Count > 0 && !force)
+            {
+                return CommandResult.Fail(
+                    $"有 {dirty.Count} 个场景存在未保存改动（{string.Join("、", dirty.ToArray())}），" +
+                    "重载会丢弃它们。先 scene.save 保存，或显式传 force: true 表示确实要丢。");
+            }
+
+            // Single 模式会关掉当前所有已打开场景并按路径重新从磁盘加载——
+            // 这正是"以磁盘为准"所需要的语义，不需要先 Close 再 Open。
+            var reloaded = EditorSceneManager.OpenScene(path, OpenSceneMode.Single);
+
+            var data = JsonValue.NewObject();
+            data.Set("scenePath", JsonValue.Of(reloaded.path));
+            data.Set("sceneName", JsonValue.Of(reloaded.name));
+            data.Set("force", JsonValue.Of(force));
+            data.Set("discardedDirtyCount", JsonValue.Of(dirty.Count));
+            data.Set("diskModifiedUtc", modifiedUtc != null
+                ? JsonValue.Of(modifiedUtc.Value.ToString("o"))
+                : JsonValue.Null);
+            data.Set("rootCount", JsonValue.Of(reloaded.rootCount));
+            data.Set("isDirtyAfter", JsonValue.Of(reloaded.isDirty));
+
+            return CommandResult.Ok(
+                "已从磁盘重载场景：" + reloaded.name +
+                (dirty.Count > 0 ? $"（丢弃了 {dirty.Count} 个场景的未保存改动）" : "（重载前没有未保存改动）"),
+                data);
+        }
+
+        /// <summary>磁盘文件的最后修改时间（读不到就返回 null，不因此失败）。</summary>
+        private static DateTime? ReadModifiedUtc(string fullPath)
+        {
+            try
+            {
+                return File.Exists(fullPath) ? File.GetLastWriteTimeUtc(fullPath) : (DateTime?)null;
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+        }
+    }
+
+    /// <summary>
     /// 枚举场景：Build Settings 中启用的场景 + 磁盘 Assets 下全部 .unity（标注 inBuildSettings）。
     /// <para>参数：无。</para>
     /// </summary>

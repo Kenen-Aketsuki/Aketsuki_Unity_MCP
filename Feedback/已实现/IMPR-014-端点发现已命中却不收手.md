@@ -2,11 +2,11 @@
 id: IMPR-014
 type: improve
 title: 端点发现已命中自证身份的编辑器仍把 9 个空端口各等 2 秒，一条指令要多花 18 秒
-status: pending
+status: done
 source: project_island_back
 created: 2026-10-27
-updated: 2026-10-27
-files: McpBridge/send.py
+updated: 2026-10-29
+files: Packages/com.aketsuki.unity-mcp/Editor/McpBridge/send.py
 proposal: true
 ---
 
@@ -60,3 +60,23 @@ python Assets/Editor/ExternalCommandSystem/McpBridge/send.py \
 信息文件带工程 hash，端口被别的工程顶替时 `projectPath` 对比会失败、照样走全量探测。
 
 **用户批注**：（等待）
+
+---
+
+## 执行结果（2026-10-29 第七跑，用户批注「可以」）
+
+按批件里收得极窄的三条收手条件实现（在 `send.py` 的 `strongly_identified()`）：
+
+1. 候选来自**本工程主信息文件**（`Target.primary`，不是端口扫描、也不是别的工程的自述副本）；
+2. `/v1/status` 的 `identity` 明确 `role=editor` 且 `interactive=true`；
+3. `projectPath` 规范化后与 `--project-root` 完全相等（没指定工程根时要求身份里确实带 `projectPath`
+   —— `probe()` 已在那之前校验过它与信息文件记录的归属一致）。
+
+任一不满足 → 退回全量探测，行为与以前完全一致。
+
+两条刻意的例外：`--url`（用户显式指定，必须走完整选址）与 `resolve` 子命令（它的价值就是把候选列全）
+**永远全量探测**，不为省时间牺牲诊断信息。未探测的候选在诊断输出里标成「未探测（已提前收手）」，
+不冒充"不可达"。
+
+**真机实测（island_back）**：`send.py status` 从 ~18 秒降到 **0.13 秒**（连跑三次都是 0.13 s）；
+`send.py resolve` 仍然列出全部 10 个候选。

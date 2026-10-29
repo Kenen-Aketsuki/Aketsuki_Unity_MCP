@@ -39,14 +39,21 @@ namespace Aketsuki.UnityMcp.Editor
     /// </para>
     ///
     /// <para>
+    /// <b>组件清单默认裁剪（IMPR-018）：</b>每个节点的 <c>components</c> 默认<b>只含
+    /// Transform / RectTransform</b>——UI 工程里 <c>limit=400</c> 的树能回 730 KB，几乎全是组件名数组。
+    /// 位置与尺寸是"点哪里"的必要信息，所以 Transform 一定留；要看完整组件就传
+    /// <c>includeComponents: true</c>。节点上另有 <c>componentsComplete</c> 标明这份清单是不是全的。
+    /// </para>
+    /// <para>
     /// 参数：root（从某个节点开始，支持 <c>[scene:X]</c> 前缀；默认全部）、
     /// scene（只看某个场景，写法同 <c>[scene:...]</c> 里的选择器）、name（按名字子串过滤，给了就返回**扁平命中列表**）、
-    /// depth（0=不限）、includeInactive（默认 true）、limit（默认 400；树模式=节点数，name 模式=命中数）
+    /// depth（0=不限）、includeInactive（默认 true）、limit（默认 400；树模式=节点数，name 模式=命中数）、
+    /// includeComponents（默认 false；true 时带回每个节点的完整组件清单）
     /// </para>
     /// </summary>
     [Command("runtime.hierarchy",
         Description = "运行时层级快照：按场景分组遍历已加载场景（含运行时实例与 DontDestroyOnLoad）",
-        Usage = "root: string|object, scene: string, name: string, depth: int, includeInactive: bool, limit: int",
+        Usage = "root: string|object, scene: string, name: string, depth: int, includeInactive: bool, limit: int, includeComponents: bool",
         EditorOnly = true, Runtime = true)]
     public sealed class RuntimeHierarchyCommand : ICommand
     {
@@ -55,6 +62,7 @@ namespace Aketsuki.UnityMcp.Editor
         private int _limit = DefaultLimit;
         private int _maxDepth;
         private bool _includeInactive = true;
+        private bool _includeComponents;
         private int _visited;
         private int _matched;
         private bool _truncated;
@@ -64,6 +72,7 @@ namespace Aketsuki.UnityMcp.Editor
             _limit = Mathf.Max(1, context.Args.GetInt("limit", DefaultLimit));
             _maxDepth = Mathf.Max(0, context.Args.GetInt("depth", 0));
             _includeInactive = context.Args.GetBool("includeInactive", true);
+            _includeComponents = context.Args.GetBool("includeComponents", false);
             _visited = 0;
             _matched = 0;
             _truncated = false;
@@ -76,6 +85,7 @@ namespace Aketsuki.UnityMcp.Editor
             data.Set("frameCount", JsonValue.Of(Time.frameCount));
             data.Set("time", JsonValue.Of(Mathf.Round(Time.time * 1000f) / 1000f));
             data.Set("activeScene", JsonValue.Of(SceneScope.Label(SceneManager.GetActiveScene())));
+            data.Set("includeComponents", JsonValue.Of(_includeComponents));
 
             if (rootSpec != null && !rootSpec.IsNull)
             {
@@ -104,7 +114,7 @@ namespace Aketsuki.UnityMcp.Editor
                 data.Set("truncated", JsonValue.Of(_truncated));
                 data.Set("scenes", JsonValue.FromArray(new[] { single }));
                 return CommandResult.Ok(
-                    $"运行时层级：从 {RuntimeSupport.Qualified(root)} 起 {_visited} 个节点{TruncatedHint()}", data);
+                    $"运行时层级：从 {RuntimeSupport.Qualified(root)} 起 {_visited} 个节点{TruncatedHint()}{ComponentsHint()}", data);
             }
 
             var scenes = CollectScenes(context.Args.GetString("scene", null), out var sceneError);
@@ -147,7 +157,7 @@ namespace Aketsuki.UnityMcp.Editor
             data.Set("scenes", groups);
 
             return CommandResult.Ok(
-                $"运行时层级：{scenes.Count} 个场景 / {_visited} 个节点（{total} 个根）{TruncatedHint()}", data);
+                $"运行时层级：{scenes.Count} 个场景 / {_visited} 个节点（{total} 个根）{TruncatedHint()}{ComponentsHint()}", data);
         }
 
         #region 扁平命中模式
@@ -190,7 +200,7 @@ namespace Aketsuki.UnityMcp.Editor
 
             var sceneHint = scenes.Count > 1 ? $"（分布在 {scenes.Count} 个场景，同名时请用 matches 里的 qualifiedPath 精确指定）" : string.Empty;
             return CommandResult.Ok(
-                $"运行时层级里命中 {_matched} 个名字含 '{nameFilter}' 的节点{sceneHint}{MatchTruncatedHint()}", data);
+                $"运行时层级里命中 {_matched} 个名字含 '{nameFilter}' 的节点{sceneHint}{MatchTruncatedHint()}{ComponentsHint()}", data);
         }
 
         /// <summary>
@@ -299,9 +309,9 @@ namespace Aketsuki.UnityMcp.Editor
         /// 节点信息：多场景叠加时 <c>selectPath</c> 只在单个场景内唯一，
         /// 跨场景必须靠 <c>qualifiedPath</c>（带 <c>[scene:...]</c> 前缀）。
         /// </summary>
-        private static JsonValue NodeJson(Transform node)
+        private JsonValue NodeJson(Transform node)
         {
-            return RuntimeSupport.NodeJson(node);
+            return RuntimeSupport.NodeJson(node, _includeComponents);
         }
 
         #endregion
@@ -439,6 +449,14 @@ namespace Aketsuki.UnityMcp.Editor
         private string TruncatedHint()
         {
             return _truncated ? $"（已按 limit={_limit} 截断，需要更多请调大 limit 或加 name 过滤）" : string.Empty;
+        }
+
+        /// <summary>组件清单被裁剪时说一句，免得调用方把"只含 Transform"读成"这个节点没有别的组件"（IMPR-018）。</summary>
+        private string ComponentsHint()
+        {
+            return _includeComponents
+                ? string.Empty
+                : "（components 只含 Transform/RectTransform，需要完整组件清单请传 includeComponents: true）";
         }
     }
 }

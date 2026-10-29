@@ -45,6 +45,11 @@ python scripts/send.py seq <步骤>.json         # 顺序执行多步，步间�
 因此客户端在发指令前会先问一句「你是谁」（读 `/v1/status` 的 `identity` 块），**只往自证为
 交互式编辑器（role=editor、interactive=true）的那个端口发**，其余一律避开。
 
+耗时有两种：主信息文件那条同时满足「来自本工程信息文件 + `role=editor` 且 `interactive=true`
++ `projectPath` 与 `--project-root` 完全相等」时**立刻收手**（实测 `status` 0.13 秒）；
+任一条件不满足就退回全量探测（老行为，约 18 秒）。`resolve` 子命令永远全量探测——
+它的价值就是把候选列全。
+
 判定完全依赖服务端自报的身份，**不查进程、不猜端口**：
 
 1. 候选来源（按优先级，去重）：`--url` 显指 → 本工程信息文件 `.http-info.<hash>` →
@@ -292,7 +297,7 @@ Unity 没启动时 `tools/list` 仍会在半秒内返回那 5 个元工具，调
 | --- | --- | --- |
 | `runtime.play` | 进入 Play（受开关约束；会触发域重载） | `onDirty`: `abort`（默认）/ `save` |
 | `runtime.stop` | 退出 Play（受开关约束；编辑模式下幂等返回成功） | — |
-| `runtime.hierarchy` | 运行时层级快照（**含运行时实例、inactive、DontDestroyOnLoad**） | `root` / `scene` / `name` / `depth` / `includeInactive` / `limit` |
+| `runtime.hierarchy` | 运行时层级快照（**含运行时实例、inactive、DontDestroyOnLoad**） | `root` / `scene` / `name` / `depth` / `includeInactive` / `limit` / `includeComponents` |
 
 > **`limit` 在两种模式下量的东西不一样（BUG-010）**：不给 `name` 的树模式，limit 是**序列化节点数**
 > 预算（防响应体爆炸）；给了 `name` 的命中模式，limit 是**命中条数**上限，遍历不限量——
@@ -300,6 +305,12 @@ Unity 没启动时 `tools/list` 仍会在半秒内返回那 5 个元工具，调
 > 命中区在后面就必然查不到，还会被误读成「场景里没有这个节点」。
 > 两种模式都在 data 里给 `visited`（实际遍历数）与 `limitAppliesTo`（`nodes` / `matches`）；
 > 命中模式的 message 区分「确实没有」与「命中已达上限，可能还有」。
+>
+> **`components` 默认只含 Transform / RectTransform（IMPR-018）**：UI 工程里一次 `limit=400`
+> 的快照能回 730 KB，几乎全是每个节点的组件名数组。要看完整组件清单就传
+> `includeComponents: true`；节点上另有 `componentsComplete` 标明这份清单是不是全的，
+> 别把「只剩 Transform」读成「这个节点没有别的组件」。编辑期的 `scene.hierarchy` /
+> `gameobject.find` 不受影响，仍带完整组件。
 | `runtime.click` | EventSystem 注入点击 | `target` 或 `position` / `button` / `clicks` / `direct` |
 | `runtime.scroll` | 向 ScrollRect 注入拖拽序列 | `target` / `direction` / `amount` / `mode` / `steps` |
 | `runtime.input` | 写 TMP/UGUI 输入框并触发提交回调 | `target` / `text` / `append` / `submit` |
@@ -388,10 +399,16 @@ Unity 没启动时 `tools/list` 仍会在半秒内返回那 5 个元工具，调
 - `button.listenerCount = 0` → 按钮存在但没绑回调
 - 被透明层挡住却确实要点 → `direct: true`，跳过射线直接对目标触发点击
 
-## 敏感操作确认（`editor.play` / `editor.stop` / `scene.open`）
+## 敏感操作确认（`editor.play` / `editor.stop` / `scene.open` / `scene.reload`）
 
 这三条**默认不会立刻执行**：它们会改变用户手上的现场（退出 Play = 游戏没了、换场景 = 当前场景没了），
 所以要先由人点一次「允许」。控制台勾了「全权委托」才直接放行。
+
+四条里 `editor.play` 还多一道：**进 Play 前先采样内存水位**（工作集 > 24 GB 或系统可用 < 4 GB
+会直接拒绝并说明代价，超 16 GB / 可用 < 8 GB / 已运行 > 8 h 只提示）。被拒时报文明写
+"OOM 不是指令失败，是 HTTP 服务消失 + MCP 全断 + 人工重启"，确认要带险就加 `force: true`。
+`editor.state` 的 `memory` 块可以随时查水位，不必等 `editor.play` 拒绝才知道。
+这道检查**只作用于指令**，编辑器自己的 Play 按钮不受任何影响。
 
 ### 两段式调用（必须按这个来）
 
