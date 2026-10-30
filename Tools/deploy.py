@@ -548,6 +548,25 @@ def touch_manifest(root, dest_root):
     return True
 
 
+def project_dir_complete(dest_root):
+    """工程客制化目录是否齐备（目录本身 + 源里带的每个占位文件）。
+
+    只看目录存在是不够的：仓库后来往 Project/ 里加了文件（比如 .gitkeep），
+    若判据仍是"目录在就算齐"，main 会直接走"无需写入"分支，新文件永远下发不到目标。
+    """
+    if not HAS_PROJECT_DIR:
+        return True
+    for name in ("README.md", ".gitkeep"):
+        rel = PROJECT_DIR_REL.strip("/") + "/" + name
+        src_abs = os.path.join(SRC_ROOT, *rel.split("/"))
+        if not os.path.isfile(src_abs):
+            continue                    # 源里没这个占位文件，就不要求目标有
+        dst_abs = os.path.join(dest_root, *rel.split("/"))
+        if not os.path.isfile(dst_abs):
+            return False
+    return True
+
+
 def ensure_project_dir(dest_root, dry_run=False):
     """确保目标工程有自己的工程客制化目录（含占位说明）。"""
     if not HAS_PROJECT_DIR:
@@ -555,20 +574,30 @@ def ensure_project_dir(dest_root, dry_run=False):
         return
 
     proj = os.path.join(dest_root, *PROJECT_DIR_REL.strip("/").split("/"))
-    readme = os.path.join(proj, "README.md")
     created = []
     if not os.path.isdir(proj):
         if not dry_run:
             os.makedirs(proj)
         created.append(PROJECT_DIR_REL + "/")
-    if not os.path.isfile(readme):
-        src_readme = os.path.join(SRC_ROOT, *(PROJECT_DIR_REL.strip("/") + "/README.md").split("/"))
-        if os.path.isfile(src_readme):
-            if not dry_run:
-                write_atomic(readme, read_bytes(src_readme))
-            created.append(PROJECT_DIR_REL + "/README.md")
-    # 目录的 .meta 只在缺的时候补，避免改 GUID
-    for rel in (PROJECT_DIR_REL.strip("/") + ".meta", PROJECT_DIR_REL.strip("/") + "/README.md.meta"):
+
+    # 占位文件：README 说明用途，.gitkeep 让目录本身能被 git 跟踪
+    # （git 不管空目录；工程客制化代码放这里时，靠它保住目录不被回收）
+    for name in ("README.md", ".gitkeep"):
+        rel = PROJECT_DIR_REL.strip("/") + "/" + name
+        dst_abs = os.path.join(dest_root, *rel.split("/"))
+        if os.path.isfile(dst_abs):
+            continue
+        src_abs = os.path.join(SRC_ROOT, *rel.split("/"))
+        if not os.path.isfile(src_abs):
+            continue
+        if not dry_run:
+            write_atomic(dst_abs, read_bytes(src_abs))
+        created.append(rel)
+
+    # 目录与占位文件的 .meta 只在缺的时候补，避免改 GUID
+    for rel in (PROJECT_DIR_REL.strip("/") + ".meta",
+                PROJECT_DIR_REL.strip("/") + "/README.md.meta",
+                PROJECT_DIR_REL.strip("/") + "/.gitkeep.meta"):
         src_abs = os.path.join(SRC_ROOT, rel.replace("/", os.sep))
         dst_abs = os.path.join(dest_root, rel.replace("/", os.sep))
         if os.path.isfile(src_abs) and not os.path.isfile(dst_abs):
@@ -1073,8 +1102,9 @@ def main(argv=None):
 
         # 没有工程客制化目录的模块（ADB）不存在"目标侧该有但没建"这回事，
         # 否则每次部署都会误判成需要写入。
-        project_ok = (not HAS_PROJECT_DIR) or os.path.isdir(
-            os.path.join(dest_root, *PROJECT_DIR_REL.strip("/").split("/")))
+        # 判据要覆盖占位文件本身：只看目录存不存在的话，仓库新加 .gitkeep 这类文件
+        # 会因为"目录在、plan 又不脏"直接走"无需写入"分支，永远下发不下去。
+        project_ok = project_dir_complete(dest_root)
         fresh = not os.path.isdir(dest_root)
         deploy_started = time.time()
         wrote = fresh or plan.dirty
