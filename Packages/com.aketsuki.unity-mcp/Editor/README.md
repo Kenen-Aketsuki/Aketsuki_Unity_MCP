@@ -68,7 +68,7 @@ Assets/Script/ExternalCommandSystem/
     │   ├── AssetImportCommand.cs  asset.importSprite（项目外图片导入为 Sprite，支持九宫格）
     │   ├── DiagnosticsCommands.cs  asset.compileReport / console.read（编译反馈闭环）
     │   ├── PrefabCommands.cs     ui.savePrefab（场景节点保存为 Prefab）
-    │   ├── PrefabEditCommands.cs  prefab.addNode / prefab.duplicateNode / prefab.tree / component.add（Prefab 资产编辑）
+    │   ├── PrefabEditCommands.cs  prefab.addNode / duplicateNode / instantiatePrefab / renameNode / tree / removeNode / component.add（Prefab 资产编辑）
     │   ├── EditorStateCommands.cs  editor.play / editor.stop / editor.state（Play 模式受控进出与状态查询）
     │   ├── ComponentGetCommands.cs  component.get / scene.inspect（字段读取，SerializedObject 全量快照）
 │   ├── CleanupCommand.cs        command.cleanup（清理指令目录下已执行/归档的文件）
@@ -372,7 +372,9 @@ CommandRegistry.Default.RegisterInstance("my.cmd", new MyCommand(dependency));
 | `component.remove` | 从节点移除组件（场景走 `Undo.DestroyObjectImmediate`；Prefab 走 `LoadPrefabContents` 生命周期）。类型名按反射解析，缺失报错。**Prefab 模式下 `target` 可写空串表示根节点** | `target`(必填；Prefab 模式下空串=Prefab 根), `component`(必填), `prefab` |
 | `prefab.addNode` | 往 Prefab 资产里添加节点（可选复制源节点组件、按类型名追加组件）。`copyFrom` 支持**跨 Prefab**：写 `Assets/.../Other.prefab/节点/路径`（省略节点路径取该 Prefab 根）；跨 Prefab 只搬组件数据，对象引用需另行重指（结果里带 `warning`） | `prefab`(必填), `name`(必填), `parent`(默认根), `copyFrom`, `components`, `active` |
 | `prefab.duplicateNode` | 在 Prefab 资产内复制节点（**默认含子树与组件**，引用不重映射）。返回 `childCount` / `subtreeCount` / `subtreePaths` 便于核对层级；`includeChildren:false` 只要节点自身 | `prefab`(必填), `target`(必填), `name`, `parent`, `active`, `includeChildren`(默认 true) |
-| `prefab.tree` | 列出 Prefab 资产的节点树（路径/组件/激活态，只读） | `prefab`(必填), `maxDepth` |
+| `prefab.instantiatePrefab` | 在 Prefab 资产内嵌一个**真正的嵌套 Prefab 实例**（`PrefabUtility.InstantiatePrefab`，结果 `instanceStatus=Connected`，源资产改了它跟着变）。`prefab.duplicateNode` 复制嵌套实例得到的是**展开的普通节点树**（断链），要保连接就用这条 | `prefab`(必填), `asset`(必填), `parent`(默认根), `name`, `index` |
+| `prefab.renameNode` | 给 Prefab 资产内的节点改名（`gameobject.rename` 只认当前场景，prefab 域要用这条）。返回 `oldName`/`oldPath`，并提示按名字 `Find` 的代码会失效 | `prefab`(必填), `target`(必填), `name`(必填) |
+| `prefab.tree` | 列出 Prefab 资产的节点树（路径/组件/激活态，只读）。嵌套实例节点带 `isPrefabInstance`/`isPrefabInstanceRoot`/`instanceStatus`/`sourceAsset`，顶层另有 `instanceCount`（**只数实例根**） | `prefab`(必填), `maxDepth` |
 | `prefab.removeNode` | 删除 Prefab 资产内节点（含子树）；`keepChildren:true` 把子节点上移到父再删自身；禁止删根节点 | `prefab`(必填), `target`(必填), `keepChildren`(默认 false) |
 | `prefab.delete` | 删除 Prefab 资产文件（`AssetDatabase.DeleteAsset`，路径过白名单） | `prefab`(必填) |
 | `addressables.addEntry` | 把资产注册为 Addressable 条目（地址缺省=资产路径，组缺省 Default Group；未装 Addressables 的工程报友好错误不炸编译，全部走反射） | `asset`(必填), `address`, `group`, `labels` |
@@ -856,6 +858,11 @@ HTTP 与 MCP 侧按已注册指令生成。
 | --- | --- | --- |
 | 提示（`level=warn`） | 工作集 > 16 GB，或系统可用 < 8 GB，或已运行 > 8 h | 照常进 Play，`data.memory` 带回采样 |
 | 拒绝（`level=block`） | 工作集 > 24 GB，或系统可用 < 4 GB | **指令失败**并说明代价；`force:true` 放行并回 `memoryNotice` |
+
+**这五个阈值可在控制台「进 Play 前的内存水位检查」里改**（按机器存，不按工程——它们是机器属性）：
+工作集提示/拒绝档、系统可用提示/拒绝档、已运行时长提示档，**填 0 表示关掉该条判据**
+（小内存机器上 16 GB 的提示档几乎永不触发，可以直接关掉或调低）。
+判定每次实时读，改完下一次执行即生效，不需要重启编辑器。
 
 - **只作用于指令路径**：检查写在 `editor.play` / `runtime.play` 的处理逻辑里，
   编辑器自己的 Play 按钮、菜单、快捷键一条都不碰。

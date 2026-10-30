@@ -78,6 +78,8 @@ namespace Aketsuki.UnityMcp.Editor
             EditorGUILayout.Space();
             DrawConsentSection();
             EditorGUILayout.Space();
+            DrawMemoryGuardSection();
+            EditorGUILayout.Space();
             EditorGUILayout.Space();
             DrawCommandListSection();
             EditorGUILayout.Space();
@@ -478,6 +480,72 @@ namespace Aketsuki.UnityMcp.Editor
             EditorGUILayout.LabelField(
                 consentCount == 0 ? "（没有标记为敏感操作的指令）" : $"受此开关控制：{builder}",
                 EditorStyles.miniLabel);
+        }
+
+        #endregion
+
+        #region 内存水位阈值
+
+        /// <summary>
+        /// 进 Play 前的内存水位阈值（IMPR-008，用户批注：改成可配置）。
+        /// <para>
+        /// 单独成区的理由：它不属于"执行设置"（那是文件与日志的偏好），也不属于"敏感操作确认"
+        /// （那是授权），它是<b>这台机器</b>的物理属性。所以放在全局偏好里、在这块单独调：
+        /// 一台机器配一次，所有工程共用。
+        /// </para>
+        /// <para>
+        /// 单位是 GB / 小时（不是字节），<b>填 0 表示关闭该条判据</b>——
+        /// 小内存机器上 16 GB 的提示档永不触发，可以直接关掉或调低。
+        /// </para>
+        /// </summary>
+        private void DrawMemoryGuardSection()
+        {
+            EditorGUILayout.LabelField("进 Play 前的内存水位检查", EditorStyles.boldLabel);
+
+            EditorGUI.indentLevel++;
+
+            var warnWorkingSet = EditorGUILayout.FloatField("工作集 提示档（GB，0=关）",
+                CommandSystemSettings.MemoryWarnWorkingSetGB);
+            if (Math.Abs(warnWorkingSet - CommandSystemSettings.MemoryWarnWorkingSetGB) > 0.0001f)
+            {
+                CommandSystemSettings.MemoryWarnWorkingSetGB = warnWorkingSet;
+            }
+
+            var blockWorkingSet = EditorGUILayout.FloatField("工作集 拒绝档（GB，0=关）",
+                CommandSystemSettings.MemoryBlockWorkingSetGB);
+            if (Math.Abs(blockWorkingSet - CommandSystemSettings.MemoryBlockWorkingSetGB) > 0.0001f)
+            {
+                CommandSystemSettings.MemoryBlockWorkingSetGB = blockWorkingSet;
+            }
+
+            var warnAvailable = EditorGUILayout.FloatField("系统可用 提示档（GB，0=关）",
+                CommandSystemSettings.MemoryWarnAvailableGB);
+            if (Math.Abs(warnAvailable - CommandSystemSettings.MemoryWarnAvailableGB) > 0.0001f)
+            {
+                CommandSystemSettings.MemoryWarnAvailableGB = warnAvailable;
+            }
+
+            var blockAvailable = EditorGUILayout.FloatField("系统可用 拒绝档（GB，0=关）",
+                CommandSystemSettings.MemoryBlockAvailableGB);
+            if (Math.Abs(blockAvailable - CommandSystemSettings.MemoryBlockAvailableGB) > 0.0001f)
+            {
+                CommandSystemSettings.MemoryBlockAvailableGB = blockAvailable;
+            }
+
+            var warnUptime = EditorGUILayout.FloatField("已运行时长 提示档（小时，0=关）",
+                CommandSystemSettings.MemoryWarnUptimeHours);
+            if (Math.Abs(warnUptime - CommandSystemSettings.MemoryWarnUptimeHours) > 0.0001f)
+            {
+                CommandSystemSettings.MemoryWarnUptimeHours = warnUptime;
+            }
+
+            EditorGUI.indentLevel--;
+
+            EditorGUILayout.HelpBox(
+                "只作用于 editor.play / runtime.play 指令，不碰编辑器自己的 Play 按钮。" +
+                "超过「拒绝档」会直接拒绝进 Play（传 force:true 可带险放行），因为真 OOM 的代价是" +
+                "编辑器卡死、HTTP 服务消失、MCP 全断，必须人工重启。当前水位随时用 editor.state 查。",
+                MessageType.None);
         }
 
         #endregion

@@ -27,20 +27,51 @@ namespace Aketsuki.UnityMcp.Editor
     /// </summary>
     internal static class PlayModeMemoryGuard
     {
-        /// <summary>提示阈值：进程工作集（字节）。超过只警告，照常执行。</summary>
-        internal const long WarnWorkingSetBytes = 16L * 1024 * 1024 * 1024;
+        // 原本这五个数是硬编码常量。用户批注"可以开配置"（IMPR-008）后改成从
+        // CommandSystemSettings 实时读——**每次判定都读，不做缓存**，与 RuntimeCommandsEnabled
+        // 同理：控制台里改完下一次执行立刻生效，不需要重启编辑器。
+        // 阈值按 GB / 小时配，0 表示该条判据关闭。默认值与改造前的硬编码值一致，行为不漂移。
 
-        /// <summary>拒绝阈值：进程工作集（字节）。超过要 <c>force</c> 才放行。</summary>
-        internal const long BlockWorkingSetBytes = 24L * 1024 * 1024 * 1024;
+        /// <summary>提示阈值：进程工作集（字节）。超过只警告，照常执行。0 = 不检查。</summary>
+        internal static long WarnWorkingSetBytes
+        {
+            get { return GigabytesToBytes(CommandSystemSettings.MemoryWarnWorkingSetGB); }
+        }
 
-        /// <summary>提示阈值：系统可用物理内存（字节）。低于只警告。</summary>
-        internal const long WarnAvailableBytes = 8L * 1024 * 1024 * 1024;
+        /// <summary>拒绝阈值：进程工作集（字节）。超过要 <c>force</c> 才放行。0 = 不检查。</summary>
+        internal static long BlockWorkingSetBytes
+        {
+            get { return GigabytesToBytes(CommandSystemSettings.MemoryBlockWorkingSetGB); }
+        }
 
-        /// <summary>拒绝阈值：系统可用物理内存（字节）。低于要 <c>force</c> 才放行。</summary>
-        internal const long BlockAvailableBytes = 4L * 1024 * 1024 * 1024;
+        /// <summary>提示阈值：系统可用物理内存（字节）。低于只警告。0 = 不检查。</summary>
+        internal static long WarnAvailableBytes
+        {
+            get { return GigabytesToBytes(CommandSystemSettings.MemoryWarnAvailableGB); }
+        }
 
-        /// <summary>提示阈值：编辑器已连续运行小时数。超过只警告。</summary>
-        internal const double WarnUptimeHours = 8.0;
+        /// <summary>拒绝阈值：系统可用物理内存（字节）。低于要 <c>force</c> 才放行。0 = 不检查。</summary>
+        internal static long BlockAvailableBytes
+        {
+            get { return GigabytesToBytes(CommandSystemSettings.MemoryBlockAvailableGB); }
+        }
+
+        /// <summary>提示阈值：编辑器已连续运行小时数。超过只警告。0 = 不检查。</summary>
+        internal static double WarnUptimeHours
+        {
+            get { return CommandSystemSettings.MemoryWarnUptimeHours; }
+        }
+
+        private static long GigabytesToBytes(float gigabytes)
+        {
+            if (float.IsNaN(gigabytes) || gigabytes <= 0f)
+            {
+                return 0L;
+            }
+
+            var bytes = (double)gigabytes * 1024.0 * 1024.0 * 1024.0;
+            return bytes >= long.MaxValue ? long.MaxValue : (long)bytes;
+        }
 
         /// <summary>一份内存水位采样</summary>
         internal sealed class Sample
@@ -120,23 +151,30 @@ namespace Aketsuki.UnityMcp.Editor
             var gb = sample.WorkingSetBytes / (1024.0 * 1024.0 * 1024.0);
             var availableGb = sample.AvailablePhysicalBytes / (1024.0 * 1024.0 * 1024.0);
 
-            if (sample.WorkingSetBytes > BlockWorkingSetBytes)
+            // 阈值配成 0 = 关闭这条判据。这里必须显式判 `> 0` 再比：
+            // 直接写 `WorkingSetBytes > BlockWorkingSetBytes` 时，阈值 0 会变成
+            // "工作集 > 0 就拦"，把"关闭"做成"见谁拦谁"——与意图完全相反。
+            var blockWorkingSet = BlockWorkingSetBytes;
+            var warnWorkingSet = WarnWorkingSetBytes;
+            if (blockWorkingSet > 0 && sample.WorkingSetBytes > blockWorkingSet)
             {
                 sample.Level = "block";
-                sample.Reasons.Add($"进程工作集 {gb:F1} GB，超过 {BlockWorkingSetBytes / (1024.0 * 1024.0 * 1024.0):F0} GB");
+                sample.Reasons.Add($"进程工作集 {gb:F1} GB，超过 {CommandSystemSettings.MemoryBlockWorkingSetGB:F1} GB");
             }
-            else if (sample.WorkingSetBytes > WarnWorkingSetBytes)
+            else if (warnWorkingSet > 0 && sample.WorkingSetBytes > warnWorkingSet)
             {
                 sample.Level = "warn";
                 sample.Reasons.Add($"进程工作集 {gb:F1} GB 偏高");
             }
 
-            if (sample.AvailablePhysicalBytes > 0 && sample.AvailablePhysicalBytes < BlockAvailableBytes)
+            var blockAvailable = BlockAvailableBytes;
+            var warnAvailable = WarnAvailableBytes;
+            if (blockAvailable > 0 && sample.AvailablePhysicalBytes > 0 && sample.AvailablePhysicalBytes < blockAvailable)
             {
                 sample.Level = "block";
-                sample.Reasons.Add($"系统可用内存 {availableGb:F1} GB，低于 {BlockAvailableBytes / (1024.0 * 1024.0 * 1024.0):F0} GB");
+                sample.Reasons.Add($"系统可用内存 {availableGb:F1} GB，低于 {CommandSystemSettings.MemoryBlockAvailableGB:F1} GB");
             }
-            else if (sample.AvailablePhysicalBytes > 0 && sample.AvailablePhysicalBytes < WarnAvailableBytes)
+            else if (warnAvailable > 0 && sample.AvailablePhysicalBytes > 0 && sample.AvailablePhysicalBytes < warnAvailable)
             {
                 if (sample.Level != "block")
                 {
@@ -146,7 +184,8 @@ namespace Aketsuki.UnityMcp.Editor
                 sample.Reasons.Add($"系统可用内存 {availableGb:F1} GB 偏低");
             }
 
-            if (sample.UptimeHours > WarnUptimeHours)
+            var warnUptime = WarnUptimeHours;
+            if (warnUptime > 0 && sample.UptimeHours > warnUptime)
             {
                 if (sample.Level != "block")
                 {

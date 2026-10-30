@@ -120,6 +120,51 @@ namespace Aketsuki.UnityMcp.Editor
         }
 
         /// <summary>
+        /// 归一化「要实例化的 Prefab 资产」参数（<c>prefab.instantiatePrefab</c> 的 asset）。
+        /// <para>
+        /// 与 <see cref="NormalizePrefabPath"/> 的差别：<b>不强加 .prefab 后缀</b>。
+        /// 源可以是 .fbx 之类的模型资产（Unity 一样能 <c>InstantiatePrefab</c>），
+        /// 所以只在「原样加载不到 + 本来也没有 .prefab 后缀」时才补一次后缀。
+        /// </para>
+        /// </summary>
+        public static string NormalizePrefabAssetPath(CommandContext context, string raw, string paramName)
+        {
+            var text = (raw ?? string.Empty).Trim().Replace('\\', '/').Trim('/');
+            if (text.Length == 0)
+            {
+                throw new CommandArgumentException(context.CommandId, paramName,
+                    $"{paramName} 不能为空（基于 Assets/ 的 Prefab 资产路径）");
+            }
+
+            if (!text.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new CommandArgumentException(context.CommandId, paramName,
+                    $"{paramName} 必须基于 Assets/：'{text}'");
+            }
+
+            if (AssetDatabase.LoadAssetAtPath<GameObject>(text) == null
+                && !text.EndsWith(".prefab", StringComparison.OrdinalIgnoreCase))
+            {
+                var withSuffix = text + ".prefab";
+                if (AssetDatabase.LoadAssetAtPath<GameObject>(withSuffix) != null)
+                {
+                    text = withSuffix;
+                }
+            }
+
+            try
+            {
+                CommandPathUtil.EnsureAccessible(System.IO.Path.GetFullPath(text));
+            }
+            catch (Exception ex)
+            {
+                throw new CommandArgumentException(context.CommandId, paramName, ex.Message);
+            }
+
+            return text;
+        }
+
+        /// <summary>
         /// 解析并挂组件。已存在同类型时：require=true 报错，否则跳过（幂等）。
         /// 返回实际新挂上的类型名清单。
         /// </summary>
@@ -542,6 +587,185 @@ namespace Aketsuki.UnityMcp.Editor
     }
 
     /// <summary>
+    /// 在 Prefab 资产内嵌一个<b>真正的嵌套 Prefab 实例</b>（FEAT-016）。
+    /// <para>
+    /// 为什么要有它：<c>prefab.duplicateNode</c> 复制嵌套实例时拿到的是<b>展开的普通节点树</b>
+    /// （<c>m_CorrespondingSourceObject</c> 全为 0，<c>PrefabInstanceStatus.NotAPrefab</c>），
+    /// 即"复制得很像但断了源头"——母 Prefab 里同一个子 Prefab 有几份实例时，
+    /// 源 Prefab 后续改图 / 改尺寸 / 加动画，只有本来就是实例的那几份跟着变，复制出来的各自走样。
+    /// <c>prefab.addNode</c> 的 copyFrom 同理是 <c>CopySerialized</c> 平铺数据，保不住连接。
+    /// </para>
+    /// <para>
+    /// 本指令用 <c>PrefabUtility.InstantiatePrefab</c>：新节点是源 Prefab 的实例
+    /// （<c>PrefabInstanceStatus.Connected</c>），源资产一改它跟着变。
+    /// </para>
+    /// <para>
+    /// 参数：prefab（必填，宿主 Prefab 资产路径）、asset（必填，要实例化的 Prefab 资产路径）、
+    /// parent（可选，宿主内父节点路径，空串 = 根）、name（可选，默认沿用源名）、index（可选，sibling 顺序）
+    /// </para>
+    /// </summary>
+    [Command("prefab.instantiatePrefab", Description = "在 Prefab 资产内嵌一个真正的嵌套 Prefab 实例（保留 Prefab 连接）",
+        Usage = "prefab: string, asset: string, parent: string, name: string, index: int",
+        EditorOnly = true)]
+    public sealed class PrefabInstantiatePrefabCommand : ICommand
+    {
+        public CommandResult Execute(CommandContext context)
+        {
+#if UNITY_EDITOR
+            var prefabPath = PrefabEditUtil.NormalizePrefabPath(context, context.Args.RequireString("prefab"));
+            var assetPath = PrefabEditUtil.NormalizePrefabAssetPath(context, context.Args.RequireString("asset"), "asset");
+            var parentSpec = context.Args.GetString("parent", string.Empty);
+            var name = context.Args.GetString("name", null);
+            var index = context.Args.GetInt("index", -1);
+
+            // 源资产在进 Prefab 内容之前先取好：进入 LoadPrefabContents 后再做资产加载，
+            // 等于在一份临时场景里多挂一次，没必要，也让"源不存在"的报错早点发生。
+            var assetObject = AssetDatabase.LoadAssetAtPath<GameObject>(assetPath);
+            if (assetObject == null)
+            {
+                throw new CommandArgumentException(context.CommandId, "asset",
+                    $"找不到源 Prefab '{assetPath}'（路径要基于 Assets/、指向一个 Prefab / 模型资产）");
+            }
+
+            var assetType = PrefabUtility.GetPrefabAssetType(assetObject);
+            if (assetType == PrefabAssetType.MissingAsset || assetType == PrefabAssetType.NotAPrefab)
+            {
+                throw new CommandArgumentException(context.CommandId, "asset",
+                    $"'{assetPath}' 不是可实例化的 Prefab 资产（PrefabAssetType={assetType}）");
+            }
+
+            return PrefabEditUtil.EditPrefab(context, prefabPath, root =>
+            {
+                var parent = SetComponentFieldCommand.FindInPrefab(root, parentSpec);
+                if (parent == null)
+                {
+                    throw new CommandArgumentException(context.CommandId, "parent",
+                        $"Prefab '{prefabPath}' 里找不到父节点 '{parentSpec}'（空串表示根节点）");
+                }
+
+                var instance = PrefabUtility.InstantiatePrefab(assetObject, parent) as GameObject;
+                if (instance == null)
+                {
+                    throw new CommandException(
+                        $"实例化 '{assetPath}' 失败（PrefabUtility.InstantiatePrefab 返回空；" +
+                        "该资产可能不是 Prefab 资产根）");
+                }
+
+                if (!string.IsNullOrEmpty(name))
+                {
+                    instance.name = name;
+                }
+
+                var siblingIndex = instance.transform.GetSiblingIndex();
+                if (index >= 0)
+                {
+                    // InstantiatePrefab 挂上去时是最后一个子节点；SetSiblingIndex 的合法区间是
+                    // [0, childCount-1]，越界 Unity 会自己夹到末尾，这里显式夹一下好回显真实落点。
+                    var clamped = index;
+                    var last = parent.childCount - 1;
+                    if (clamped > last)
+                    {
+                        clamped = last;
+                    }
+
+                    instance.transform.SetSiblingIndex(clamped);
+                    siblingIndex = instance.transform.GetSiblingIndex();
+                }
+
+                var status = PrefabUtility.GetPrefabInstanceStatus(instance);
+                var path = PrefabEditCommandsUtil.BuildNodePath(instance.transform);
+
+                var data = JsonValue.NewObject();
+                data.Set("prefab", JsonValue.Of(prefabPath));
+                data.Set("asset", JsonValue.Of(assetPath));
+                data.Set("path", JsonValue.Of(path));
+                data.Set("instanceStatus", JsonValue.Of(status.ToString()));
+                data.Set("connected", JsonValue.Of(status == PrefabInstanceStatus.Connected));
+                data.Set("siblingIndex", JsonValue.Of(siblingIndex));
+                data.Set("childCount", JsonValue.Of(instance.transform.childCount));
+
+                var message = $"已在 {prefabPath} 的 {parent.name} 下实例化 {assetPath}"
+                              + $" → {path}（{status}）";
+                if (status != PrefabInstanceStatus.Connected)
+                {
+                    // 不静默：这正是本指令要解决的问题，没连上等于白做
+                    data.Set("warning", JsonValue.Of(
+                        $"实例状态是 {status} 而不是 Connected：源 Prefab 以后的改动不会同步到这个节点"));
+                    message += $"（注意：状态是 {status}，源 Prefab 改动不会同步到这里）";
+                }
+
+                return CommandResult.Ok(message, data);
+            });
+#else
+            throw new CommandException($"指令 '{context.CommandId}' 只能在编辑器内执行");
+#endif
+        }
+    }
+
+    /// <summary>
+    /// 给 Prefab 资产内的节点改名（FEAT-016 顺带的缺口之一）。
+    /// <para>
+    /// 为什么单独一条：<c>gameobject.rename</c> 只在<b>当前已加载场景</b>里找节点，
+    /// 传 <c>prefab</c> 会落到场景里去找、报「找不到节点（当前已加载场景：Global.unity）」。
+    /// 于是 prefab 域想改个名只能走「duplicateNode 新节点 + 重绑字段 + removeNode 旧节点」，
+    /// 一条改名变成三条，还有丢引用的风险。
+    /// </para>
+    /// <para>参数：prefab（必填）、target（必填，节点路径，空串 = 根）、name（必填，新名字）</para>
+    /// </summary>
+    [Command("prefab.renameNode", Description = "给 Prefab 资产内的节点改名（prefab 域的 gameobject.rename）",
+        Usage = "prefab: string, target: string, name: string",
+        EditorOnly = true)]
+    public sealed class PrefabRenameNodeCommand : ICommand
+    {
+        public CommandResult Execute(CommandContext context)
+        {
+#if UNITY_EDITOR
+            var prefabPath = PrefabEditUtil.NormalizePrefabPath(context, context.Args.RequireString("prefab"));
+            var targetSpec = context.Args.RequireString("target");
+            var name = context.Args.RequireString("name");
+
+            return PrefabEditUtil.EditPrefab(context, prefabPath, root =>
+            {
+                var node = SetComponentFieldCommand.FindInPrefab(root, targetSpec);
+                if (node == null)
+                {
+                    throw new CommandArgumentException(context.CommandId, "target",
+                        $"Prefab '{prefabPath}' 里找不到节点 '{targetSpec}'（空串表示根节点）");
+                }
+
+                var oldName = node.name;
+                var oldPath = PrefabEditCommandsUtil.BuildNodePath(node);
+                if (string.Equals(oldName, name, StringComparison.Ordinal))
+                {
+                    var same = JsonValue.NewObject();
+                    same.Set("prefab", JsonValue.Of(prefabPath));
+                    same.Set("path", JsonValue.Of(oldPath));
+                    same.Set("renamed", JsonValue.Of(false));
+                    return CommandResult.Ok($"{oldPath} 名字已经是 '{name}'，未改动（幂等）", same);
+                }
+
+                node.name = name;
+                var path = PrefabEditCommandsUtil.BuildNodePath(node);
+
+                var data = JsonValue.NewObject();
+                data.Set("prefab", JsonValue.Of(prefabPath));
+                data.Set("path", JsonValue.Of(path));
+                data.Set("oldName", JsonValue.Of(oldName));
+                data.Set("oldPath", JsonValue.Of(oldPath));
+                data.Set("renamed", JsonValue.Of(true));
+                data.Set("warning", JsonValue.Of(
+                    "Unity 内部按 fileID 引用节点，改名不会断资产引用；" +
+                    "但代码里按名字 Find(\"" + oldName + "\") 的地方会失效，需自行检查"));
+
+                return CommandResult.Ok($"已把 {oldPath} 改名为 {name}（{prefabPath}）", data);
+            });
+#else
+            throw new CommandException($"指令 '{context.CommandId}' 只能在编辑器内执行");
+#endif
+        }
+    }
+
+    /// <summary>
     /// 列出 Prefab 资产的节点树（路径 / 组件类型 / 激活状态）——B4。
     /// <para>
     /// 只读：LoadPrefabContents 后走与 <c>scene.hierarchy</c> 同一套节点序列化，不做保存。
@@ -570,13 +794,18 @@ namespace Aketsuki.UnityMcp.Editor
             try
             {
                 var total = 0;
-                var nodes = Visit(root.transform, 0, maxDepth, ref total);
+                var instances = 0;
+                var nodes = Visit(root.transform, 0, maxDepth, ref total, ref instances);
 
                 var result = JsonValue.NewObject();
                 result.Set("prefab", JsonValue.Of(prefabPath));
                 result.Set("count", JsonValue.Of(total));
+                result.Set("instanceCount", JsonValue.Of(instances));
                 result.Set("nodes", nodes);
-                return CommandResult.Ok($"Prefab 共 {total} 个节点（maxDepth={maxDepth}）", result);
+                return CommandResult.Ok(
+                    $"Prefab 共 {total} 个节点（maxDepth={maxDepth}"
+                    + (instances > 0 ? $"，其中 {instances} 个是嵌套 Prefab 实例" : string.Empty) + "）",
+                    result);
             }
             finally
             {
@@ -587,23 +816,67 @@ namespace Aketsuki.UnityMcp.Editor
 #endif
         }
 
-        private static JsonValue Visit(Transform node, int depth, int maxDepth, ref int total)
+        private static JsonValue Visit(Transform node, int depth, int maxDepth, ref int total, ref int instances)
         {
             total++;
             var item = SceneQueryCommandsUtil.NodeToJson(node);
             item.Set("childCount", JsonValue.Of(node.childCount));
+            AttachInstanceInfo(item, node, ref instances);
 
             var children = JsonValue.NewArray();
             if (maxDepth < 0 || depth < maxDepth)
             {
                 for (var i = 0; i < node.childCount; i++)
                 {
-                    children.Add(Visit(node.GetChild(i), depth + 1, maxDepth, ref total));
+                    children.Add(Visit(node.GetChild(i), depth + 1, maxDepth, ref total, ref instances));
                 }
             }
 
             item.Set("children", children);
             return item;
+        }
+
+        /// <summary>
+        /// 给节点补上"我是不是嵌套 Prefab 实例、来自哪个资产"（FEAT-016 顺带的缺口之二）。
+        /// <para>
+        /// 原来树里看不出实例身份：嵌套实例在 YAML 里是 <c>!u!1001</c> 的 PrefabInstance 块，
+        /// 排查"这个节点为什么没跟着源 Prefab 变"只能回头翻 YAML。
+        /// 现在每个实例节点都带 <c>isPrefabInstance</c> / <c>instanceStatus</c> / <c>sourceAsset</c>，
+        /// <c>Disconnected</c> / <c>MissingAsset</c> 一眼可见——那正是"断了源头"的信号。
+        /// </para>
+        /// <para>非实例节点不加字段（而不是加 <c>false</c>）：老调用方解析不受影响，树也不会平白变大。</para>
+        /// </summary>
+        private static void AttachInstanceInfo(JsonValue item, Transform node, ref int instances)
+        {
+            var status = PrefabUtility.GetPrefabInstanceStatus(node.gameObject);
+            if (status == PrefabInstanceStatus.NotAPrefab)
+            {
+                return;
+            }
+
+            // 注意：实例**内部**的节点（比如 RedDot 下的 sign）GetPrefabInstanceStatus 也是 Connected，
+            // 所以"是不是实例"和"是不是实例根"是两件事。计数只数根，
+            // 否则一个带 3 个子节点的实例会被记成 4 个实例，跟 YAML 里的 PrefabInstance 块对不上。
+            var nearestRoot = PrefabUtility.GetNearestPrefabInstanceRoot(node.gameObject);
+            var isRoot = nearestRoot == node.gameObject;
+            if (isRoot)
+            {
+                instances++;
+                item.Set("isPrefabInstanceRoot", JsonValue.Of(true));
+            }
+
+            item.Set("isPrefabInstance", JsonValue.Of(true));
+            item.Set("instanceStatus", JsonValue.Of(status.ToString()));
+
+            var source = PrefabUtility.GetCorrespondingObjectFromSource(node.gameObject);
+            if (source != null)
+            {
+                var assetPath = AssetDatabase.GetAssetPath(source);
+                if (!string.IsNullOrEmpty(assetPath))
+                {
+                    item.Set("sourceAsset", JsonValue.Of(assetPath));
+                }
+            }
         }
     }
 

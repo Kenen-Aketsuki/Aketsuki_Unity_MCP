@@ -206,6 +206,14 @@ python Tools/deploy.py --module adb <目标> --verify   # 本机其它工程（�
 | IMPR-009(2026) | 指令系统窗口压矮后能整体滚到底 | 要人看窗口 | 打开「工具 / 指令系统 / 指令控制台」，把窗口高度拖到很小，确认「已注册指令」「运行日志」能滚到 |
 | BUG-007 / 008 | 一条设备端 `Debug.Log` 在控制台只占一行（`.ctor` / lambda / 本地函数三种写法） | 要设备或模拟器 | ADB 调试台连模拟器，`adb.logcat.start` → 打日志 → `adb.logcat.read` |
 | BUG-009 | 日志安静几秒后自己打的 Log 仍带调用栈 | 同上 | 同上，静默 10 秒后再打一条 |
+| FEAT-016 | `prefab.instantiatePrefab` 走 HTTP 下发后，新节点确实是 `Connected` 实例 | 要一个正常回指令的编辑器 | 找个含子 Prefab 的母 Prefab 下发一条，看返回 `instanceStatus` 与 YAML 里的 `!u!1001` 块 |
+| FEAT-016 | `prefab.renameNode` 真的改名且实例连接不断 | 同上 | 改一个嵌套实例根的名字，再 `prefab.tree` 看 `instanceStatus` 仍为 `Connected` |
+| FEAT-016 | `prefab.tree` 的 `instanceCount` 只数实例根 | 同上 | 数一数母 Prefab 里子 Prefab 实例的个数，应与 `instanceCount` 相等（不是"实例节点总数"） |
+| IMPR-008(2026) | 控制台改阈值后下一次执行立即生效 | 要开着的编辑器 | 把「工作集 提示档」改成 1 GB，再 `editor.state` 看 `memory.thresholds` 跟着变 |
+
+> **已真机验证（不是"看起来对"）**：FEAT-016 依赖的 `PrefabUtility` 行为已用临时探针在本仓库
+> Unity 2021.3.16f1c1 上跑过——Prefab 内容里 `InstantiatePrefab` → `Connected`、改名后仍 `Connected`、
+> `GetNearestPrefabInstanceRoot` 能区分实例根与实例内部节点。上面剩下的是**指令端到端**没跑。
 
 > 已经实测过的：IMPR-014（0.13 秒）、IMPR-019 / IMPR-001（嵌套读 `[1,1,1,1]`）、
 > IMPR-008 的采样与"提示"分支（island_back 真机 `workingSetGB=23.49`、`level=warn`）。

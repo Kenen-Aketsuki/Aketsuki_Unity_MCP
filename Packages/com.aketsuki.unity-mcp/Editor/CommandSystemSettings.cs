@@ -48,6 +48,12 @@ namespace Aketsuki.UnityMcp.Editor
         private const string KeyFullDelegation = Prefix + "FullDelegationEnabled";
         private const string KeyConsentTimeout = Prefix + "ConsentTimeoutSeconds";
 
+        private const string KeyMemoryWarnWorkingSetGB = Prefix + "MemoryWarnWorkingSetGB";
+        private const string KeyMemoryBlockWorkingSetGB = Prefix + "MemoryBlockWorkingSetGB";
+        private const string KeyMemoryWarnAvailableGB = Prefix + "MemoryWarnAvailableGB";
+        private const string KeyMemoryBlockAvailableGB = Prefix + "MemoryBlockAvailableGB";
+        private const string KeyMemoryWarnUptimeHours = Prefix + "MemoryWarnUptimeHours";
+
         /// <summary>记录"全局旧值已被哪个工程继承"，保证迁移只发生一次</summary>
         private const string KeyLegacyOwner = Prefix + "LegacyPrefsOwner";
 
@@ -338,6 +344,83 @@ namespace Aketsuki.UnityMcp.Editor
 
         #endregion
 
+        #region 进 Play 前的内存水位阈值（IMPR-008，用户批注：改成可配置）
+
+        // 这四个值原本是 PlayModeMemoryGuard 里的硬编码常量。用户拍板"可以开配置"，
+        // 因为阈值是**机器**属性不是工程属性：16 GB 笔记本上 16 GB 的提示档几乎永不触发，
+        // 而大内存工作站上又可能想提前拦。所以放全局区（与 WatchdogSeconds 同类），
+        // 一台机器配一次，所有工程都吃这套值。
+        //
+        // 单位刻意用 GB / 小时：让人在控制台里填"16"而不是"17179869184"。
+        // 0 = 关闭该档检查（不是"超过 0 就拦"），用来在特殊机器上彻底关掉某一条判据。
+
+        public const float DefaultMemoryWarnWorkingSetGB = 16f;
+        public const float DefaultMemoryBlockWorkingSetGB = 24f;
+        public const float DefaultMemoryWarnAvailableGB = 8f;
+        public const float DefaultMemoryBlockAvailableGB = 4f;
+        public const float DefaultMemoryWarnUptimeHours = 8f;
+
+        /// <summary>提示档：进程工作集（GB）。超过只警告，仍执行。0 = 不检查。</summary>
+        public static float MemoryWarnWorkingSetGB
+        {
+            get { return ClampGigabytes(EditorPrefs.GetFloat(KeyMemoryWarnWorkingSetGB, DefaultMemoryWarnWorkingSetGB)); }
+            set { EditorPrefs.SetFloat(KeyMemoryWarnWorkingSetGB, ClampGigabytes(value)); }
+        }
+
+        /// <summary>拒绝档：进程工作集（GB）。超过要 force:true 才放行。0 = 不检查。</summary>
+        public static float MemoryBlockWorkingSetGB
+        {
+            get { return ClampGigabytes(EditorPrefs.GetFloat(KeyMemoryBlockWorkingSetGB, DefaultMemoryBlockWorkingSetGB)); }
+            set { EditorPrefs.SetFloat(KeyMemoryBlockWorkingSetGB, ClampGigabytes(value)); }
+        }
+
+        /// <summary>提示档：系统可用物理内存（GB）。低于只警告。0 = 不检查。</summary>
+        public static float MemoryWarnAvailableGB
+        {
+            get { return ClampGigabytes(EditorPrefs.GetFloat(KeyMemoryWarnAvailableGB, DefaultMemoryWarnAvailableGB)); }
+            set { EditorPrefs.SetFloat(KeyMemoryWarnAvailableGB, ClampGigabytes(value)); }
+        }
+
+        /// <summary>拒绝档：系统可用物理内存（GB）。低于要 force:true 才放行。0 = 不检查。</summary>
+        public static float MemoryBlockAvailableGB
+        {
+            get { return ClampGigabytes(EditorPrefs.GetFloat(KeyMemoryBlockAvailableGB, DefaultMemoryBlockAvailableGB)); }
+            set { EditorPrefs.SetFloat(KeyMemoryBlockAvailableGB, ClampGigabytes(value)); }
+        }
+
+        /// <summary>提示档：编辑器已连续运行小时数。超过只警告。0 = 不检查。</summary>
+        public static float MemoryWarnUptimeHours
+        {
+            get { return ClampHours(EditorPrefs.GetFloat(KeyMemoryWarnUptimeHours, DefaultMemoryWarnUptimeHours)); }
+            set { EditorPrefs.SetFloat(KeyMemoryWarnUptimeHours, ClampHours(value)); }
+        }
+
+        /// <summary>
+        /// 把 GB 值收进合法区间；非法值（NaN / 负数）一律按 0 = 关闭处理。
+        /// <para>为什么不抛异常：这是控制台里手填的数，填错让"这条判据失效"好过让指令报错。</para>
+        /// </summary>
+        private static float ClampGigabytes(float value)
+        {
+            if (float.IsNaN(value) || value <= 0f)
+            {
+                return 0f;
+            }
+
+            return value > 1024f ? 1024f : value;
+        }
+
+        private static float ClampHours(float value)
+        {
+            if (float.IsNaN(value) || value <= 0f)
+            {
+                return 0f;
+            }
+
+            return value > 720f ? 720f : value;
+        }
+
+        #endregion
+
         /// <summary>恢复默认设置（只清本工程的那份 + 全局偏好）</summary>
         public static void Reset()
         {
@@ -355,6 +438,12 @@ namespace Aketsuki.UnityMcp.Editor
             EditorPrefs.DeleteKey(KeyDeleteAfterRun);
             EditorPrefs.DeleteKey(KeyStopOnError);
             EditorPrefs.DeleteKey(KeyWatchdogSeconds);
+
+            EditorPrefs.DeleteKey(KeyMemoryWarnWorkingSetGB);
+            EditorPrefs.DeleteKey(KeyMemoryBlockWorkingSetGB);
+            EditorPrefs.DeleteKey(KeyMemoryWarnAvailableGB);
+            EditorPrefs.DeleteKey(KeyMemoryBlockAvailableGB);
+            EditorPrefs.DeleteKey(KeyMemoryWarnUptimeHours);
         }
     }
 }
