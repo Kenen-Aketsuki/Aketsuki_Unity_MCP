@@ -37,6 +37,8 @@ Unity **编辑器扩展** + 一层 **Python 桥**，让你（或 AI）用 HTTP /
 cd D:/Work/Aketsuki_Unity_MCP
 
 # ① 服务活着吗（Unity 编辑器必须开着，且菜单里开过 HTTP 指令服务）
+#    看返回里的 pump.alive：它是 false 就别往下走了 —— compiling/updating/busy
+#    都是每帧快照，泵停摆时会冻结成旧值，此时发指令只会卡到超时（详见 §5.1）
 python Packages/com.aketsuki.unity-mcp/Editor/McpBridge/send.py \
        --project-root D:/Work/MyUnityProject status
 
@@ -115,6 +117,21 @@ ADB 工具只写一处：`Packages/com.aketsuki.adb-debugger/Editor/`（27 个�
 19 条正例 / 15 条反例，还会校验脚本里的正则副本与 C# 源码是否一致（IMPR-017 用户批注：
 脚本可以持久化，但**不进 Unity 包**，所以它只在仓库 `Tools/` 下）。
 
+### 5.1 编辑器在线但吊着不动：先判「泵死了没有」
+
+`compiling` / `updating` / `busy` 都是**每帧快照**（主线程 API，只能在 `EditorApplication.update`
+里取），泵停摆后就冻在旧值上，而 HTTP 监听线程照样应答——表现是"status 一切正常、
+队列里的指令却永不消费"。判据只看两条：
+
+1. `/v1/status` 的 `pump.alive`（顶层 `stale` 是它的取反）：`false` = 停摆，
+   此时那份 `compiling/updating/busy` **一律不可信**。5 秒阈值写在
+   `HttpProtocol.StaleSnapshotMs`；正在同步执行指令时不判停摆（那时 update 不推进是正常忙碌，
+   该看 `currentCommandId` / `currentElapsedMs`）。
+2. Unity 进程 CPU 增量（6 秒内 ≈0 秒 + `queue` 不降 = 死了）。
+
+**确认停摆后没有自愈手段**——指令系统跑在被卡住的进程里，自己救不了自己。只有重启该工程的
+Unity 编辑器，而那是用户手上的现场，必须由人决定（IMPR-021）。
+
 ## 6. 分发给别人
 
 两个工具都是 UPM 包，分发就是给包目录，没有打包步骤：
@@ -188,6 +205,7 @@ python Tools/deploy.py --module adb <目标> --verify   # 本机其它工程（�
 | IMPR-017 | 已执行（用户批注） | `Tools/test_stack_frame.py`（34 条用例），**不进 Unity 包**；改栈帧正则先跑它 |
 | BUG-010 | **已改未实测** | `runtime.hierarchy` 的 name 模式：limit 改为「命中上限」、遍历不限量。过了真机编译与部署，真机复验要进 Play 模式（`runtime.*` 双门禁 + `editor.play` 需人工确认，脚本跑不了），见 `待拍板-2026-10-28.md` |
 | IMPR-007(2026) | 已实测 | `component.setField(s)` 支持数组 / `List<T>`：island_back 上用 `List<Transform>`（节点路径）与 `Color[]` 实跑通过 |
+| IMPR-021 | 已实现并真机验证（CLR 探针） | `/v1/status` 新增 `pump` 块与 `stale`：`compiling` / `updating` / `busy` 都是每帧快照，泵停摆后会冻结成旧值骗人。判据是 `pump.alive`（5 秒无新快照且无指令在执行 = 停摆）；`send.py` 会在下发前警告。**停摆后没有自愈手段**，只能重启该工程编辑器 |
 | Phase 2 | 未开工 | 跨帧执行器、`runtime.screenshot`、断言原语、`runtime.invoke`。见 `FEAT-001` 末尾 |
 
 ### 8.1 已改未实测清单（IMPR-020，用户批注：写进交接文档即可，31 号前不安排复验专场）
@@ -211,6 +229,11 @@ python Tools/deploy.py --module adb <目标> --verify   # 本机其它工程（�
 | FEAT-016 | `prefab.tree` 的 `instanceCount` 只数实例根 | 同上 | 数一数母 Prefab 里子 Prefab 实例的个数，应与 `instanceCount` 相等（不是"实例节点总数"） |
 | IMPR-008(2026) | 控制台改阈值后下一次执行立即生效 | 要开着的编辑器 | 把「工作集 提示档」改成 1 GB，再 `editor.state` 看 `memory.thresholds` 跟着变 |
 
+> **⚠ 2026-11-01 现场**：`MyUnityProject` 的编辑器**主线程泵处于停摆状态**
+> （`queue` 只增不减、6 秒 CPU 增量 0.031 秒），所以本轮所有指令都下发不了、HTTP 编译也没跑成。
+> 上面那几条「要编辑器正常回指令」的复验会一直挂着，直到有人重启那个编辑器。
+> 不要把这个状态当成"指令系统坏了"——同一套代码在另外三个工程里正常。详见 §5.1。
+>
 > **已真机验证（不是"看起来对"）**：FEAT-016 依赖的 `PrefabUtility` 行为已用临时探针在本仓库
 > Unity 2021.3.16f1c1 上跑过——Prefab 内容里 `InstantiatePrefab` → `Connected`、改名后仍 `Connected`、
 > `GetNearestPrefabInstanceRoot` 能区分实例根与实例内部节点。上面剩下的是**指令端到端**没跑。

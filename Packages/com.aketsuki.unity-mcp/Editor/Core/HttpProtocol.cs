@@ -272,6 +272,24 @@ namespace Aketsuki.UnityMcp
         long CurrentElapsedMs { get; }
 
         /// <summary>
+        /// 主线程执行泵最后一次跑过的时刻（Unix 毫秒，UTC）。
+        /// <para>
+        /// 判据用途：<c>compiling</c> / <c>updating</c> 只能在主线程读，所以服务端存的是<b>每帧快照</b>。
+        /// 泵一旦停摆（异常、模态循环、主线程被阻塞），这些值就冻在旧值上，而 HTTP 监听线程照样应答，
+        /// 于是 <c>status</c> 看起来"不忙、没在编译"——AI 会拿过期状态当真的，一直等到超时。
+        /// 有了时间戳，客户端就能自己算出"这份快照有多旧"。
+        /// </para>
+        /// </summary>
+        long PumpHeartbeatMs { get; }
+
+        /// <summary>
+        /// 主线程执行泵已经跑过的帧数（单调递增计数器）。
+        /// <para>与 <see cref="PumpHeartbeatMs"/> 互补：时间戳回答"最后一次活在什么时候"，
+        /// 计数器回答"有没有在某段时间里推进过"（两次采样相减即可，不受时钟漂移影响）。</para>
+        /// </summary>
+        long PumpFrameCount { get; }
+
+        /// <summary>
         /// 取一次成功执行的报告缓存（按 requestId）；未命中返回 null。
         /// <para>用于 <c>POST /v1/execute?requestId=xxx</c> 的重放幂等：命中缓存则不二次执行。</para>
         /// </summary>
@@ -516,6 +534,7 @@ namespace Aketsuki.UnityMcp
             // 执行进度：卡住的指令一眼可见（主线程被占住时 elapsed 仍在增长，说明确实在跑）
             payload.Set("currentCommandId", JsonValue.Of(env.CurrentCommandId ?? string.Empty));
             payload.Set("currentElapsedMs", JsonValue.Of(env.CurrentElapsedMs));
+            WritePump(payload, env);
             // 上次编译结果：AI 改完代码后可直接从 status 判断"编译过没过"
             var compile = env.CompileSummary;
             if (compile != null)
@@ -540,6 +559,82 @@ namespace Aketsuki.UnityMcp
 
             WriteIdentity(payload, env);
             return HttpResponse.Ok(payload);
+        }
+
+        /// <summary>Unix 纪元（UTC），用于手写时间戳换算</summary>
+        private static readonly DateTime UnixEpoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+
+        /// <summary>
+        /// 快照新鲜度的判定阈值（毫秒）
+        /// <para>
+        /// 编辑器主循环正常时每帧（几十毫秒）就刷新一次快照；给 5 秒是为了留足余量——
+        /// 主线程被 Unity 自己的重量级操作占住时（大批量资源导入、带取消按钮的模态进度条），
+        /// <c>EditorApplication.update</c> 同样不会推进，那属于正常忙碌，不该报停摆。
+        /// </para>
+        /// </summary>
+        private const long StaleSnapshotMs = 5000;
+
+        /// <summary>当前 UTC 时刻（Unix 毫秒）</summary>
+        internal static long NowUtcMs()
+        {
+            return (long)(DateTime.UtcNow - UnixEpoch).TotalMilliseconds;
+        }
+
+        /// <summary>
+        /// 写入主线程泵的新鲜度块（<c>pump</c>）+ 顶层 <c>stale</c> 标记。
+        /// <para>
+        /// 为什么要有这个：<c>compiling</c> / <c>updating</c> / <c>busy</c> 都来自每帧快照，
+        /// 泵停摆后就冻在旧值上，而 HTTP 监听线程照样应答，于是 <c>status</c> 看起来"一切正常"。
+        /// 2026-10-30 实测踩过：queue 卡在 2 半小时不动，status 始终报 busy=false。
+        /// 有了时刻戳与帧计数，客户端就能自己算出"这份快照是不是旧的"。
+        /// </para>
+        /// </summary>
+        private static void WritePump(JsonValue payload, IHttpEnvironment env)
+        {
+            var beatMs = env.PumpHeartbeatMs;
+            var frames = env.PumpFrameCount;
+
+            // 0 表示泵一次都没跑过（服务刚起来、或根本没挂上 update 钩子）
+            var unknown = beatMs <= 0;
+            var ageMs = unknown ? -1L : NowUtcMs() - beatMs;
+            if (ageMs < 0 && !unknown)
+            {
+                ageMs = 0;
+            }
+
+            // 有指令正在同步执行时不判停摆：单条指令执行期间主线程被占住，
+            // update 不推进是正常忙碌，不是死了。此时该看 currentCommandId / currentElapsedMs
+            // （它们读的是运行器实例本身，不是快照，跨线程能拿到实时值）。
+            var executing = !string.IsNullOrEmpty(env.CurrentCommandId);
+            var stale = !executing && (unknown || ageMs > StaleSnapshotMs);
+
+            var pump = JsonValue.NewObject();
+            pump.Set("alive", JsonValue.Of(!stale));
+            pump.Set("snapshotAgeMs", JsonValue.Of(ageMs));
+            pump.Set("snapshotUpdatedUtc", JsonValue.Of(
+                unknown ? string.Empty : UnixEpoch.AddMilliseconds(beatMs).ToString("o")));
+            pump.Set("frames", JsonValue.Of(frames));
+            pump.Set("executing", JsonValue.Of(executing));
+
+            var note = string.Empty;
+            if (stale)
+            {
+                var pending = env.PendingCount;
+                var how = unknown
+                    ? "主线程泵从没有跑过"
+                    : "主线程泵已 " + (ageMs / 1000.0).ToString("0.0") + " 秒没有推进";
+                note = pending > 0
+                    ? how + "：队列里还有 " + pending + " 条指令不会被消费，"
+                      + "compiling / updating / busy 都是冻结的旧值，不可信。"
+                      + "常见原因是 Unity 主线程被阻塞或被模态循环卡住，需要人工处理（通常是重启编辑器）。"
+                    : how + "：这份状态里的 compiling / updating / busy 是冻结的旧值，不可信。";
+            }
+
+            pump.Set("note", JsonValue.Of(note));
+
+            payload.Set("pump", pump);
+            // 顶层再放一个布尔，方便脚本一行判出来，不用往下钻一层
+            payload.Set("stale", JsonValue.Of(stale));
         }
 
         /// <summary>

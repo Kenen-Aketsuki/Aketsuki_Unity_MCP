@@ -449,13 +449,46 @@ data: { "pending": true, "consentId": "c1005130120ae", "timeoutSeconds": 30, "re
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
 | GET | `/v1/ping` | 存活检测，返回协议版本与端口 |
-| GET | `/v1/status` | 编辑器状态：`compiling` / `updating` / `queue` / `busy` / `last` / `currentCommandId` / `currentElapsedMs` / `lastCompile` |
+| GET | `/v1/status` | 编辑器状态：`compiling` / `updating` / `queue` / `busy` / `last` / `currentCommandId` / `currentElapsedMs` / `lastCompile` / **`pump` + `stale`** |
 | GET | `/v1/commands` | 已注册指令列表（含 `usage` 参数说明与 `editorOnly` 标记） |
 | POST | `/v1/execute` | 下发指令；body 就是指令文件的 JSON 文本。查询串可带 `requestId` 做幂等重放 |
 | POST | `/v1/cancel` | 请求协作式取消：当前批次在**下一条指令前**干净退出 |
 
 请求头必须带 `X-Cmd-Token`（值取自信息文件）。服务端只绑 `127.0.0.1` 并校验 Host 头，
 所以本 Skill 不能被用于访问远端机器。
+
+### 判断「编辑器泵是不是死了」：先看 `pump.alive`
+
+`compiling` / `updating` / `busy` 都是**每帧快照**（`EditorPrefs` 与 `EditorApplication.isPlaying`
+只能在主线程读），由 `EditorApplication.update` 刷新。**泵一停摆，这些值就冻在旧值上**，
+而 HTTP 监听线程照样应答——于是 `status` 看起来"一切正常、不忙、没在编译"，
+AI 会拿着过期状态傻等到超时（2026-10-30 实测：`queue` 卡住半小时，`status` 始终报 `busy:false`）。
+
+`/v1/status` 因此多带一组**新鲜度事实**（顶层 `stale` 是同一件事的布尔缩写）：
+
+| 字段 | 含义 |
+| --- | --- |
+| `pump.alive` | 主线程泵是否还在推进（**唯一该先看的值**） |
+| `pump.snapshotAgeMs` | 当前这份快照有多旧（毫秒）；`-1` = 泵从没跑过 |
+| `pump.snapshotUpdatedUtc` | 快照最后一次刷新的时刻 |
+| `pump.frames` | 泵累计跑了多少帧（两次采样相减即可判断是否推进，不受时钟影响） |
+| `pump.executing` | 是否有指令正在同步执行（有则快照冻结是正常忙碌，不判停摆） |
+| `pump.note` | 停摆时的一句人话结论 |
+| `stale` | 顶层布尔，`pump.alive` 取反，方便脚本一行判出来 |
+
+判据（**顺序固定，别跳步**）：
+
+1. `stale: true` → 这份 `compiling` / `updating` / `busy` **都不可信**，队列里的指令也永远不会被消费。
+   此时该看的不是 `queue`，而是**重启该工程的 Unity 编辑器**——停摆原因通常是主线程被阻塞或卡进模态循环，
+   客户端这边没有任何自愈手段。
+2. `stale: false` 但 `queue` 长时间不降 → 回到"连错了进程"那条排查（见下方纪律），或看 `currentCommandId`
+   是否有指令真的在跑（此时 `currentElapsedMs` 会持续增长，是真实进展，不是卡死）。
+3. 两者都不是 → 正常。
+
+`send.py status` 会在 `stale` 为真时往 stderr 打一行 `⚠` 提示；`send` / `seq` / `compile` 在下发前
+也会先说一句再动手，不至于让你对着一个必然超时的请求干等 `--timeout` 秒。
+旧版服务端没有 `pump` 块——那时这条判据不可用，只能靠 `queue` + 进程 CPU 增量（6 秒内 ≈0 秒基本就是死了）。
+
 
 ### 幂等重放（`requestId`）
 
@@ -518,8 +551,11 @@ HTTP 状态码只表示"请求是否被处理"，**业务结果看 body 里的 `
 ## 纪律（这些是踩过的坑，别绕）
 
 - **先 `status` 再 `send`**。`compiling` 或 `updating` 为真时主线程泵不推进，
-  发过去也是等到超时。要么等，要么先告诉用户。
-- **`queue` 只增不减、或卡在"执行中"时，先怀疑"连错了进程"，别怪焦点**（2026-10-16 实测结论，
+  发过去也是等到超时。要么等，要么先告诉用户。**同时看一眼 `pump.alive`**（见上文）：
+  它为 `false` 时那两个 flag 是冻结的旧值，"看起来不忙"不代表能收指令。
+- **`queue` 只增不减、或卡在"执行中"时**：先用 `pump.alive` 把"泵死了"和"连错了进程"分开——
+  前者 `stale:true`（只能重启编辑器），后者 `identity.role` 不是 `editor`。
+  确认泵还活着，再按下面的清单排"连错进程"这条（2026-10-16 实测结论，
   此前写的"失焦导致停摆"是误判，已更正）。
   Unity 的**资源导入工作进程**（`AssetImportWorker0/1`，命令行带 `-batchMode`）也会加载 Editor 程序集、
   执行 `[InitializeOnLoad]`，于是同样会起监听、并写自己的信息文件。

@@ -84,6 +84,15 @@ namespace Aketsuki.UnityMcp.Editor
         private bool _isCompiling;
         private bool _isUpdating;
 
+        /// <summary>
+        /// 主线程泵的心跳时刻（Unix 毫秒，UTC）；0 表示泵还没跑过。
+        /// <para>主线程写、HTTP 后台线程读，全部走 <see cref="Interlocked"/>。</para>
+        /// </summary>
+        private long _pumpHeartbeatMs;
+
+        /// <summary>主线程泵已经跑过的帧数，单调递增；见 <see cref="_pumpHeartbeatMs"/></summary>
+        private long _pumpFrames;
+
         /// <summary>当前正在执行的运行器（主线程写、后台线程只读，用于 /v1/status 暴露进度）</summary>
         private CommandRunner _currentRunner;
 
@@ -255,6 +264,16 @@ namespace Aketsuki.UnityMcp.Editor
                 var runner = _currentRunner;
                 return runner != null ? runner.CurrentElapsedMs : 0L;
             }
+        }
+
+        long IHttpEnvironment.PumpHeartbeatMs
+        {
+            get { return Interlocked.Read(ref _pumpHeartbeatMs); }
+        }
+
+        long IHttpEnvironment.PumpFrameCount
+        {
+            get { return Interlocked.Read(ref _pumpFrames); }
         }
 
         /// <summary>
@@ -569,6 +588,13 @@ namespace Aketsuki.UnityMcp.Editor
             catch (Exception)
             {
                 // 极端情况下保留上一帧快照，不影响请求处理
+            }
+            finally
+            {
+                // 心跳与上面那两个值的读写成败无关：能走到这里本身就证明主线程泵这一帧跑了。
+                // 用 Interlocked 是因为它会被 HTTP 后台线程并发读取（long 的非互锁读取在 32 位上会撕裂）。
+                Interlocked.Exchange(ref _pumpHeartbeatMs, HttpProtocol.NowUtcMs());
+                Interlocked.Increment(ref _pumpFrames);
             }
         }
 

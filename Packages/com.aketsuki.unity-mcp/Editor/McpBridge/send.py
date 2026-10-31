@@ -932,6 +932,39 @@ def cmd_seq(client, args):
     return 0 if ok else 1
 
 
+def pump_note(payload):
+    """从 /v1/status 取出「主线程泵停摆」提示；正常情况下返回空串。
+
+    服务端给的事实是 pump.alive / pump.snapshotAgeMs / pump.note 与顶层 stale。
+    这里的差别是把 note 从 JSON 里捞出来写成一行人话，让调用方（人或 AI）
+    在等超时之前就知道这次大概率等不到结果。
+    """
+    if not isinstance(payload, dict):
+        return ""
+    pump = payload.get("pump")
+    if isinstance(pump, dict) and pump.get("alive") is False:
+        note = (pump.get("note") or "").strip()
+        age = pump.get("snapshotAgeMs")
+        if isinstance(age, (int, float)) and age >= 0:
+            return note or ("主线程泵停摆（快照已 %.1f 秒没更新）" % (age / 1000.0))
+        return note or "主线程泵从未跑过"
+    # 没给 pump 块：旧版服务端，无从判断，不打扰
+    return ""
+
+
+def warn_if_pump_dead(target):
+    """下发前先审视探活拿到的 status：泵停摆就先说清楚，别让人干等到超时。"""
+    note = pump_note(getattr(target, "payload", None))
+    if not note:
+        return False
+    queue = (target.payload or {}).get("queue")
+    sys.stderr.write("⚠ 主线程泵停摆：%s\n" % note)
+    if queue:
+        sys.stderr.write("  队列里已有 %s 条指令在排队，本次下发同样不会被消费。\n" % queue)
+    sys.stderr.write("  这既不是网络问题也不是本客户端能修的：重启该工程的编辑器通常就能恢复。\n")
+    return True
+
+
 def cmd_simple(client, args, path):
     status, payload, raw = client.call(path)
     if status is None:
@@ -943,6 +976,11 @@ def cmd_simple(client, args, path):
 
     if args.json or path != "v1/commands":
         print(json.dumps(payload, ensure_ascii=False, indent=2))
+        # status 的正常输出是 JSON（机器读），提示只能走 stderr，避免污染 stdout
+        if path == "v1/status":
+            note = pump_note(payload)
+            if note:
+                sys.stderr.write("⚠ %s\n" % note)
         return 0
 
     commands = payload.get("commands") or []
@@ -1205,6 +1243,11 @@ def main(argv=None):
         return 5
 
     client = Client(chosen.url, chosen.token, args.timeout)
+
+    # 泵的死活在探活那一步已经顺手取回来了：趁还没下发先说清楚，
+    # 否则调用方要干等到 --timeout 才拿到一个毫无信息的失败。
+    warn_if_pump_dead(chosen)
+
     if args.command == "send":
         return cmd_send(client, args)
     if args.command == "seq":
