@@ -1,5 +1,6 @@
 {
   "dependencies": {
+    "com.aketsuki.unity-mcp": "file:com.aketsuki.unity-mcp",
     "com.unity.ide.visualstudio": "2.0.16",
     "com.unity.textmeshpro": "3.0.6",
     "com.unity.ugui": "1.0.0",
