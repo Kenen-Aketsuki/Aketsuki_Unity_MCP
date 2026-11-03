@@ -344,15 +344,18 @@ namespace Aketsuki.UnityMcp.Editor
 
         #endregion
 
-        #region 进 Play 前的内存水位阈值（IMPR-008，用户批注：改成可配置）
+        #region 进 Play 前的内存水位阈值（IMPR-008；作用域：按工程，用户 2026-11-03 拍板）
 
-        // 这四个值原本是 PlayModeMemoryGuard 里的硬编码常量。用户拍板"可以开配置"，
-        // 因为阈值是**机器**属性不是工程属性：16 GB 笔记本上 16 GB 的提示档几乎永不触发，
-        // 而大内存工作站上又可能想提前拦。所以放全局区（与 WatchdogSeconds 同类），
-        // 一台机器配一次，所有工程都吃这套值。
+        // 这五个值原本是 PlayModeMemoryGuard 里的硬编码常量。用户拍板"可以开配置"，
+        // 后来（2026-11-03）又明确**作用域按工程**：大工程可以调高拒绝档、迷你工程可以调低，
+        // 两套值互不干扰。所以和端口 / 令牌一样走 Scoped(...)。
         //
         // 单位刻意用 GB / 小时：让人在控制台里填"16"而不是"17179869184"。
         // 0 = 关闭该档检查（不是"超过 0 就拦"），用来在特殊机器上彻底关掉某一条判据。
+        //
+        // <b>旧值继承</b>：改成 Scoped 之前这些键是全局的（不带工程哈希）。用户可能已经调过，
+        // 所以每个工程首次读时把旧全局值搬一份过来（见 ReadMemoryPref），避免"改了作用域
+        // 等于把人的配置静默清掉"。旧键故意不删：其它工程首次读时同样要继承。
 
         public const float DefaultMemoryWarnWorkingSetGB = 16f;
         public const float DefaultMemoryBlockWorkingSetGB = 24f;
@@ -363,36 +366,58 @@ namespace Aketsuki.UnityMcp.Editor
         /// <summary>提示档：进程工作集（GB）。超过只警告，仍执行。0 = 不检查。</summary>
         public static float MemoryWarnWorkingSetGB
         {
-            get { return ClampGigabytes(EditorPrefs.GetFloat(KeyMemoryWarnWorkingSetGB, DefaultMemoryWarnWorkingSetGB)); }
-            set { EditorPrefs.SetFloat(KeyMemoryWarnWorkingSetGB, ClampGigabytes(value)); }
+            get { return ClampGigabytes(ReadMemoryPref(KeyMemoryWarnWorkingSetGB, DefaultMemoryWarnWorkingSetGB)); }
+            set { EditorPrefs.SetFloat(Scoped(KeyMemoryWarnWorkingSetGB), ClampGigabytes(value)); }
         }
 
         /// <summary>拒绝档：进程工作集（GB）。超过要 force:true 才放行。0 = 不检查。</summary>
         public static float MemoryBlockWorkingSetGB
         {
-            get { return ClampGigabytes(EditorPrefs.GetFloat(KeyMemoryBlockWorkingSetGB, DefaultMemoryBlockWorkingSetGB)); }
-            set { EditorPrefs.SetFloat(KeyMemoryBlockWorkingSetGB, ClampGigabytes(value)); }
+            get { return ClampGigabytes(ReadMemoryPref(KeyMemoryBlockWorkingSetGB, DefaultMemoryBlockWorkingSetGB)); }
+            set { EditorPrefs.SetFloat(Scoped(KeyMemoryBlockWorkingSetGB), ClampGigabytes(value)); }
         }
 
         /// <summary>提示档：系统可用物理内存（GB）。低于只警告。0 = 不检查。</summary>
         public static float MemoryWarnAvailableGB
         {
-            get { return ClampGigabytes(EditorPrefs.GetFloat(KeyMemoryWarnAvailableGB, DefaultMemoryWarnAvailableGB)); }
-            set { EditorPrefs.SetFloat(KeyMemoryWarnAvailableGB, ClampGigabytes(value)); }
+            get { return ClampGigabytes(ReadMemoryPref(KeyMemoryWarnAvailableGB, DefaultMemoryWarnAvailableGB)); }
+            set { EditorPrefs.SetFloat(Scoped(KeyMemoryWarnAvailableGB), ClampGigabytes(value)); }
         }
 
         /// <summary>拒绝档：系统可用物理内存（GB）。低于要 force:true 才放行。0 = 不检查。</summary>
         public static float MemoryBlockAvailableGB
         {
-            get { return ClampGigabytes(EditorPrefs.GetFloat(KeyMemoryBlockAvailableGB, DefaultMemoryBlockAvailableGB)); }
-            set { EditorPrefs.SetFloat(KeyMemoryBlockAvailableGB, ClampGigabytes(value)); }
+            get { return ClampGigabytes(ReadMemoryPref(KeyMemoryBlockAvailableGB, DefaultMemoryBlockAvailableGB)); }
+            set { EditorPrefs.SetFloat(Scoped(KeyMemoryBlockAvailableGB), ClampGigabytes(value)); }
         }
 
         /// <summary>提示档：编辑器已连续运行小时数。超过只警告。0 = 不检查。</summary>
         public static float MemoryWarnUptimeHours
         {
-            get { return ClampHours(EditorPrefs.GetFloat(KeyMemoryWarnUptimeHours, DefaultMemoryWarnUptimeHours)); }
-            set { EditorPrefs.SetFloat(KeyMemoryWarnUptimeHours, ClampHours(value)); }
+            get { return ClampHours(ReadMemoryPref(KeyMemoryWarnUptimeHours, DefaultMemoryWarnUptimeHours)); }
+            set { EditorPrefs.SetFloat(Scoped(KeyMemoryWarnUptimeHours), ClampHours(value)); }
+        }
+
+        /// <summary>
+        /// 读一个"按工程"的阈值；本工程还没配过时，从旧的全局键继承一份。
+        /// <para>
+        /// 为什么带继承：这些键在 2026-11-03 之前是全局的。直接换 Scoped 会让用户已经调过的值
+        /// 静默回到默认（默认值往往比用户的机器保守，等于悄悄改了行为）。
+        /// 旧键<b>不删</b>：同一台机器的其它工程首次读时也要继承同一份，删了就只剩第一个工程吃到。
+        /// </para>
+        /// <para>迁移只在本工程键缺失时发生一次；之后各工程各读各的，互不影响。</para>
+        /// </summary>
+        private static float ReadMemoryPref(string baseKey, float fallback)
+        {
+            var scopedKey = Scoped(baseKey);
+            if (scopedKey != baseKey && !EditorPrefs.HasKey(scopedKey) && EditorPrefs.HasKey(baseKey))
+            {
+                var inherited = EditorPrefs.GetFloat(baseKey, fallback);
+                EditorPrefs.SetFloat(scopedKey, inherited);
+                return inherited;
+            }
+
+            return EditorPrefs.GetFloat(scopedKey, fallback);
         }
 
         /// <summary>
@@ -439,11 +464,12 @@ namespace Aketsuki.UnityMcp.Editor
             EditorPrefs.DeleteKey(KeyStopOnError);
             EditorPrefs.DeleteKey(KeyWatchdogSeconds);
 
-            EditorPrefs.DeleteKey(KeyMemoryWarnWorkingSetGB);
-            EditorPrefs.DeleteKey(KeyMemoryBlockWorkingSetGB);
-            EditorPrefs.DeleteKey(KeyMemoryWarnAvailableGB);
-            EditorPrefs.DeleteKey(KeyMemoryBlockAvailableGB);
-            EditorPrefs.DeleteKey(KeyMemoryWarnUptimeHours);
+            // 内存阈值已改为按工程（2026-11-03），只清本工程那份
+            EditorPrefs.DeleteKey(Scoped(KeyMemoryWarnWorkingSetGB));
+            EditorPrefs.DeleteKey(Scoped(KeyMemoryBlockWorkingSetGB));
+            EditorPrefs.DeleteKey(Scoped(KeyMemoryWarnAvailableGB));
+            EditorPrefs.DeleteKey(Scoped(KeyMemoryBlockAvailableGB));
+            EditorPrefs.DeleteKey(Scoped(KeyMemoryWarnUptimeHours));
         }
     }
 }
