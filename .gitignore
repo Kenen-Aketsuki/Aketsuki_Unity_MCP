@@ -118,4 +118,6 @@ InitTestScene*.unity*
 /Tools/UnityPackage/
 /Tools/*.unitypackage
 /Tools/*.zip
+# UPM tarball（npm pack 产出），同样是可重建的二进制
+/Tools/dist/
 /Tools/__pycache__/
