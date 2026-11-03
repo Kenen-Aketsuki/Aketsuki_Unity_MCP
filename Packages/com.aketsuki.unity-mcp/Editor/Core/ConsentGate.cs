@@ -53,6 +53,13 @@ namespace Aketsuki.UnityMcp.Editor
             data.Set("createdUtc", JsonValue.Of(CreatedUtc.ToString("o")));
             data.Set("deadlineUtc", JsonValue.Of(DeadlineUtc.ToString("o")));
             data.Set("timeoutSeconds", JsonValue.Of(TimeoutSeconds));
+            if (State == ConsentState.Pending && ConsentGate.ModalOpen)
+            {
+                // 模态框开着时倒计时是暂停的：不这么标，调用方看到 remainingSeconds 在掉
+                // 会以为马上要超时，其实窗口关掉后这段时间会补回来
+                data.Set("countdownPaused", JsonValue.Of(true));
+            }
+
             data.Set("remainingSeconds", JsonValue.Of(RemainingSeconds));
             if (State == ConsentState.Allowed || State == ConsentState.Failed)
             {
@@ -70,6 +77,13 @@ namespace Aketsuki.UnityMcp.Editor
                 if (State != ConsentState.Pending)
                 {
                     return 0;
+                }
+
+                // 真模态框开着 = 倒计时暂停（见 PauseCountdown）。这时报真实剩余秒数没有意义
+                // （窗口关掉后会整体补回），直接报满值，免得调用方以为马上要超时。
+                if (ConsentGate.ModalOpen)
+                {
+                    return TimeoutSeconds;
                 }
 
                 var remaining = (DeadlineUtc - DateTime.UtcNow).TotalSeconds;
@@ -102,13 +116,22 @@ namespace Aketsuki.UnityMcp.Editor
     /// </para>
     ///
     /// <para>
-    /// <b>为什么是异步的（别改回模态窗）：</b>最初用 <c>EditorWindow.ShowModal()</c> 同步等待，
+    /// <b>为什么是异步的（别改回 EditorWindow 模态窗）：</b>最初用 <c>EditorWindow.ShowModal()</c> 同步等待，
     /// 实测<b>直接把编辑器卡死</b>——模态循环期间 <c>EditorApplication.update</c> 不再触发，
     /// 自定义窗的 <c>OnGUI</c> 也不会主动重绘，倒计时两个驱动源同时失效，
     /// 30 秒超时永远不走，指令和主线程一起僵在那里（实测卡了 180 秒仍未超时）。
-    /// 现在的做法是：指令<b>立即返回"待确认 + consentId"</b>，确认窗用非模态
-    /// <c>ShowUtility()</c> 打开，倒计时走正常 update；人点允许后指令在下一帧单独执行，
-    /// 结果用 <c>consent.fetch</c> 取。编辑器全程不阻塞。
+    /// 现在的做法是：指令<b>立即返回"待确认 + consentId"</b>，人点允许后指令单独执行，
+    /// 结果用 <c>consent.fetch</c> 取。
+    /// </para>
+    ///
+    /// <para>
+    /// <b>2026-11-03 改为「真模态」（IMPR-010，用户批注「真模态」）：</b>非模态浮窗的反馈太弱 ——
+    /// 会被别的 Unity 窗口压住、不抢焦点、没有声音，人根本没看见，30 秒后静默按拒绝
+    /// （实测连续踩了两次，用户以为点了允许、其实没看到窗口）。
+    /// 现在用 <see cref="EditorUtility.DisplayDialog"/> 弹编辑器级模态框：必然抢焦点，人必须点一下才走。
+    /// <b>这会阻塞主线程，是接受的设计</b>——此时 HTTP 早已返回 <c>pending</c>，客户端不依赖编辑器同步响应；
+    /// 代价是倒计时必须<b>停表</b>（<see cref="PauseCountdown"/>），否则人还在看就被判超时。
+    /// 批处理（<c>-batchmode</c>）没有可交互的界面，仍退回原来的非模态窗 + 超时自动拒绝。
     /// </para>
     ///
     /// <para>
@@ -149,6 +172,16 @@ namespace Aketsuki.UnityMcp.Editor
         private static int _timeoutSeconds;
         private static int _pendingCount;
         private static int _sequence;
+
+        /// <summary>
+        /// 真模态确认框是否正开着（IMPR-010）。
+        /// <para>
+        /// 主线程写、HTTP 监听线程读，所以用 <c>volatile</c>（bool 读写本身原子，加不加差别不大，
+        /// 但要防编译器把读缓存进循环）。用途是让 <c>/v1/status</c> 能把"泵停在这里"解释清楚，
+        /// 而不是让人以为编辑器死了。
+        /// </para>
+        /// </summary>
+        private static volatile bool _modalOpen;
 
         static ConsentGate()
         {
@@ -195,6 +228,44 @@ namespace Aketsuki.UnityMcp.Editor
             get { return CommandSystemSettings.ConsentTimeoutSeconds; }
         }
 
+        /// <summary>真模态确认框是否正开着（任意线程可读，主线程快照）</summary>
+        internal static bool ModalOpen
+        {
+            get { return _modalOpen; }
+        }
+
+        /// <summary>标记模态框开/关（只在主线程调用）</summary>
+        internal static void SetModalOpen(bool open)
+        {
+            _modalOpen = open;
+        }
+
+        /// <summary>
+        /// 把倒计时整体往后推一段时间：真模态框打开期间<b>停表</b>（IMPR-010 待确认细节之一）。
+        /// <para>
+        /// 为什么必须停：人正在看窗口、还没做决定，不该被判超时；而且一条记录弹了 60 秒，
+        /// 后面排队的记录如果不一起推，会被别人的思考时间吃掉。
+        /// </para>
+        /// </summary>
+        internal static void PauseCountdown(TimeSpan elapsed)
+        {
+            if (elapsed <= TimeSpan.Zero)
+            {
+                return;
+            }
+
+            lock (RecordsLock)
+            {
+                foreach (var record in Records)
+                {
+                    if (record.State == ConsentState.Pending)
+                    {
+                        record.DeadlineUtc = record.DeadlineUtc.Add(elapsed);
+                    }
+                }
+            }
+        }
+
         /// <summary>
         /// 需要确认时登记一条请求并弹窗；返回 <c>null</c> 表示<b>放行</b>（非敏感指令或已开全权委托）。
         /// <para>返回值非空时，调用方<b>不能执行</b>该指令，应把「待确认」报给客户端。</para>
@@ -238,10 +309,16 @@ namespace Aketsuki.UnityMcp.Editor
                 _pendingCount = CountPendingLocked();
             }
 
-            ConsentWindow.ShowWindow();
+            // 弹窗：非批处理走真模态（IMPR-010，才保证人一定能看见）；
+            // 批处理没有可交互界面，DisplayDialog 会直接返回，退回非模态窗 + 倒计时自动拒绝。
+            if (UnityEngine.Application.isBatchMode)
+            {
+                ConsentWindow.ShowWindow();
+            }
+
             CommandLog.Warning(
                 $"敏感操作需要人工确认：{commandId}（{record.Id}）。" +
-                $"请在确认窗点「允许」，{timeout} 秒内不响应将自动拒绝。");
+                $"请在弹出的确认框点「允许」，{timeout} 秒内不响应将自动拒绝。");
             return record;
         }
 
@@ -436,6 +513,8 @@ namespace Aketsuki.UnityMcp.Editor
             data.Set("timeoutSeconds", JsonValue.Of(TimeoutSeconds));
             data.Set("commandCount", JsonValue.Of(commandCount));
             data.Set("pendingCount", JsonValue.Of(PendingCount));
+            // 真模态开着 = 主线程正阻塞在人工确认上（IMPR-010），status 的 stale 要能解释这一点
+            data.Set("modalOpen", JsonValue.Of(ModalOpen));
             data.Set("toggle", JsonValue.Of(ToggleLabel));
             data.Set("menu", JsonValue.Of(ConsoleMenuPath));
             return data;

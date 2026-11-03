@@ -447,8 +447,9 @@ namespace Aketsuki.UnityMcp.Editor
             else
             {
                 EditorGUILayout.HelpBox(
-                    "默认关闭。关闭时 editor.play / editor.stop / scene.open 会弹出模态确认窗，" +
-                    "由人点「允许」才执行；倒计时结束未响应一律按拒绝，并中止当批后续指令。",
+                    "默认关闭。关闭时 editor.play / editor.stop / scene.open 会弹出系统模态对话框，" +
+                    "必然抢焦点、必须点一下才继续（对话框开着期间编辑器主线程会阻塞，这是预期行为）。" +
+                    "「拒绝」或关闭对话框按拒绝处理，并中止当批后续指令。",
                     MessageType.None);
             }
 
@@ -487,11 +488,14 @@ namespace Aketsuki.UnityMcp.Editor
         #region 内存水位阈值
 
         /// <summary>
-        /// 进 Play 前的内存水位阈值（IMPR-008，用户批注：改成可配置）。
+        /// 进 Play 前的内存水位阈值（IMPR-008，用户批注：改成可配置；2026-11-03 追加：作用域按工程）。
         /// <para>
         /// 单独成区的理由：它不属于"执行设置"（那是文件与日志的偏好），也不属于"敏感操作确认"
-        /// （那是授权），它是<b>这台机器</b>的物理属性。所以放在全局偏好里、在这块单独调：
-        /// 一台机器配一次，所有工程共用。
+        /// （那是授权），它是"这台机器 + 这个工程"的物理属性，所以单独一块调。
+        /// </para>
+        /// <para>
+        /// <b>按工程存</b>（2026-11-03 用户拍板）：大工程可以调高拒绝档、迷你工程可以调低，
+        /// 两边互不干扰。早期是全局键，本工程第一次读时会自动继承旧值一次。
         /// </para>
         /// <para>
         /// 单位是 GB / 小时（不是字节），<b>填 0 表示关闭该条判据</b>——
@@ -500,7 +504,7 @@ namespace Aketsuki.UnityMcp.Editor
         /// </summary>
         private void DrawMemoryGuardSection()
         {
-            EditorGUILayout.LabelField("进 Play 前的内存水位检查", EditorStyles.boldLabel);
+            EditorGUILayout.LabelField("进 Play 前的内存水位检查（按本工程）", EditorStyles.boldLabel);
 
             EditorGUI.indentLevel++;
 
@@ -543,6 +547,7 @@ namespace Aketsuki.UnityMcp.Editor
 
             EditorGUILayout.HelpBox(
                 "只作用于 editor.play / runtime.play 指令，不碰编辑器自己的 Play 按钮。" +
+                "阈值按本工程保存（换工程就是另一套值）。" +
                 "超过「拒绝档」会直接拒绝进 Play（传 force:true 可带险放行），因为真 OOM 的代价是" +
                 "编辑器卡死、HTTP 服务消失、MCP 全断，必须人工重启。当前水位随时用 editor.state 查。",
                 MessageType.None);

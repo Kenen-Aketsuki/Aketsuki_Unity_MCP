@@ -385,6 +385,8 @@ namespace Aketsuki.UnityMcp
             // 注意这里是**异步**的：不等人点，直接返回「待确认」并把指令挂起。
             // 早期用 ShowModal 同步等，实测会让编辑器彻底卡死（模态循环里 update 不触发，
             // 倒计时走不动），所以改由用户点「允许」时再单独执行。
+            // 2026-11-03（IMPR-010）：弹窗本身换成了真模态（主线程会阻塞，见 ConsentModalPrompt），
+            // 但"这条指令的执行"仍然是异步的 —— 所以要分清"编辑器在等对话框"与"指令已挂起"。
             if (!consentGranted && descriptor.RequiresConsent)
             {
                 // 预检：指令自己声明"这次调用没有副作用"时跳过弹窗（IMPR-011）。
@@ -398,8 +400,8 @@ namespace Aketsuki.UnityMcp
                     {
                         RequestAbort();
                         return CommandResult.Skip(
-                            $"'{entry.Id}' 是敏感操作，已弹出确认窗等待人工点「允许」" +
-                            $"（{pendingConsent.TimeoutSeconds} 秒后自动拒绝）。" +
+                            $"'{entry.Id}' 是敏感操作，已弹出模态确认框，等待人工点「允许」。" +
+                            $"注意：对话框会一直等、主线程在此期间阻塞（不点不会自动拒绝）。" +
                             $"用 consent.fetch id=\"{pendingConsent.Id}\" 取结果；" +
                             $"控制台勾选「{ConsentGate.ToggleLabel}」后可跳过确认。",
                             ConsentGate.PendingJson(pendingConsent));
