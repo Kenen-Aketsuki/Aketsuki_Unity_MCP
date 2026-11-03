@@ -16,13 +16,19 @@ namespace Aketsuki.UnityMcp.Editor
     /// 拒绝或超时时整批中止（后续指令标记为 Skipped），避免在错误的场景上继续操作——
     /// 即使 <c>stopOnError=false</c> 也会中止。
     /// </para>
+    /// <para>
+    /// <b>目标就是当前场景时不问人、也不重载（IMPR-011）</b>：调用方经常不知道编辑器现在开着哪个场景，
+    /// 为保险先 <c>scene.open</c> 一次，结果白弹一次确认窗、还真的把同一份场景重载一遍（丢内存态）。
+    /// 「非叠加 + 目标是当前唯一打开的场景 + 没有任何未保存改动」这三条同时成立时，
+    /// 本指令直接返回成功；预检 <see cref="SkipConsent"/> 用同一个判定，所以连确认窗都不会弹。
+    /// </para>
     /// <para>参数：path（必填，完整 Assets 路径或场景名）、additive（默认 false）、saveCurrent（默认 true）。</para>
     /// </summary>
-    [Command("scene.open", Description = "打开指定场景（需人工确认；拒绝/超时中止本批次）",
+    [Command("scene.open", Description = "打开指定场景（已是当前场景则直接成功；否则需人工确认，拒绝/超时中止本批次）",
         Usage = "path: string, additive: bool, saveCurrent: bool", EditorOnly = true,
         RequiresConsent = true,
         ConsentMessage = "打开场景：当前场景会被关闭或叠加（是否保存由 saveCurrent 决定，有未保存改动且 saveCurrent=false 时直接拒绝）。")]
-    public sealed class SceneOpenCommand : ICommand
+    public sealed class SceneOpenCommand : ICommand, IConsentPrecheck
     {
         public CommandResult Execute(CommandContext context)
         {
@@ -41,6 +47,16 @@ namespace Aketsuki.UnityMcp.Editor
             if (string.IsNullOrEmpty(resolved))
             {
                 return CommandResult.Fail($"找不到场景：{input}（支持完整 Assets 路径或场景名）");
+            }
+
+            // 已是当前场景 → 无副作用，直接成功（与 SkipConsent 用同一判定，见类注释）
+            if (IsNoOpReopen(resolved, context.Args.GetBool("additive", false)))
+            {
+                var noopData = JsonValue.NewObject();
+                noopData.Set("scenePath", JsonValue.Of(resolved));
+                noopData.Set("sceneName", JsonValue.Of(SceneManager.GetActiveScene().name));
+                noopData.Set("noop", JsonValue.Of(true));
+                return CommandResult.Ok($"已是当前场景，无需切换：{resolved}", noopData);
             }
 
             // 用户已在门禁里确认过（或被「全权委托」放行），这里只管保存与切换
@@ -69,6 +85,78 @@ namespace Aketsuki.UnityMcp.Editor
             data.Set("scenePath", JsonValue.Of(scene.path));
             data.Set("sceneName", JsonValue.Of(scene.name));
             return CommandResult.Ok($"已打开场景：{scene.name}", data);
+        }
+
+        /// <summary>
+        /// 确认预检：这次 <c>scene.open</c> 是不是"打开自己"。是就跳过人工确认。
+        /// <para>
+        /// 只在判定**完全成立**时返回 <c>true</c>；路径解析不到、参数缺失、处于 Play 模式
+        /// 一律返回 <c>false</c>，交给正常门禁与 <c>Execute</c> 去报错——
+        /// 别把"写错路径"变成"连确认都不弹"。
+        /// </para>
+        /// </summary>
+        public bool SkipConsent(CommandContext context, out string reason)
+        {
+            reason = null;
+
+            if (EditorApplication.isPlaying)
+            {
+                return false;
+            }
+
+            // 参数缺失时返回空串而不是抛异常：预检不该成为报错的第一现场
+            var input = context.Args.GetString("path", string.Empty);
+            if (string.IsNullOrEmpty(input))
+            {
+                return false;
+            }
+
+            string resolved;
+            try
+            {
+                resolved = ResolveScenePath(input);
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+
+            if (!IsNoOpReopen(resolved, context.Args.GetBool("additive", false)))
+            {
+                return false;
+            }
+
+            reason = $"目标场景已是当前唯一打开的场景，且没有未保存改动：{resolved}";
+            return true;
+        }
+
+        /// <summary>
+        /// 「打开自己」判定：非叠加 + 目标等于当前活跃场景 + 没有其它叠加场景 + 没有任何未保存改动。
+        /// <para>
+        /// 三个条件缺一不可：叠加加载是真实操作；还有别的叠加场景时 Single 模式会把它们关掉；
+        /// 脏场景下的"打开自己"其实是 <c>saveCurrent</c> 的保存语义，短路会把这次保存吃掉。
+        /// </para>
+        /// </summary>
+        private static bool IsNoOpReopen(string resolved, bool additive)
+        {
+            if (additive || string.IsNullOrEmpty(resolved))
+            {
+                return false;
+            }
+
+            var active = SceneManager.GetActiveScene();
+            if (!string.Equals(active.path, resolved, StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            // 多场景叠加：非叠加打开当前场景会顺手关掉其它场景，那是有副作用的
+            if (EditorSceneManager.sceneCount > 1)
+            {
+                return false;
+            }
+
+            return !AnySceneDirty();
         }
 
         private static string ResolveScenePath(string input)

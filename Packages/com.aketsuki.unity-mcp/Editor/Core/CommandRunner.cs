@@ -354,28 +354,9 @@ namespace Aketsuki.UnityMcp
                 return CommandResult.Skip("dry-run", null);
             }
 
-            // 敏感操作（进/出 Play、打开场景）的人工确认门禁。
-            // 放在 dry-run 之后：空跑不产生副作用，没必要为一个"不会发生"的动作打断人。
-            // 与运行时门禁的区别：那个是"开关没开就失败"，这个是"开关没开就弹窗问一次"。
-            //
-            // 注意这里是**异步**的：不等人点，直接返回「待确认」并把指令挂起。
-            // 早期用 ShowModal 同步等，实测会让编辑器彻底卡死（模态循环里 update 不触发，
-            // 倒计时走不动），所以改由用户点「允许」时再单独执行。
-            if (!consentGranted)
-            {
-                var pendingConsent = ConsentGate.RequestIfNeeded(descriptor, entry, source, entry.Id);
-                if (pendingConsent != null)
-                {
-                    RequestAbort();
-                    return CommandResult.Skip(
-                        $"'{entry.Id}' 是敏感操作，已弹出确认窗等待人工点「允许」" +
-                        $"（{pendingConsent.TimeoutSeconds} 秒后自动拒绝）。" +
-                        $"用 consent.fetch id=\"{pendingConsent.Id}\" 取结果；" +
-                        $"控制台勾选「{ConsentGate.ToggleLabel}」后可跳过确认。",
-                        ConsentGate.PendingJson(pendingConsent));
-                }
-            }
-
+            // 实例与上下文都建在确认门禁**之前**：门禁需要一个预检通道（IMPR-011），
+            // 而预检必须拿到指令对象与已解析的参数，否则它只能说"不知道，问人"。
+            // 实例化本身无副作用（指令类都是无状态的），提前建不会改变任何语义。
             ICommand instance;
             try
             {
@@ -396,6 +377,39 @@ namespace Aketsuki.UnityMcp
                 depth,
                 DryRun,
                 variables);
+
+            // 敏感操作（进/出 Play、打开场景）的人工确认门禁。
+            // 放在 dry-run 之后：空跑不产生副作用，没必要为一个"不会发生"的动作打断人。
+            // 与运行时门禁的区别：那个是"开关没开就失败"，这个是"开关没开就弹窗问一次"。
+            //
+            // 注意这里是**异步**的：不等人点，直接返回「待确认」并把指令挂起。
+            // 早期用 ShowModal 同步等，实测会让编辑器彻底卡死（模态循环里 update 不触发，
+            // 倒计时走不动），所以改由用户点「允许」时再单独执行。
+            if (!consentGranted && descriptor.RequiresConsent)
+            {
+                // 预检：指令自己声明"这次调用没有副作用"时跳过弹窗（IMPR-011）。
+                // 只对声明了 RequiresConsent 的指令问，普通指令连一次反射调用都不该多。
+                var skipReason = TrySkipConsent(instance, context);
+
+                if (skipReason == null)
+                {
+                    var pendingConsent = ConsentGate.RequestIfNeeded(descriptor, entry, source, entry.Id);
+                    if (pendingConsent != null)
+                    {
+                        RequestAbort();
+                        return CommandResult.Skip(
+                            $"'{entry.Id}' 是敏感操作，已弹出确认窗等待人工点「允许」" +
+                            $"（{pendingConsent.TimeoutSeconds} 秒后自动拒绝）。" +
+                            $"用 consent.fetch id=\"{pendingConsent.Id}\" 取结果；" +
+                            $"控制台勾选「{ConsentGate.ToggleLabel}」后可跳过确认。",
+                            ConsentGate.PendingJson(pendingConsent));
+                    }
+                }
+                else
+                {
+                    CommandLog.Info($"'{entry.Id}' 无需人工确认：{skipReason}");
+                }
+            }
 
             var watch = Stopwatch.StartNew();
 
@@ -434,6 +448,40 @@ namespace Aketsuki.UnityMcp
                 Interlocked.Exchange(ref _currentCommandStartedAt, 0);
                 _currentCommandId = null;
                 WarnIfOverWatchdog(entry.Id, watch.Elapsed.TotalSeconds);
+            }
+        }
+
+        /// <summary>
+        /// 问一次指令的确认预检：返回非 <c>null</c> 表示"这次无副作用，可以跳过人工确认"，
+        /// 返回值是写进日志的一句话理由；返回 <c>null</c> 表示照常弹窗。
+        /// <para>
+        /// <b>预检抛异常一律按"需要确认"处理</b>：门禁是安全边界，出错时唯一的正确方向是保守。
+        /// 这里不能把异常往上抛（那会让指令直接失败，用户连"允许"的机会都没有），
+        /// 也不能因为异常就放行（那等于异常可以绕过人工确认）。
+        /// </para>
+        /// </summary>
+        private static string TrySkipConsent(ICommand instance, CommandContext context)
+        {
+            var precheck = instance as IConsentPrecheck;
+            if (precheck == null)
+            {
+                return null;
+            }
+
+            try
+            {
+                string reason;
+                if (!precheck.SkipConsent(context, out reason))
+                {
+                    return null;
+                }
+
+                return string.IsNullOrEmpty(reason) ? "指令声明本次调用无副作用" : reason;
+            }
+            catch (Exception error)
+            {
+                CommandLog.Warning($"{context.CommandId} 的确认预检异常，按需要人工确认处理：{error.Message}");
+                return null;
             }
         }
 

@@ -206,6 +206,8 @@ python Tools/deploy.py --module adb <目标> --verify   # 本机其它工程（�
 | BUG-010 | **已改未实测** | `runtime.hierarchy` 的 name 模式：limit 改为「命中上限」、遍历不限量。过了真机编译与部署，真机复验要进 Play 模式（`runtime.*` 双门禁 + `editor.play` 需人工确认，脚本跑不了），见 `待拍板-2026-10-28.md` |
 | IMPR-007(2026) | 已实测 | `component.setField(s)` 支持数组 / `List<T>`：island_back 上用 `List<Transform>`（节点路径）与 `Color[]` 实跑通过 |
 | IMPR-021 | 已实现并真机验证（CLR 探针） | `/v1/status` 新增 `pump` 块与 `stale`：`compiling` / `updating` / `busy` 都是每帧快照，泵停摆后会冻结成旧值骗人。判据是 `pump.alive`（5 秒无新快照且无指令在执行 = 停摆）；`send.py` 会在下发前警告。**停摆后没有自愈手段**，只能重启该工程编辑器 |
+| BUG-011 | 已实测 | MCP 桥 `_DiscoverArgs` 少了 `command` 字段 → 慢路径 `AttributeError` → `tools/list` 整条返回 `-32603`，客户端里「这套工具没了」。已补字段 + `ToolRegistry._rebuild` 加非预期异常兜底（退化为仅 5 个元工具并 60 秒后重试）。实测：死端口 `0 工具 → 5 元工具`；island_back 编辑器开着时 75 个工具 |
+| IMPR-011 | 已实测 | `scene.open` 打开的就是当前场景时不弹确认窗、不重载：新增可选接口 `IConsentPrecheck`（`CommandRunner` 把实例化与 `CommandContext` 构造提到门禁之前，`TrySkipConsent` 反射问一次）。判定四条：非叠加 + 目标是当前唯一场景（`sceneCount==1`）+ 无未保存改动 + 非 Play。实测 island_back 对当前 `Shop.unity` 重发 → `noop:true` 成功。**反向分支（additive/多场景/脏场景仍弹窗）未真机验** |
 | Phase 2 | 未开工 | 跨帧执行器、`runtime.screenshot`、断言原语、`runtime.invoke`。见 `FEAT-001` 末尾 |
 
 ### 8.1 已改未实测清单（IMPR-020，用户批注：写进交接文档即可，31 号前不安排复验专场）

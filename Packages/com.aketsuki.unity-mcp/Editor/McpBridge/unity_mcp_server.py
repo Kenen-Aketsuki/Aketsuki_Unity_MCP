@@ -85,13 +85,20 @@ class BridgeError(Exception):
 
 
 class _DiscoverArgs(object):
-    """send.discover() 需要的参数占位；桥不暴露 --url/--token 等覆盖项。"""
+    """send.discover() 需要的参数占位；桥不暴露 --url/--token 等覆盖项。
+
+    字段必须覆盖 send.discover() 真正会读的**全部**属性：info / url / token / port /
+    no_resolve / command。少一个就是一个 AttributeError，而它发生在慢路径里，
+    会把 tools/list 整体打成 -32603、客户端里一条工具都看不到（BUG-011 的现场）。
+    新增字段时照着 send.normalize_args 的默认值抄，别凭印象补。
+    """
 
     info = None
     url = None
     token = None
     port = None
     no_resolve = False
+    command = None          # send.discover() 用它区分 resolve 诊断模式；桥没有子命令，恒 None
 
 
 class Bridge(object):
@@ -816,14 +823,29 @@ class ToolRegistry(object):
         self._built_at = 0.0
         self._build_error = None
 
+    def _degrade(self, reason):
+        """把 typed 工具清空、只留元工具，并记下原因（下次刷新会自动重试）。
+
+        **为什么要有这条退路（BUG-011）**：端点发现一失败，`BRIDGE.commands()` 就抛异常；
+        早先只捕获 `BridgeError`，于是任何**非预期**异常（实测是 `_DiscoverArgs` 少一个字段的
+        `AttributeError`）都会一路冒到 JSON-RPC 层，变成 `-32603 内部错误`，
+        客户端侧表现是「这个工程的 MCP 整个没了」——连 `unity_status` 都调不到，
+        排查时极易误判成包丢了。退化成"只有元工具"再差也还能自证状态。
+        """
+        self._build_error = reason
+        self._typed = []
+        self._typed_map = {}
+        self._built_at = time.time()
+
     def _rebuild(self):
         try:
             commands = BRIDGE.commands()
         except BridgeError as error:
-            self._build_error = str(error)
-            self._typed = []
-            self._typed_map = {}
-            self._built_at = time.time()
+            self._degrade(str(error))
+            return
+        except Exception as error:  # noqa: BLE001 —— 任何异常都不许让 tools/list 整体失败
+            self._degrade("生成 typed 工具时出现非预期异常：%r（本次只提供元工具）" % (error,))
+            log("tools/list 退化为仅元工具：%r" % (error,))
             return
 
         typed = []
