@@ -703,6 +703,272 @@ namespace Aketsuki.UnityMcp.Editor
     }
 
     /// <summary>
+    /// 把 Prefab 里<b>已有的展开节点</b>替换成 Prefab 实例（FEAT-016 进阶项，用户 2026-11-03 拍板「可以」）。
+    ///
+    /// <para>
+    /// <b>解决什么：</b>历史遗留的断链节点（当年 <c>duplicateNode</c> / <c>copyFrom</c> 复制出来的平铺树，
+    /// <c>PrefabInstanceStatus.NotAPrefab</c>）想修好，之前只能「建新的实例 + 手工搬布局 + 删旧的」三步，
+    /// 中间任何一步漏了就是"看着像、位置不对"或"引用了已经被删的节点"。本指令把三步合成一步。
+    /// </para>
+    ///
+    /// <para>
+    /// <b>布局复用口径（<c>layout</c>，默认 <c>rect</c>）：</b>
+    /// <list type="bullet">
+    /// <item><c>rect</c>（默认）—— 两者都是 RectTransform 时复制 <c>anchorMin/anchorMax/pivot/
+    /// sizeDelta/anchoredPosition</c>，另外 <c>localPosition/localRotation/localScale</c> 一律复制；
+    /// 只有一边是 RectTransform 时退回 <c>transform</c> 的行为并给 <c>warning</c>。</item>
+    /// <item><c>transform</c> —— 只复制 <c>localPosition/localRotation/localScale</c>（用 Prefab 自己的尺寸）。</item>
+    /// <item><c>none</c> —— 完全不碰，保留源 Prefab 的原始布局。</item>
+    /// </list>
+    /// 为什么不复制 RectTransform 的全部字段：<c>offsetMin/offsetMax</c> 与 <c>sizeDelta/anchoredPosition</c>
+    /// 是同一组数据的两种写法，全抄会互相覆盖；旋转/缩放已经单独搬了。
+    /// </para>
+    ///
+    /// <para>
+    /// <b>安全闸：</b>
+    /// ① 不支持替换根节点（整根换源请改 <c>prefab.instantiatePrefab</c> 重建）；
+    /// ② 旧节点已经是 <c>Connected</c> 实例时默认拒绝 —— 它身上可能有 Inspector 里调过的 override，
+    /// 替换等于把这些改动一起丢掉；确认要换源请传 <c>force: true</c>。
+    /// </para>
+    ///
+    /// <para>
+    /// 参数：prefab（必填，宿主 Prefab）、target（必填，要替换掉的旧节点路径）、asset（必填，新实例化的 Prefab 资产）、
+    /// name（可选，默认沿用旧节点名）、layout（默认 rect）、keepChildren（默认 false；true 则把旧节点的子节点搬到新实例下）、
+    /// force（默认 false）
+    /// </para>
+    /// </summary>
+    [Command("prefab.replaceWithInstanceOf",
+        Description = "把 Prefab 里已有的展开节点替换成 Prefab 实例（复用布局值，可选搬走子节点）",
+        Usage = "prefab: string, target: string, asset: string, name: string, layout: string(rect|transform|none), keepChildren: bool, force: bool",
+        EditorOnly = true)]
+    public sealed class PrefabReplaceWithInstanceCommand : ICommand
+    {
+        public CommandResult Execute(CommandContext context)
+        {
+#if UNITY_EDITOR
+            var prefabPath = PrefabEditUtil.NormalizePrefabPath(context, context.Args.RequireString("prefab"));
+            var targetSpec = context.Args.GetString("target", string.Empty);
+            var assetPath = PrefabEditUtil.NormalizePrefabAssetPath(context,
+                context.Args.RequireString("asset"), "asset");
+            var name = context.Args.GetString("name", null);
+            var layout = (context.Args.GetString("layout", "rect") ?? "rect").Trim().ToLowerInvariant();
+            var keepChildren = context.Args.GetBool("keepChildren", false);
+            var force = context.Args.GetBool("force", false);
+
+            if (layout != "rect" && layout != "transform" && layout != "none")
+            {
+                throw new CommandArgumentException(context.CommandId, "layout",
+                    $"layout 只能是 rect / transform / none，实际为 '{layout}'");
+            }
+
+            // 根节点不能替换：SaveAsPrefabAsset 存的就是这个对象，删掉它就没东西可存了
+            if (string.IsNullOrEmpty(targetSpec.Trim()))
+            {
+                throw new CommandArgumentException(context.CommandId, "target",
+                    "不支持替换 Prefab 根节点（空串 / 根路径）：整根换源请直接用 prefab.instantiatePrefab 重建一个同级资产");
+            }
+
+            var assetObject = AssetDatabase.LoadAssetAtPath<GameObject>(assetPath);
+            if (assetObject == null)
+            {
+                throw new CommandArgumentException(context.CommandId, "asset",
+                    $"找不到源 Prefab '{assetPath}'（路径要基于 Assets/、指向一个 Prefab / 模型资产）");
+            }
+
+            var assetType = PrefabUtility.GetPrefabAssetType(assetObject);
+            if (assetType == PrefabAssetType.MissingAsset || assetType == PrefabAssetType.NotAPrefab)
+            {
+                throw new CommandArgumentException(context.CommandId, "asset",
+                    $"'{assetPath}' 不是可实例化的 Prefab 资产（PrefabAssetType={assetType}）");
+            }
+
+            return PrefabEditUtil.EditPrefab(context, prefabPath, root =>
+            {
+                var old = SetComponentFieldCommand.FindInPrefab(root, targetSpec.Trim());
+                if (old == null)
+                {
+                    throw new CommandArgumentException(context.CommandId, "target",
+                        $"Prefab '{prefabPath}' 里找不到节点 '{targetSpec}'");
+                }
+
+                if (old.transform == root.transform)
+                {
+                    throw new CommandArgumentException(context.CommandId, "target",
+                        $"'{targetSpec}' 解析到的是 Prefab 根节点，不支持替换（同上：请重建资产）");
+                }
+
+                var oldStatus = PrefabUtility.GetPrefabInstanceStatus(old);
+                if (oldStatus == PrefabInstanceStatus.Connected && !force)
+                {
+                    return CommandResult.Fail(
+                        $"'{targetSpec}' 已经是 {assetPath} 这类 Prefab 的 Connected 实例，替换会把它在 Inspector 里调过的 override 一起丢掉。" +
+                        "确认要换源请传 force: true。");
+                }
+
+                // 旧节点的一切都必须在 DestroyImmediate 之前取完
+                var parent = old.transform.parent;
+                var siblingIndex = old.transform.GetSiblingIndex();
+                var oldName = old.name;
+                var oldPath = PrefabEditCommandsUtil.BuildNodePath(old.transform);
+                var oldChildCount = old.transform.childCount;
+
+                var instance = PrefabUtility.InstantiatePrefab(assetObject, parent) as GameObject;
+                if (instance == null)
+                {
+                    throw new CommandException(
+                        $"实例化 '{assetPath}' 失败（PrefabUtility.InstantiatePrefab 返回空；该资产可能不是 Prefab 资产根）");
+                }
+
+                instance.name = string.IsNullOrEmpty(name) ? oldName : name;
+
+                var copied = ApplyLayout(old.transform, instance.transform, layout, out var layoutWarning);
+                instance.transform.SetSiblingIndex(siblingIndex);
+
+                // 子节点搬运：先取快照再搬，边遍历边改父子关系会漏
+                var movedChildren = 0;
+                if (keepChildren && oldChildCount > 0)
+                {
+                    var children = new List<Transform>(oldChildCount);
+                    for (var i = 0; i < oldChildCount; i++)
+                    {
+                        children.Add(old.transform.GetChild(i));
+                    }
+
+                    foreach (var child in children)
+                    {
+                        child.SetParent(instance.transform, false);
+                        movedChildren++;
+                    }
+                }
+
+                UnityEngine.Object.DestroyImmediate(old);
+
+                var status = PrefabUtility.GetPrefabInstanceStatus(instance);
+                var newPath = PrefabEditCommandsUtil.BuildNodePath(instance.transform);
+
+                var data = JsonValue.NewObject();
+                data.Set("prefab", JsonValue.Of(prefabPath));
+                data.Set("asset", JsonValue.Of(assetPath));
+                data.Set("oldPath", JsonValue.Of(oldPath));
+                data.Set("newPath", JsonValue.Of(newPath));
+                data.Set("oldName", JsonValue.Of(oldName));
+                data.Set("newName", JsonValue.Of(instance.name));
+                data.Set("oldInstanceStatus", JsonValue.Of(oldStatus.ToString()));
+                data.Set("instanceStatus", JsonValue.Of(status.ToString()));
+                data.Set("connected", JsonValue.Of(status == PrefabInstanceStatus.Connected));
+                data.Set("layout", JsonValue.Of(layout));
+                data.Set("copiedLayoutFields", JsonValue.FromArray(ToJsonItems(copied)));
+                data.Set("movedChildCount", JsonValue.Of(movedChildren));
+                data.Set("discardedChildCount", JsonValue.Of(keepChildren ? 0 : oldChildCount));
+                data.Set("siblingIndex", JsonValue.Of(instance.transform.GetSiblingIndex()));
+
+                var message = $"已把 {oldPath} 替换为 {assetPath} 的实例 → {newPath}（{status}）"
+                              + $"，复用 {copied.Count} 个布局字段"
+                              + (movedChildren > 0 ? $"，搬走 {movedChildren} 个子节点" : string.Empty)
+                              + (!keepChildren && oldChildCount > 0 ? $"，丢弃 {oldChildCount} 个原子节点" : string.Empty);
+
+                var warnings = new List<string>();
+                if (!string.IsNullOrEmpty(layoutWarning))
+                {
+                    warnings.Add(layoutWarning);
+                }
+
+                if (status != PrefabInstanceStatus.Connected)
+                {
+                    warnings.Add($"实例状态是 {status} 而不是 Connected：源 Prefab 以后的改动不会同步到这个节点");
+                }
+
+                if (oldStatus == PrefabInstanceStatus.Connected)
+                {
+                    warnings.Add("旧节点原本就是实例，它身上的 override 已随替换丢弃（本次由 force: true 放行）");
+                }
+
+                if (!keepChildren && oldChildCount > 0)
+                {
+                    warnings.Add("旧节点的子节点已随旧节点一起丢弃（如需保留请传 keepChildren: true）");
+                }
+
+                if (warnings.Count > 0)
+                {
+                    data.Set("warning", JsonValue.Of(string.Join("；", warnings.ToArray())));
+                    message += "。注意：" + string.Join("；", warnings.ToArray());
+                }
+
+                return CommandResult.Ok(message, data);
+            });
+#else
+            throw new CommandException($"指令 '{context.CommandId}' 只能在编辑器内执行");
+#endif
+        }
+
+        /// <summary>
+        /// 按 <paramref name="layout"/> 把旧节点的布局值搬到新实例上，返回实际复制的字段名。
+        /// <para>
+        /// RectTransform 的复制顺序固定为 anchors → pivot → sizeDelta → anchoredPosition：
+        /// 改 anchor 会带动 sizeDelta / anchoredPosition 的重算，反着写会把刚设好的值冲掉。
+        /// </para>
+        /// </summary>
+        private static List<string> ApplyLayout(Transform from, Transform to, string layout, out string warning)
+        {
+            warning = null;
+            var copied = new List<string>();
+            if (layout == "none")
+            {
+                return copied;
+            }
+
+            to.localPosition = from.localPosition;
+            to.localRotation = from.localRotation;
+            to.localScale = from.localScale;
+            copied.Add("localPosition");
+            copied.Add("localRotation");
+            copied.Add("localScale");
+
+            if (layout != "rect")
+            {
+                return copied;
+            }
+
+            var source = from as RectTransform;
+            var target = to as RectTransform;
+            if (source == null || target == null)
+            {
+                if (source != null || target != null)
+                {
+                    warning = source == null
+                        ? "旧节点不是 RectTransform，新实例是：只搬了 localPosition/Rotation/Scale，锚点与尺寸沿用源 Prefab"
+                        : "新实例不是 RectTransform，旧节点是：只搬了 localPosition/Rotation/Scale，UI 布局信息无法复用";
+                }
+
+                return copied;
+            }
+
+            target.anchorMin = source.anchorMin;
+            target.anchorMax = source.anchorMax;
+            target.pivot = source.pivot;
+            target.sizeDelta = source.sizeDelta;
+            target.anchoredPosition = source.anchoredPosition;
+            copied.Add("anchorMin");
+            copied.Add("anchorMax");
+            copied.Add("pivot");
+            copied.Add("sizeDelta");
+            copied.Add("anchoredPosition");
+            return copied;
+        }
+
+        private static List<JsonValue> ToJsonItems(List<string> names)
+        {
+            var items = new List<JsonValue>(names.Count);
+            foreach (var name in names)
+            {
+                items.Add(JsonValue.Of(name));
+            }
+
+            return items;
+        }
+    }
+
+    /// <summary>
     /// 给 Prefab 资产内的节点改名（FEAT-016 顺带的缺口之一）。
     /// <para>
     /// 为什么单独一条：<c>gameobject.rename</c> 只在<b>当前已加载场景</b>里找节点，
