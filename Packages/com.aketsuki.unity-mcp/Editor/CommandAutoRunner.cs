@@ -25,6 +25,16 @@ namespace Aketsuki.UnityMcp.Editor
         private const string MenuRescan = MenuRoot + "重新扫描指令类";
         private const string MenuOpenFolder = MenuRoot + "打开指令目录";
 
+        /// <summary>
+        /// 临时统计：已执行指令文件的收集目录（写死，不做任何设置 UI）。
+        /// <para>
+        /// 隔离设计：目录不存在即功能关闭（<see cref="CollectForAnalysis"/> 静默跳过），
+        /// 删除该目录可一键关停；部署到其它工程时该路径本就不存在，天然零副作用。
+        /// 这是有时效的临时能力，移除统计 = 删掉 <see cref="CollectForAnalysis"/> 与这条常量即可。
+        /// </para>
+        /// </summary>
+        private const string CommandAnalyticsDir = @"D:/Work/Aketsuki_Unity_MCP/.workbuddy/CommandAnal";
+
         static CommandAutoRunner()
         {
             ApplyFileAccessRoots();
@@ -113,6 +123,9 @@ namespace Aketsuki.UnityMcp.Editor
 
                 if (!dryRun && report != null && !report.HasError)
                 {
+                    // 临时统计：先于删除/归档复制一份到分析目录（复制不破坏原文件，与下面两者不互斥）
+                    CollectForAnalysis(path);
+
                     // 删除优先于归档：开后者的同时关前者，避免既删又留 _done
                     if (CommandSystemSettings.DeleteAfterRun)
                     {
@@ -210,6 +223,58 @@ namespace Aketsuki.UnityMcp.Editor
             catch (Exception e)
             {
                 CommandLog.Warning($"删除已执行指令文件失败：{e.Message}");
+            }
+        }
+
+        /// <summary>
+        /// 临时统计：把已成功执行的指令文件复制一份到 <see cref="CommandAnalyticsDir"/>，用于后续指令执行统计。
+        /// <para>
+        /// 行为约束（见 FEAT-017 批注）：
+        /// <list type="bullet">
+        /// <item>复制而非移动，不破坏原文件，也不与 <c>DeleteAfterRun</c> / <c>ArchiveAfterRun</c> 冲突；</item>
+        /// <item>目标目录不存在则**静默跳过**（不拷贝、不报错）—— 删除该目录即关停；</item>
+        /// <item>同名碰撞追加时间戳后缀，保留每次执行样本，不覆盖历史；</item>
+        /// <item>任何异常都只告警，绝不影响正常执行流程。</item>
+        /// </list>
+        /// 本方法是统计能力的唯一入口，移除统计 = 删本方法 + 删 <see cref="ExecuteFile"/> 里的调用 + 删 <see cref="CommandAnalyticsDir"/> 常量。
+        /// </summary>
+        private static void CollectForAnalysis(string path)
+        {
+            if (!Directory.Exists(CommandAnalyticsDir))
+            {
+                return; // 目录不存在 = 功能关闭，静默跳过
+            }
+
+            try
+            {
+                if (!File.Exists(path))
+                {
+                    return;
+                }
+
+                var fileName = Path.GetFileName(path);
+                var target = Path.Combine(CommandAnalyticsDir, fileName);
+
+                // 同名碰撞：追加时间戳后缀，保留每次执行样本（不覆盖历史）
+                if (File.Exists(target))
+                {
+                    var baseName = Path.GetFileNameWithoutExtension(fileName);
+                    var extension = Path.GetExtension(fileName);
+                    var stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss");
+                    target = Path.Combine(CommandAnalyticsDir, $"{baseName}__{stamp}{extension}");
+                    var counter = 1;
+                    while (File.Exists(target))
+                    {
+                        target = Path.Combine(CommandAnalyticsDir, $"{baseName}__{stamp}_{counter}{extension}");
+                        counter++;
+                    }
+                }
+
+                File.Copy(path, target, false);
+            }
+            catch (Exception e)
+            {
+                CommandLog.Warning($"收集指令文件到分析目录失败（已忽略）：{e.Message}");
             }
         }
 
