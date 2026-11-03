@@ -286,6 +286,97 @@ namespace Aketsuki.UnityMcp.Editor
     }
 
     /// <summary>
+    /// 查看编辑器<b>当前打开</b>的场景状态，只读、无副作用。
+    ///
+    /// <para>
+    /// <b>为什么需要它：</b>在此之前没有任何一条只读指令能回答"现在开的是哪个场景、改过没保存吗"。
+    /// 调用方只能翻 <c>scene.hierarchy</c> 的大输出、从末尾的 <c>scenePath</c> 反推当前场景，
+    /// 而"脏不脏"完全查不到 —— 于是"要不要 <c>scene.open</c>"、"这次重载会不会丢东西"
+    /// 这类判断只能靠猜（2026-11-03 实测就这么赌过一次）。
+    /// </para>
+    ///
+    /// <para>
+    /// 返回 <c>activeScenePath</c> / <c>activeSceneName</c> / <c>sceneCount</c> / <c>dirtyCount</c> /
+    /// <c>playing</c>，以及逐场景的 <c>path / name / index / isActive / isDirty / isLoaded /
+    /// rootCount / buildIndex</c>。叠加场景按加载顺序排在 <c>scenes</c> 里。
+    /// </para>
+    ///
+    /// <para>
+    /// <b>只读所以不需要确认</b>（对比 <c>scene.open</c> / <c>scene.reload</c> 要人工点「允许」）；
+    /// Play 模式下同样可查，此时读到的是运行时加载的那批场景。
+    /// </para>
+    ///
+    /// <para>参数：无。</para>
+    /// </summary>
+    [Command("scene.state",
+        Description = "查看当前打开的场景（活跃场景/叠加场景/是否有未保存改动），只读",
+        EditorOnly = true)]
+    public sealed class SceneStateCommand : ICommand
+    {
+        public CommandResult Execute(CommandContext context)
+        {
+            var active = SceneManager.GetActiveScene();
+            var activeHandle = active.handle;
+
+            var scenes = JsonValue.NewArray();
+            var dirty = new List<string>();
+            var activeIndex = -1;
+
+            for (var i = 0; i < EditorSceneManager.sceneCount; i++)
+            {
+                var scene = EditorSceneManager.GetSceneAt(i);
+                var isActive = scene.handle == activeHandle;
+                if (isActive)
+                {
+                    activeIndex = i;
+                }
+
+                // isDirty 只有主线程能读；本指令就在主线程执行，直接读，不必绕快照
+                var isDirty = scene.isDirty;
+                if (isDirty)
+                {
+                    dirty.Add(string.IsNullOrEmpty(scene.path) ? "(未保存的新场景)" : scene.path);
+                }
+
+                var item = JsonValue.NewObject();
+                item.Set("path", JsonValue.Of(scene.path ?? string.Empty));
+                item.Set("name", JsonValue.Of(scene.name ?? string.Empty));
+                item.Set("index", JsonValue.Of(i));
+                item.Set("isActive", JsonValue.Of(isActive));
+                item.Set("isDirty", JsonValue.Of(isDirty));
+                item.Set("isLoaded", JsonValue.Of(scene.isLoaded));
+                item.Set("rootCount", JsonValue.Of(scene.rootCount));
+                item.Set("buildIndex", JsonValue.Of(scene.buildIndex));
+                scenes.Add(item);
+            }
+
+            var data = JsonValue.NewObject();
+            data.Set("activeScenePath", JsonValue.Of(active.path ?? string.Empty));
+            data.Set("activeSceneName", JsonValue.Of(active.name ?? string.Empty));
+            data.Set("activeSceneIndex", JsonValue.Of(activeIndex));
+            data.Set("sceneCount", JsonValue.Of(EditorSceneManager.sceneCount));
+            data.Set("dirtyCount", JsonValue.Of(dirty.Count));
+            data.Set("isDirty", JsonValue.Of(dirty.Count > 0));
+            data.Set("playing", JsonValue.Of(EditorApplication.isPlaying));
+            data.Set("scenes", scenes);
+
+            // 一句话结论：路径为空说明这是个还没存过盘的新场景，直说，别让调用方以为路径丢了
+            var activeLabel = string.IsNullOrEmpty(active.path)
+                ? (string.IsNullOrEmpty(active.name) ? "(未保存的新场景)" : active.name + "（未保存到磁盘）")
+                : active.name;
+            var message = $"当前场景：{activeLabel}（{(dirty.Count > 0 ? "有未保存改动" : "未修改")}），" +
+                          $"共 {EditorSceneManager.sceneCount} 个场景";
+
+            if (dirty.Count > 0)
+            {
+                message += "：" + string.Join("、", dirty.ToArray()) + " 未保存";
+            }
+
+            return CommandResult.Ok(message, data);
+        }
+    }
+
+    /// <summary>
     /// 枚举场景：Build Settings 中启用的场景 + 磁盘 Assets 下全部 .unity（标注 inBuildSettings）。
     /// <para>参数：无。</para>
     /// </summary>
