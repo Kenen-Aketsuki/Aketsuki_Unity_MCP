@@ -105,13 +105,26 @@ ADB 工具只写一处：`Packages/com.aketsuki.adb-debugger/Editor/`（27 个�
 
 | 改动 | 验证 | 判据 |
 | --- | --- | --- |
-| 只改 C# | `deploy.py <目标> --verify`（编辑器开着）；或离线编译 ↓ | 0 个 `error CS` 落在 `ExternalCommandSystem/` 下 |
-| 改 C# + 打包 | `python Tools/verify_unitypackage.py -p <包> --with-ui` | 无头 Unity 导入 + 编译，关键文件齐全 |
+| 只改 C# | `deploy.py <目标> --verify`（编辑器开着）；或离线编译 ↓ | 0 个 `error CS` 落在包目录下；目标 `Library/ScriptAssemblies/Aketsuki.UnityMcp.Editor.dll` 的 mtime 晚于源文件且字节里 grep 得到新符号 |
+| 改 C# + 打包 | 包形态：`npm pack` 出 tarball（`Tools/dist/`） | 旧的 `verify_unitypackage.py` / `build_unitypackage.py` 已于 2026-11-03 退役（资产形态产物，包化后无意义） |
 | 改 Python 桥 | `py_compile` + 对在线编辑器实跑那条子命令 | 退出码 0 且输出对 |
 
 离线编译工具**不在这个仓库**：`C:\Users\user\.workbuddy\tools\unity-offline-compile\unity_offline_compile.py`
 （跨程序集同时改动时用同目录的 `merged_offline_compile.py`）。它不写工程的 `Temp/`、`Library/`，
 编辑器开着也能跑，比 `Unity -batchmode` 安全。**换机器就没了，先备份。**
+
+> **⚠ 2026-11-03 实测：本仓库自己跑 `Unity -batchmode` 编译不了这个包。**
+> 两个前提 + 一个坑：
+> 1. `Packages/manifest.json` 必须**显式引用** `"com.aketsuki.unity-mcp": "file:com.aketsuki.unity-mcp"`，
+>    否则 Unity 根本不加载它（`lock` 里有 `embedded` 记录也没用），日志里 `Registered N packages`
+>    找不到这个包，dll 永远停在旧版本。已补上（**别删**）。
+> 2. 别加 `com.aketsuki.adb-debugger`：它一启动就扫 Android 设备，会**杀掉别的 SDK 的 adb server**
+>    （日志原文 `Multiple ADB server instances found ... terminated`），影响用户手上的调试。
+> 3. 补完引用后 batchmode 仍会在 `Application.AssetDatabase Initial Refresh Start` 之后
+>    卡在 `ScriptCompilationBuildProgram.exe` 起不来（进程直接消失、dll 不更新、也没有 `error CS`）。
+>    **所以本仓库真机编译这条路目前不通**，判据请用部署目标里在跑的那个编辑器：
+>    `python Tools/deploy.py` 写完文件后，island_back 的编辑体会自动重编，
+>    再核 `Library/ScriptAssemblies/Aketsuki.UnityMcp.Editor.dll` 的 mtime + 符号（2026-11-03 已成功）。
 
 改栈帧判定（ADB 那条 `UnityStackFrame` 正则）**先跑** `python Tools/test_stack_frame.py`：
 19 条正例 / 15 条反例，还会校验脚本里的正则副本与 C# 源码是否一致（IMPR-017 用户批注：
@@ -208,6 +221,11 @@ python Tools/deploy.py --module adb <目标> --verify   # 本机其它工程（�
 | IMPR-021 | 已实现并真机验证（CLR 探针） | `/v1/status` 新增 `pump` 块与 `stale`：`compiling` / `updating` / `busy` 都是每帧快照，泵停摆后会冻结成旧值骗人。判据是 `pump.alive`（5 秒无新快照且无指令在执行 = 停摆）；`send.py` 会在下发前警告。**停摆后没有自愈手段**，只能重启该工程编辑器 |
 | BUG-011 | 已实测 | MCP 桥 `_DiscoverArgs` 少了 `command` 字段 → 慢路径 `AttributeError` → `tools/list` 整条返回 `-32603`，客户端里「这套工具没了」。已补字段 + `ToolRegistry._rebuild` 加非预期异常兜底（退化为仅 5 个元工具并 60 秒后重试）。实测：死端口 `0 工具 → 5 元工具`；island_back 编辑器开着时 75 个工具 |
 | IMPR-011 | 已实测 | `scene.open` 打开的就是当前场景时不弹确认窗、不重载：新增可选接口 `IConsentPrecheck`（`CommandRunner` 把实例化与 `CommandContext` 构造提到门禁之前，`TrySkipConsent` 反射问一次）。判定四条：非叠加 + 目标是当前唯一场景（`sceneCount==1`）+ 无未保存改动 + 非 Play。实测 island_back 对当前 `Shop.unity` 重发 → `noop:true` 成功。**反向分支（additive/多场景/脏场景仍弹窗）未真机验** |
+| IMPR-010 | 已实现，**未真机验弹窗** | 敏感操作确认改成**真模态** `EditorUtility.DisplayDialog`（必然抢焦点，不可能被人漏看）。配套三条：模态期间**停表**（`PauseCountdown` 把 deadline 整段推后）、`/v1/status` 的 `consent.modalOpen` + `pump.note` 说明"泵停在这里是预期的"、逐条排队。**行为变化：真模态没有超时，不点就一直等，编辑器主线程全程阻塞**；`-batchmode` 仍走非模态窗 + 超时拒绝 |
+| FEAT-018 | 已实现，**未真机跑过** | 新增只读指令 `scene.state`：`activeScenePath` / `activeSceneName` / `sceneCount` / `dirtyCount` / `playing` + 逐场景 `isDirty` / `isLoaded`。用来回答"现在开的是哪个场景、改过没保存吗"，替代翻 `scene.hierarchy` 的大输出 |
+| FEAT-016(进阶) | 已实现，**未真机跑过** | `prefab.replaceWithInstanceOf`：把已展开的断链节点一步替换成 Prefab 实例（原地实例化 → 复用布局 → 删旧）。`layout` 默认 `rect`（anchors/pivot/sizeDelta/anchoredPosition + TRS），不支持替换根，旧节点已是 `Connected` 时默认拒绝（`force:true` 放行） |
+| IMPR-022 | 已实现 | `ProtocolVersion` 1 → 2（`/v1/status` 多了 `pump` 与 `stale`，纯附加）。桥侧不做版本比对，提号不影响现有客户端 |
+| IMPR-023 | 已实现，**未在 GUI 里验** | 内存水位五个阈值改为**按工程**存（`Scoped`），本工程首次读时继承旧全局值一次（旧键不删，其它工程也要继承）。控制台标题改为「按本工程」 |
 | Phase 2 | 未开工 | 跨帧执行器、`runtime.screenshot`、断言原语、`runtime.invoke`。见 `FEAT-001` 末尾 |
 
 ### 8.1 已改未实测清单（IMPR-020，用户批注：写进交接文档即可，31 号前不安排复验专场）
@@ -230,11 +248,19 @@ python Tools/deploy.py --module adb <目标> --verify   # 本机其它工程（�
 | FEAT-016 | `prefab.renameNode` 真的改名且实例连接不断 | 同上 | 改一个嵌套实例根的名字，再 `prefab.tree` 看 `instanceStatus` 仍为 `Connected` |
 | FEAT-016 | `prefab.tree` 的 `instanceCount` 只数实例根 | 同上 | 数一数母 Prefab 里子 Prefab 实例的个数，应与 `instanceCount` 相等（不是"实例节点总数"） |
 | IMPR-008(2026) | 控制台改阈值后下一次执行立即生效 | 要开着的编辑器 | 把「工作集 提示档」改成 1 GB，再 `editor.state` 看 `memory.thresholds` 跟着变 |
+| IMPR-023 | 阈值按工程隔离：A 工程改值、切到 B 工程仍是默认/另一套值 | 要两个开着的编辑器 + 人点 GUI | 在 A 把「工作集 提示档」改成 1，切到 B 打开控制台看是否仍为 16；再切回 A 应仍是 1 |
+| IMPR-010 | 真模态确认框真的弹出来、抢焦点、点「允许」后 `editor.play` 真的执行；不点会一直等 | 要人在场点窗口 | 关掉「全权委托」，发一条 `editor.play`：应立即弹出编辑器级对话框（独占焦点），界面无法操作；点「允许」后 Play 真的进；再发一次并故意不点，`/v1/status` 应报 `consent.modalOpen=true` 且 `pump.alive=false`、`pump.note` 说明是确认框 |
+| FEAT-018 | `scene.state` 返回值与实际场景一致（含 `isDirty`） | 要能回指令的编辑器 | 打开一个场景，改一个字段不保存，发 `{"id":"scene.state"}`，`dirtyCount` 应为 1、`scenes[0].isDirty=true`；`scene.save` 后再查应为 0 |
+| FEAT-016(进阶) | `replaceWithInstanceOf` 真的替换成了 `Connected` 实例且布局没走形 | 要能回指令的编辑器 + 一个可改的 Prefab | 找一个断链的展开节点（`prefab.tree` 里 `instanceStatus=NotAPrefab`），下发一条带 `layout:"rect"` 的替换，看返回 `connected=true`、`copiedLayoutFields` 有 8 项，再到编辑器里目视位置/尺寸没变 |
 
 > **⚠ 2026-11-01 现场**：`MyUnityProject` 的编辑器**主线程泵处于停摆状态**
 > （`queue` 只增不减、6 秒 CPU 增量 0.031 秒），所以本轮所有指令都下发不了、HTTP 编译也没跑成。
 > 上面那几条「要编辑器正常回指令」的复验会一直挂着，直到有人重启那个编辑器。
 > 不要把这个状态当成"指令系统坏了"——同一套代码在另外三个工程里正常。详见 §5.1。
+>
+> **✅ 2026-11-03 更新：那个编辑器已经自己恢复**（`pump.alive=true`、`queue=0`、CPU 正常），
+> 但它的 **HTTP 服务当前没开**（57831/17932 等端口全 closed），所以本轮仍发不了指令 —— 只能靠
+> "部署后编辑器自动重编 + 核 dll"来验证编译。要跑指令端到端，得在它的菜单里把 HTTP 指令服务打开。
 >
 > **已真机验证（不是"看起来对"）**：FEAT-016 依赖的 `PrefabUtility` 行为已用临时探针在本仓库
 > Unity 2021.3.16f1c1 上跑过——Prefab 内容里 `InstantiatePrefab` → `Connected`、改名后仍 `Connected`、
