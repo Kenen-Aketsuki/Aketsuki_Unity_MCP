@@ -340,8 +340,17 @@ namespace Aketsuki.UnityMcp
     /// </summary>
     public static class HttpProtocol
     {
-        /// <summary>协议版本，客户端可据此判断兼容性</summary>
-        public const int ProtocolVersion = 1;
+        /// <summary>
+        /// 协议版本，客户端可据此判断兼容性。
+        /// <para>
+        /// <b>2</b>（2026-11-03，用户批注「可以」）：相对 1 只有<b>附加</b>字段，没有破坏性改动 ——
+        /// <c>/v1/status</c> 多了 <c>pump</c> 块（<c>alive</c> / <c>snapshotAgeMs</c> /
+        /// <c>snapshotUpdatedUtc</c> / <c>frames</c> / <c>executing</c> / <c>note</c>）与顶层 <c>stale</c>。
+        /// 新版客户端读旧服务端按"字段缺失"降级，旧客户端忽略新字段，两边都能跑；
+        /// 提版本号只是让"响应结构确实变了"这件事在握手时可见。
+        /// </para>
+        /// </summary>
+        public const int ProtocolVersion = 2;
 
         /// <summary>令牌请求头名称</summary>
         public const string TokenHeader = "X-Cmd-Token";
@@ -619,15 +628,30 @@ namespace Aketsuki.UnityMcp
             var note = string.Empty;
             if (stale)
             {
-                var pending = env.PendingCount;
-                var how = unknown
-                    ? "主线程泵从没有跑过"
-                    : "主线程泵已 " + (ageMs / 1000.0).ToString("0.0") + " 秒没有推进";
-                note = pending > 0
-                    ? how + "：队列里还有 " + pending + " 条指令不会被消费，"
-                      + "compiling / updating / busy 都是冻结的旧值，不可信。"
-                      + "常见原因是 Unity 主线程被阻塞或被模态循环卡住，需要人工处理（通常是重启编辑器）。"
-                    : how + "：这份状态里的 compiling / updating / busy 是冻结的旧值，不可信。";
+                // 真模态确认框（IMPR-010）开着时主线程必然停在这里：这是**预期阻塞**，不是泵死了。
+                // 必须单独说清楚，否则看到 stale=true 的人第一反应是重启编辑器，白丢现场。
+                var consent = env.Consent;
+                var modalOpen = consent != null && consent["modalOpen"] != null
+                                && consent["modalOpen"].AsBool(false);
+
+                if (modalOpen)
+                {
+                    note = "主线程正停在「敏感操作确认」对话框上（consent.modalOpen=true）："
+                           + "这是预期的等待，人在对话框里点「允许 / 拒绝」后自动恢复，不需要重启编辑器。"
+                           + "此时 compiling / updating / busy 是冻结的旧值，不可信。";
+                }
+                else
+                {
+                    var pending = env.PendingCount;
+                    var how = unknown
+                        ? "主线程泵从没有跑过"
+                        : "主线程泵已 " + (ageMs / 1000.0).ToString("0.0") + " 秒没有推进";
+                    note = pending > 0
+                        ? how + "：队列里还有 " + pending + " 条指令不会被消费，"
+                          + "compiling / updating / busy 都是冻结的旧值，不可信。"
+                          + "常见原因是 Unity 主线程被阻塞或被模态循环卡住，需要人工处理（通常是重启编辑器）。"
+                        : how + "：这份状态里的 compiling / updating / busy 是冻结的旧值，不可信。";
+                }
             }
 
             pump.Set("note", JsonValue.Of(note));
