@@ -37,29 +37,24 @@ namespace Aketsuki.UnityMcp.Editor
         private const string PythonPrefKey = "CivilRev.CommandSystem.McpPython";
 
         /// <summary>
-        /// 单工程时代的通用键名。
+        /// 唯一服务键名。**所有工程共用这一条**。
         /// <para>
-        /// 以前所有工程都往 <c>mcpServers["unity-cmd"]</c> 里写，装第二个工程时会把上一个工程的
-        /// 条目**原地覆盖**掉——表现为"换了个工程，原来那个工程的 MCP 就没了"。
-        /// 现在按工程派生键名；只有这个键空闲、或本来就指向本工程时才继续沿用它，
-        /// 保持单工程场景的配置不变。
+        /// 演进过程（别改回去）：
+        /// ① 最早所有工程都写 <c>unity-cmd</c>，装第二个工程会把上一个原地覆盖，
+        ///    表现为"换个工程，原来那个的 MCP 就没了"；
+        /// ② 于是改成按工程派生 <c>unity-cmd-&lt;工程名&gt;</c>，互不覆盖了，
+        ///    代价却是 MCP 客户端里堆 N 条 server、每条都把几十个工具铺进上下文；
+        /// ③ 现在桥本身能跨工程发现（全局索引 + target 参数），一条 server 就够，
+        ///    所以回到唯一键，并在写入时把 ② 留下的派生键清掉。
         /// </para>
         /// </summary>
-        private const string LegacyServerKey = "unity-cmd";
+        private const string ServerKey = "unity-cmd";
+
+        /// <summary>② 代遗留的派生键前缀，安装时清理</summary>
+        private const string LegacyDerivedPrefix = "unity-cmd-";
 
         /// <summary>最近一次写入时实际使用的服务键（用于界面提示）</summary>
-        private static string _lastServerKey = LegacyServerKey;
-
-        /// <summary>工程目录名，用于派生服务键</summary>
-        private static string ProjectName
-        {
-            get
-            {
-                var trimmed = ProjectRoot.TrimEnd('\\', '/');
-                var index = trimmed.LastIndexOfAny(new[] { '\\', '/' });
-                return index >= 0 && index + 1 < trimmed.Length ? trimmed.Substring(index + 1) : trimmed;
-            }
-        }
+        private static string _lastServerKey = ServerKey;
 
         /// <summary>
         /// 工作区根：父目录有 <c>.workbuddy</c> 就取父目录，否则取工程根。
@@ -562,50 +557,64 @@ namespace Aketsuki.UnityMcp.Editor
                 servers = JsonValue.NewObject();
             }
 
-            // 键名要按"当前已有哪些工程"决定，所以必须在拿到 root 之后算
-            _lastServerKey = ResolveServerKey(root);
+            // 键名固定：桥自己会跨工程发现，一个工程一条 server 是上一代的遗留形态
+            _lastServerKey = ServerKey;
             servers.Set(_lastServerKey, BuildServerEntry());
+
+            var removed = RemoveLegacyDerivedKeys(servers);
             // 取出来的可能是副本实现，显式回设一次，保证一定写进 root
             root.Set("mcpServers", servers);
 
             File.WriteAllText(path, root.ToJson(true), new UTF8Encoding(false));
+            if (removed.Count > 0)
+            {
+                CommandLog.Info("已清理旧版按工程派生的 MCP 条目：" + string.Join(", ", removed.ToArray()));
+            }
+
             return path;
         }
 
         /// <summary>
-        /// 决定本工程写进 mcp.json 的服务键名。
+        /// 删掉上一代按工程派生的 <c>unity-cmd-*</c> 条目。
         /// <para>
-        /// <c>unity-cmd</c> 空闲、或本来就指向本工程 → 继续用 <c>unity-cmd</c>（单工程场景配置不变）。
-        /// 已被别的工程占用 → 用 <c>unity-cmd-&lt;工程名&gt;</c>，重名再加 8 位路径哈希。
+        /// 这些条目现在全是冗余：它们各自拉起一个桥进程、各自把几十个工具铺进客户端上下文，
+        /// 而新的 <c>unity-cmd</c> 一条就能覆盖所有工程。留着只会让上下文翻好几倍。
         /// </para>
         /// </summary>
-        private static string ResolveServerKey(JsonValue root)
+        private static List<string> RemoveLegacyDerivedKeys(JsonValue servers)
         {
-            var servers = root == null ? null : root["mcpServers"];
-            if (servers == null || !servers.IsObject || !servers.ContainsKey(LegacyServerKey))
+            var removed = new List<string>();
+            if (servers == null || !servers.IsObject)
             {
-                return LegacyServerKey;
+                return removed;
             }
 
-            if (EntryBelongsToThisProject(servers[LegacyServerKey]))
+            var keys = new List<string>();
+            foreach (var key in servers.Keys)
             {
-                return LegacyServerKey;
+                keys.Add(key);
             }
 
-            var key = LegacyServerKey + "-" + SanitizeKey(ProjectName);
-            if (servers.ContainsKey(key) && !EntryBelongsToThisProject(servers[key]))
+            foreach (var key in keys)
             {
-                key = key + "-" + ShortPathHash(ProjectRoot);
+                if (key == ServerKey || !key.StartsWith(LegacyDerivedPrefix, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                servers.Remove(key);
+                removed.Add(key);
             }
 
-            return key;
+            return removed;
         }
 
         /// <summary>
         /// 判断一条 mcpServers 条目是否属于本工程。
         /// <para>
-        /// 依据有两个：args 里的 <c>--project-root</c>，以及脚本自身的绝对路径
-        /// （脚本部署在 <c>&lt;工作区&gt;/.workbuddy/skills/unity-cmd/scripts/</c> 下）。
+        /// 现在的配置里已经没有 <c>--project-root</c> 了，只剩脚本自身的绝对路径
+        /// （脚本部署在 <c>&lt;工作区&gt;/.workbuddy/skills/unity-cmd/scripts/</c> 下），
+        /// 它同时含工程根与工作区根，判断依然成立。
         /// 直接看序列化后的文本即可，不必逐字段解析。
         /// </para>
         /// </summary>
@@ -626,65 +635,21 @@ namespace Aketsuki.UnityMcp.Editor
             return path == null ? string.Empty : path.Replace('\\', '/');
         }
 
-        /// <summary>工程名 → 可用作 JSON 键的标识（只留 ascii 字母数字与小横线）</summary>
-        private static string SanitizeKey(string raw)
-        {
-            var builder = new StringBuilder();
-            foreach (var c in raw ?? string.Empty)
-            {
-                if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'))
-                {
-                    builder.Append(c);
-                }
-                else if (c >= 'A' && c <= 'Z')
-                {
-                    builder.Append(char.ToLowerInvariant(c));
-                }
-                else
-                {
-                    builder.Append('-');
-                }
-            }
-
-            var text = builder.ToString().Trim('-');
-            return text.Length == 0 ? "project" : text;
-        }
-
-        /// <summary>路径短哈希（8 hex），算法与服务端信息文件名的 hash 一致</summary>
-        private static string ShortPathHash(string path)
-        {
-            try
-            {
-                using (var sha1 = System.Security.Cryptography.SHA1.Create())
-                {
-                    var bytes = sha1.ComputeHash(
-                        Encoding.UTF8.GetBytes(path.Replace('\\', '/').ToLowerInvariant()));
-                    var builder = new StringBuilder(8);
-                    for (var i = 0; i < 4; i++)
-                    {
-                        builder.Append(bytes[i].ToString("x2"));
-                    }
-
-                    return builder.ToString();
-                }
-            }
-            catch (Exception)
-            {
-                return "00000000";
-            }
-        }
-
         /// <summary>构造 mcpServers["unity-cmd"] 的内容</summary>
         private static JsonValue BuildServerEntry()
         {
             var script = Path.Combine(InstallScriptDir, "unity_mcp_server.py");
 
+            // 刻意**不再传 --project-root**：
+            // 桥靠全局索引发现所有工程，只开一个时自动选中，开多个时用 target 参数指定。
+            // 一旦写死工程根，这条 server 就又绑死在一个工程上，回到"每个工程配一条"的老路。
             var args = JsonValue.FromArray(new[]
             {
                 JsonValue.Of(script),
-                // 显式给工程根：脚本虽部署在 .workbuddy 下，但显式指明更抗路径变化
-                JsonValue.Of("--project-root"),
-                JsonValue.Of(ProjectRoot)
+                // 默认 meta 模式：只注册 6 个元工具，常驻上下文约 3k 字符。
+                // 想恢复"一条指令一个工具"改成 full，或想要按域折叠改成 group。
+                JsonValue.Of("--tool-mode"),
+                JsonValue.Of("meta")
             });
 
             var env = JsonValue.NewObject();

@@ -30,12 +30,35 @@ python scripts/send.py send <文件>.json --request-id <ID>  # 幂等下发（�
 python scripts/send.py cancel                 # 请求协作式取消当前批次
 python scripts/send.py compile                # 编译 + 等待 + 回传错误（改 .cs 后的闭环）
 python scripts/send.py seq <步骤>.json         # 顺序执行多步，步间由客户端等待（跨帧节奏）
+python scripts/send.py status --target <工程>   # 跨工程：按工程名/路径定位另一个工程的编辑器
 ```
 
 客户端从 `<工作空间>/.workbuddy/UnityEditCommand/.http-info.<projectHash>` 读取端口与令牌，
 **不要硬编码端口**——端口被占用时服务端会自动避让，写死必然连错。
 文件名带工程 hash（工程路径 SHA1 前 8 位）：同一工作区下同时开着多个 Unity 工程时，
 各自的信息文件互不覆盖。旧版无 hash 的 `.http-info` 仍被兼容读取（过渡期）。
+
+### 跨工程选址（`--target`）
+
+`.http-info` 是**按工作区**分散的，脚本默认只认自己所在的那个工作区。在一份 MCP 仓库里
+跑 `send.py status`，看不到隔壁工程的编辑器 —— 报出来是「Unity 编辑器可能没开着」，
+**这是假阴性**（2026-11-03 实际踩到：编辑器活得很好，在 57843，脚本却对着本仓库残留的
+57831 扫了一圈说"没开"）。
+
+`--target` 把 Unity 侧写的**全局索引**（`%LOCALAPPDATA%\Aketsuki\UnityMcp\targets\*.json`）
+暴露给 CLI，三种写法等价，都能落到同一个工程根：
+
+```bash
+python scripts/send.py status --target MyUnityProject    # 工程名（也支持部分匹配）
+python scripts/send.py status --target D:/Work/MyUnityProject   # 工程根路径
+python scripts/send.py status --target ".../.http-info.df0c4d80"          # 信息文件
+```
+
+- 名字有歧义（两个同名 clone）时**报错并列出全部候选**，绝不猜一个 —— 猜错等于把指令发进别人工程。
+- 指定后进入**严格选址**：只认 `projectPath` 完全一致的编辑器，连不上就失败，绝不降级到隔壁工程。
+- `--target` 与 `--project-root` 是同一件事，同时给会直接报错。
+- 不带 `--target` 且本工作区一个端点都连不上时，报错里会列出全局索引里的其它工程，
+  提示你加 `--target` —— 别再把"别的工程开着"误读成"Unity 没开"。
 
 ### 端点定位（最重要的一件事）
 
@@ -115,50 +138,108 @@ stdio 桥把发现逻辑关在桥进程内部（复用 `send.py` 的 `.http-info
 
 ### 启用
 
-配置写在 `~/.workbuddy/mcp.json`：
+配置写在 `~/.workbuddy/mcp.json`，**一条 server 管所有工程**：
 
 ```json
 {
   "mcpServers": {
     "unity-cmd": {
       "command": "<python 绝对路径>",
-      "args": ["<工作空间>/.workbuddy/skills/unity-cmd/scripts/unity_mcp_server.py"]
+      "args": [
+        "<任一工程>/.workbuddy/skills/unity-cmd/scripts/unity_mcp_server.py",
+        "--tool-mode", "meta"
+      ]
     }
   }
 }
 ```
 
 写完后**必须到连接器管理页点「信任」**，MCP 才会真正启动。
-桥是**一工程一份**：它从脚本位置向上找 `.workbuddy` 推出工作区，接另一个 Unity 工程就复制一份
-脚本并单独注册。
 
 > 如果本项目是通过 **UnityPackage** 引入指令系统的，以上步骤可以跳过：
 > 菜单 `Tools / 指令系统 / MCP / ① 安装桥到本工程` 会自动复制脚本并合并 mcp.json
-> （保留文件里其它 MCP 服务、写前自动备份）。装完仍需要手动点一次「信任」。
+> （保留文件里其它 MCP 服务、写前自动备份、**顺手清掉上一代按工程派生的 `unity-cmd-*` 条目**）。
+> 装完仍需要手动点一次「信任」。
 
-### 工具集
+**为什么不再需要每工程一条**：桥会读全局索引
+（`%LOCALAPPDATA%\Aketsuki\UnityMcp\targets\*.json`，由 Unity 侧 `GlobalTargetRegistry` 写入）
+发现本机所有开着的工程。只开一个时自动选中；开多个时用 `target` 参数指定。
+上一代每种工程一条 server 的做法，会让上下文成本 ×N，已废弃。
 
-固定 5 个元工具：
+### 工具模式（`--tool-mode`）
+
+| 模式 | 工具数 | 体积 | 适用 |
+| --- | --- | --- | --- |
+| `meta`（默认） | 6 | ~3.3k 字符 | 常态。模型按需用 `unity_list_commands` 查指令名 |
+| `group` | ~21 | ~11k 字符 | 不想多一轮查询、又嫌全量太贵。按域折叠成 `unity_<域>`，`action` 用 enum 列全 |
+| `full` | 全部（70+） | ~30k 字符 | 只在需要"一条指令一个细粒度 schema"时用。上一代的默认行为 |
+
+也可以用环境变量 `UNITY_MCP_TOOL_MODE` 指定，优先级低于命令行参数。
+
+### 工具集（`meta` 模式）
 
 | 工具 | 用途 |
 | --- | --- |
 | `unity_status` | 编辑器状态 + 当前执行中的指令与耗时 |
+| `unity_targets` | 列出本机开着的 Unity 工程（`probe=true` 时逐个探活） |
 | `unity_execute` | 一次下发多条指令（服务端串行执行），支持 `dryRun` / `requestId` |
-| `unity_list_commands` | 指令清单与参数说明 |
+| `unity_list_commands` | 指令清单（`prefix` 收窄、`verbose` 看参数） |
 | `unity_cancel` | 协作式取消当前批次 |
 | `unity_compile_and_wait` | 触发重编译并等到编辑器重新空闲（跨域重载自动重连） |
 
-外加**动态生成**的 typed 工具：`unity_asset_compile`、`unity_file_write`、`unity_ui_button`……
-命名规则是「指令 ID 的点换成下划线」，参数 schema 由服务端 `/v1/commands` 的 `usage` 实时解析
-（单一来源，不在桥里手写，避免与 `CommandAttribute` 漂移）。
-**新增一条 `[Command]` 指令就自动多一个 MCP 工具**，桥不需要改。
+**除 `unity_targets` 外，所有工具都接受 `target` 参数**，三种写法等价：
+工程名（`MyUnityProject`）、工程根绝对路径、`.http-info.<hash>` 绝对路径。
+省略时的行为：唯一活工程 → 自动用；多个并存 → 报错并列候选；显式指定过一次 → 之后沿用。
 
-Unity 没启动时 `tools/list` 仍会在半秒内返回那 5 个元工具，调用会得到清晰的中文提示，
-不会卡住、也不会崩。
-**此时看不到 `unity_scene_open` 这类 typed 工具是正常的**（它们靠服务端 `/v1/commands` 生成，
-编辑器不在就没有来源），不是包丢了、也不是桥坏了——先把编辑器打开，工具就会自己回来（缓存 60 秒）。
+`group` 模式下额外有 `unity_gameobject` / `unity_prefab` / `unity_scene` / `unity_ui` /
+`unity_component` / `unity_asset` / `unity_editor` / `unity_runtime` / `unity_adb` /
+`unity_file` / `unity_addressables` / `unity_consent` / `unity_var` / `unity_capture` /
+`unity_misc`，调用形如 `{ "action": "find", "params": {...} }`。
+
+`full` 模式下才有 typed 工具：`unity_asset_compile`、`unity_file_write`……
+命名规则是「指令 ID 的点换成下划线」，schema 由服务端 `/v1/commands` 的 `usage` 实时解析
+（单一来源，不在桥里手写，避免与 `CommandAttribute` 漂移）。
+
+Unity 没启动时 `tools/list` 仍会在半秒内返回元工具，调用会得到清晰的中文提示，
+不会卡住、也不会崩。`group` / `full` 模式下此时还会**退化成只有元工具**——
+它们依赖服务端 `/v1/commands` 生成，编辑器不在就没有来源。这不是包丢了。
 这条曾经真的坏过：`tools/list` 整个抛 `-32603`、客户端里一条工具都没有（BUG-011）。
-现在桥有兜底：typed 工具生成失败一律退化成"只有元工具"，`unity_status` 永远调得到。
+现在桥有兜底，`unity_status` 永远调得到。
+
+## 指令速查（`meta` 模式下先看这里，能省一次 `unity_list_commands`）
+
+> 下面是本仓库（`com.aketsuki.unity-mcp`）的完整指令集。目标工程若额外装了客制化指令
+> （如 `capture.*`）或没装某个模块（如 `ProjectB` 不装 `adb.*`），以
+> `unity_list_commands` 的实际返回为准。**权威来源永远是服务端**，本表只是省一次往返。
+
+**GameObject**（`gameobject.*`）：`create` 建节点、`instantiate` 实例化 Prefab（保连接）、
+`find` 按名/类型/路径找、`rename`、`setActive`、`setParent`、`setProperty`（layer/tag/isStatic）、
+`duplicate`、`destroy`
+
+**场景**（`scene.*`）：`list` / `hierarchy` / `inspect` / `state` / `open`※ / `reload`※ /
+`save` / `create` / `delete`（※ 敏感操作，会弹确认框）
+
+**Prefab**（`prefab.*`）：`tree` 看结构、`addNode` / `removeNode` / `delete` / `renameNode` /
+`duplicateNode` 改结构、`instantiatePrefab` 放场景、`replaceWithInstanceOf` 换成实例
+
+**UI**（`ui.*`）：`canvas` / `uiRoot` / `node` / `button` / `image` / `text` / `tmpText` /
+`savePrefab`
+
+**组件**（`component.*`）：`add` / `remove` / `get` / `setField` / `setFields`（多字段原子写）
+
+**资源**（`asset.*`）：`refresh` / `save` / `compile` / `compileReport` / `importSprite`
+
+**编辑器**（`editor.*`）：`state` 只读、`play`※ / `stop`※ 进出 Play（敏感操作）
+
+**运行时**（`runtime.*`，默认关闭，需在控制台开「启用运行时指令」）：
+`play` / `stop` / `hierarchy` / `click` / `scroll` / `input`
+
+**ADB**（`adb.*`，仅装了 adb 模块的工程）：`devices` / `logcat.start` / `logcat.read` /
+`logcat.status` / `logcat.stop`
+
+**其它**：`file.read` / `file.write` / `file.run`、`var.dump` / `var.set`、
+`console.read`、`log`、`batch`、`commands.list`、`command.cleanup`、
+`consent.list` / `consent.fetch`、`addressables.addEntry` / `addressables.removeEntry`
 
 ### 协议实现要点（改桥时别踩）
 
@@ -166,8 +247,10 @@ Unity 没启动时 `tools/list` 仍会在半秒内返回那 5 个元工具，调
   消息内不得含换行；所有日志走 stderr。Windows 上还必须 `reconfigure(encoding="utf-8", newline="\n")`，
   否则默认 cp936 / `\r\n` 会让客户端解析失败。
 - **每请求独立线程**：慢的 `execute` 不能挡住 `cancel` / `status` 这类需要穿透的调用。
-- **端点缓存**：优先读本工程信息文件（快路径 ~0.5s）；失败才退回 `send.discover` 的端口扫描
-  （最坏要串行探测 10 个端口 × 3s，会让首次 `tools/list` 卡十几秒）。
+- **端点缓存**：显式目标（`project_root` / `info_path` / 全局索引）走
+  `send.target_from_project_root`，只读该工程的信息文件，**不碰 `send` 的模块级全局状态**——
+  这是能同时服务多个工程的前提。只有完全没有目标线索时才退回 `send.discover` 的端口扫描。
+- **`target` 绝不能混进指令 params**：它是桥自己的寻址参数，混进去服务端会当成未知参数报错。
 
 ## 编辑-编译-纠错闭环（改 .cs 必须走这条）
 

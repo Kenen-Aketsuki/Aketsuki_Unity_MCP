@@ -199,7 +199,7 @@ python Tools/deploy.py --module adb <目标> --verify   # 本机其它工程（�
 | 编号 | 状态 | 说明 |
 | --- | --- | --- |
 | BUG-005 | **已改未实测** | `runtime.scroll` 横向 amount 正负号修正（commit `68f564f`），只过了编译与部署。真机要进 Play，用户说自己找时间做（IMPR-012） |
-| IMPR-008 | 决定**不做** | 把 5 条 unity-cmd 合并成一个 MCP server。代价是破坏现有工具签名 |
+| IMPR-008 | **已执行（2026-11-03 晚，换了方案）** | 原结论「不做：合并成单 server 会破坏工具签名」。新方案不改签名，而是**剪掉工具数量** + **一条 server 全域发现**：桥加 `--tool-mode meta\|group\|full`（默认 `meta`：6 工具 / ~3.3k 字符，比 `full` 的 80 工具 / 29k 字符降 ~90%），Unity 侧写全局目标索引 `%LOCALAPPDATA%\Aketsuki\UnityMcp\targets\*.json`，`McpSetup` 键名固定 `unity-cmd` 并清掉 `unity-cmd-*` 派生键。本机 `mcp.json` 已从 8 条并为 4 条（备份 `mcp.json.bak-20261103-225057`） |
 | IMPR-009 | 已执行 | `ProjectA` 不装回，已从 `deploy_targets.json` 摘除 |
 | IMPR-010 | 已执行（最小版） | 只做客户端侧等待（`send.py seq`），服务端跨帧执行器**没做** |
 | IMPR-011 | 已执行 | 改进清单归档成 `DOC-002`，原文件删除 |
@@ -222,11 +222,13 @@ python Tools/deploy.py --module adb <目标> --verify   # 本机其它工程（�
 | BUG-011 | 已实测 | MCP 桥 `_DiscoverArgs` 少了 `command` 字段 → 慢路径 `AttributeError` → `tools/list` 整条返回 `-32603`，客户端里「这套工具没了」。已补字段 + `ToolRegistry._rebuild` 加非预期异常兜底（退化为仅 5 个元工具并 60 秒后重试）。实测：死端口 `0 工具 → 5 元工具`；island_back 编辑器开着时 75 个工具 |
 | IMPR-011 | 已实测 | `scene.open` 打开的就是当前场景时不弹确认窗、不重载：新增可选接口 `IConsentPrecheck`（`CommandRunner` 把实例化与 `CommandContext` 构造提到门禁之前，`TrySkipConsent` 反射问一次）。判定四条：非叠加 + 目标是当前唯一场景（`sceneCount==1`）+ 无未保存改动 + 非 Play。实测 island_back 对当前 `Shop.unity` 重发 → `noop:true` 成功。**反向分支（additive/多场景/脏场景仍弹窗）未真机验** |
 | IMPR-010 | 已实现，**未真机验弹窗** | 敏感操作确认改成**真模态** `EditorUtility.DisplayDialog`（必然抢焦点，不可能被人漏看）。配套三条：模态期间**停表**（`PauseCountdown` 把 deadline 整段推后）、`/v1/status` 的 `consent.modalOpen` + `pump.note` 说明"泵停在这里是预期的"、逐条排队。**行为变化：真模态没有超时，不点就一直等，编辑器主线程全程阻塞**；`-batchmode` 仍走非模态窗 + 超时拒绝 |
-| FEAT-018 | 已实现，**未真机跑过** | 新增只读指令 `scene.state`：`activeScenePath` / `activeSceneName` / `sceneCount` / `dirtyCount` / `playing` + 逐场景 `isDirty` / `isLoaded`。用来回答"现在开的是哪个场景、改过没保存吗"，替代翻 `scene.hierarchy` 的大输出 |
+| FEAT-018 | **已实测**（2026-11-03 自动化跑补验） | 只读指令 `scene.state`：`activeScenePath` / `activeSceneName` / `sceneCount` / `dirtyCount` / `playing` + 逐场景 `isDirty` / `isLoaded` / `rootCount`。island_back 实测返回 `Assets/Scenes/NamingScene.unity`、`dirtyCount:0`、`rootCount:5`。用来回答"现在开的是哪个场景、改过没保存吗"，替代翻 `scene.hierarchy` 的大输出 |
 | FEAT-016(进阶) | 已实现，**未真机跑过** | `prefab.replaceWithInstanceOf`：把已展开的断链节点一步替换成 Prefab 实例（原地实例化 → 复用布局 → 删旧）。`layout` 默认 `rect`（anchors/pivot/sizeDelta/anchoredPosition + TRS），不支持替换根，旧节点已是 `Connected` 时默认拒绝（`force:true` 放行） |
 | IMPR-022 | 已实现 | `ProtocolVersion` 1 → 2（`/v1/status` 多了 `pump` 与 `stale`，纯附加）。桥侧不做版本比对，提号不影响现有客户端 |
 | IMPR-023 | 已实现，**未在 GUI 里验** | 内存水位五个阈值改为**按工程**存（`Scoped`），本工程首次读时继承旧全局值一次（旧键不删，其它工程也要继承）。控制台标题改为「按本工程」 |
 | Phase 2 | 未开工 | 跨帧执行器、`runtime.screenshot`、断言原语、`runtime.invoke`。见 `FEAT-001` 末尾 |
+| 单 server 多工程 | 已实现并实测 | `GlobalTargetRegistry` 写全局索引（`/v1/status` 的 `.http-info` 同步落一份）；桥 v2.0.0 `--tool-mode meta\|group\|full`、`TargetPool` 粘性选择；`Tools/test_targets.py` 25 项全过，`Tools/probe_bridge.py` 对 island_back 实跑 status/execute/targets/list_commands/域工具全通过。**未验**：`full` 模式下的 typed 工具、`group` 模式在真实客户端里的表现、多个编辑器同时开着时 `unity_targets` 的排序 |
+| CLI `--target` | 已实现并实测 | `send.py --target <工程名\|工程根\|.http-info>`：跨工程选址，走全局索引。四种写法在 island_back（57843）上实跑通过，含 `send - --dry-run` 端到端；`Tools/test_targets.py` 新增 6 项用例 |
 
 ### 8.1 已改未实测清单（IMPR-020，用户批注：写进交接文档即可，31 号前不安排复验专场）
 

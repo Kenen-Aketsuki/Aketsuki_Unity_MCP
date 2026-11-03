@@ -1064,6 +1064,11 @@ namespace Aketsuki.UnityMcp.Editor
 
                 PruneStaleInfoCopies(identity != null ? identity.Pid : 0);
                 AtomicFileWriter.WriteAllText(PerPidInfoFilePath, text, encoding);
+
+                // 顺手更新跨工程全局索引（MCP 客户端只配一条 server 时靠它发现本工程）。
+                // 让位给别的编辑器时也照写：同工程两个编辑器的端口都是有效目标，
+                // 客户端 probe 时会自己校验 identity.projectPath，选哪个都能连到同一工程。
+                GlobalTargetRegistry.Publish(text, ProjectHash);
             }
             catch (Exception e)
             {
@@ -1205,6 +1210,9 @@ namespace Aketsuki.UnityMcp.Editor
         {
             DeleteIfExists(InfoFilePath);
             DeleteIfExists(PerPidInfoFilePath);
+
+            // 全局索引条目也一起撤掉：否则客户端会一直把已经关掉的服务列在候选里
+            GlobalTargetRegistry.Unpublish(ProjectHash);
         }
 
         private static void DeleteIfExists(string path)

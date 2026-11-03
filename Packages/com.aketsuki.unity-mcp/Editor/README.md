@@ -218,7 +218,14 @@ python scripts/send.py status                  # 探活 + 编辑器状态
 python scripts/send.py commands                # 列出可用指令
 python scripts/send.py send ui_round_menu.json # 下发并等执行报告
 python scripts/send.py send ui_round_menu.json --dry-run   # 只校验
+python scripts/send.py status --target <工程名|路径>        # 跨工程：连另一个工程的编辑器
 ```
+
+`--target` 是「我不在这个工程目录里，但我要连它」的唯一正解。`.http-info` 按工作区分散，
+不带 `--target` 时脚本只看自己所在工作区——报「Unity 编辑器可能没开着」是假阴性。
+它走 Unity 侧写的全局索引（`GlobalTargetRegistry`），三种写法等价：工程名 / 工程根路径 /
+`.http-info` 文件路径；名字有歧义时报错列候选，指定后进入严格选址（只认 `projectPath`
+完全一致的编辑器，绝不降级到隔壁工程）。
 
 ---
 
@@ -1044,8 +1051,7 @@ Assets/Editor/ExternalCommandSystem/
       "command": "<Python 解释器绝对路径>",
       "args": [
         "<工程根>/.workbuddy/skills/unity-cmd/scripts/unity_mcp_server.py",
-        "--project-root",
-        "<工程根>"
+        "--tool-mode", "meta"
       ],
       "env": { "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1" }
     }
@@ -1053,18 +1059,52 @@ Assets/Editor/ExternalCommandSystem/
 }
 ```
 
+**注意这里没有 `--project-root`**，这是刻意的：桥能跨工程发现，一条 server 管本机所有工程。
+写入时还会顺手清掉上一代按工程派生的 `unity-cmd-<工程名>` 条目——它们各自拉起一个进程、
+各自把几十个工具铺进客户端上下文，留着只会让成本翻倍。
+
 Python 解释器按以下顺序选取：`EditorPrefs` 里的 `CivilRev.CommandSystem.McpPython` →
 WorkBuddy 托管的 `~/.workbuddy/binaries/python/versions/*/python.exe` → PATH 上的 `python`。
 想换解释器就设那个 `EditorPrefs` 键。
 
-### 9.4 工具集
+### 9.4 工具集与折叠模式
 
-固定 5 个元工具：`unity_status` / `unity_execute` / `unity_list_commands` /
-`unity_cancel` / `unity_compile_and_wait`。
+`--tool-mode` 三档（也可用环境变量 `UNITY_MCP_TOOL_MODE`，命令行优先）：
 
-此外，桥会在 `tools/list` 时拉取 `/v1/commands`，把**每条指令动态映射成一个工具**
-（`asset.compile` → `unity_asset_compile`，参数 schema 由指令的 `usage` 解析生成）。
+| 模式 | 工具数 | `tools/list` 体积 | 说明 |
+| --- | --- | --- | --- |
+| `meta`（默认） | 6 | ~3.3k 字符 ≈ 1.7k token | 元工具 only，靠 `unity_list_commands` 按需查 |
+| `group` | ~21 | ~11k 字符 | 按指令 ID 前缀折叠成 `unity_<域>`，`action` 用 enum |
+| `full` | 全部（70+） | ~30k 字符 | 一条指令一个工具，旧行为 |
+
+为什么默认改成 `meta`：75 条指令全量铺开是 29k 字符 ≈ 1 万 token，**每个工程各一条 server 时
+这份成本还要乘 N**。上一代 5 条 server 的实测常驻成本接近 5 万 token，且工具选择准确率随数量下降。
+折叠后固定成本降到 ~1.7k token，代价只是首次用某个域时多一次 `unity_list_commands`。
+
+元工具：`unity_status` / `unity_targets` / `unity_execute` / `unity_list_commands` /
+`unity_cancel` / `unity_compile_and_wait`。除 `unity_targets` 外都接受 `target` 参数
+（工程名 / 工程根 / `.http-info` 绝对路径），省略时自动选唯一活工程，多工程并存则要求指明。
+
+`full` 模式下 `tools/list` 时会拉 `/v1/commands`，把**每条指令动态映射成一个工具**
+（`asset.compile` → `unity_asset_compile`，schema 由 `usage` 解析生成）。
 所以**新增一条 `[Command]` 指令，MCP 就自动多一个工具，桥不用改**。
+
+### 9.4.1 跨工程发现（全局目标索引）
+
+`.http-info` 是按工作区分散存放的，桥只能看自己那个工作区——这正是"必须每工程配一条 server"
+的根因。现在 Unity 侧会把同一份信息额外写一份到固定目录：
+
+```
+Windows  %LOCALAPPDATA%\Aketsuki\UnityMcp\targets\<projectHash>.json
+macOS    ~/Library/Application Support/Aketsuki/UnityMcp/targets/
+Linux    $XDG_DATA_HOME/Aketsuki/UnityMcp/targets/（默认 ~/.local/share）
+```
+
+C# 在 `GlobalTargetRegistry.DirectoryPath`，Python 在 `send.py:global_targets_dir()`
+——**两端口径必须一致**，改一端要同时改另一端。
+
+条目内容与 `.http-info` 同构。桥启动时扫这个目录，`probe` 判活（连不上就当它不存在），
+所以残留条目不会造成误连。服务停止时 `DeleteInfoFile` 会撤掉自己的条目。
 
 ### 9.5 打包（维护者用）
 

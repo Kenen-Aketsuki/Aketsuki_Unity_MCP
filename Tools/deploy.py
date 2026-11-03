@@ -699,7 +699,12 @@ def wait_endpoint(send, root, timeout):
             continue
         if proc.returncode == 0:
             return True, ""
-        last = ((proc.stderr or proc.stdout or "").strip().splitlines() or [""])[-1]
+        # 取**第一**行而不是最后一行：send.py 的报错是「原因 + 若干条建议」的结构，
+        # 末尾那几行是"要不要 --target 试试别的工程"之类的提示，当成原因输出会读成
+        # "指令服务没响应：它们不属于本工作区吗？…"（2026-11-03 实际出现过）。
+        lines = [line.strip() for line in (proc.stderr or proc.stdout or "").splitlines()
+                 if line.strip()]
+        last = (lines[0] if lines else "")[:160]
         time.sleep(5)
     return False, last
 

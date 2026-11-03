@@ -121,3 +121,6 @@ InitTestScene*.unity*
 # UPM tarball（npm pack 产出），同样是可重建的二进制
 /Tools/dist/
 /Tools/__pycache__/
+
+# Python 缓存（桥脚本与 Tools 下的自检脚本都会生成）
+__pycache__/

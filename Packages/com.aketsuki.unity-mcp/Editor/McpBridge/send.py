@@ -277,6 +277,244 @@ def load_primary_info(explicit_path=None):
     return None, None
 
 
+# ---------------------------------------------------------------- 跨工程全局索引
+#
+# `.http-info` 是按工作区分散的，MCP 桥只能看自己那个工作区。于是"每个工程配一条
+# MCP server"成了必然，装 N 个工程就是 N 条 server × 每条几十个工具。
+# 全局索引把"当前开着哪些 Unity"汇总到一个固定目录，一条 server 就能全域发现。
+#
+# 目录口径必须与 C# 的 GlobalTargetRegistry.DirectoryPath 完全一致：
+#   Windows  %LOCALAPPDATA%\Aketsuki\UnityMcp\targets
+#   macOS    ~/Library/Application Support/Aketsuki/UnityMcp/targets
+#   Linux    $XDG_DATA_HOME/Aketsuki/UnityMcp/targets（默认 ~/.local/share）
+# 任一端改算法，另一端就一个目标都找不到。
+
+GLOBAL_TARGETS_SUBDIR = ("Aketsuki", "UnityMcp", "targets")
+
+
+def global_targets_dir():
+    """全局目标目录（与 .NET 的 SpecialFolder.LocalApplicationData 对齐）。"""
+    if os.name == "nt":
+        root = os.environ.get("LOCALAPPDATA")
+        if not root:
+            root = os.path.join(os.path.expanduser("~"), "AppData", "Local")
+    elif sys.platform == "darwin":
+        root = os.path.join(os.path.expanduser("~"), "Library", "Application Support")
+    else:
+        root = os.environ.get("XDG_DATA_HOME") or os.path.join(
+            os.path.expanduser("~"), ".local", "share")
+    return os.path.join(root, *GLOBAL_TARGETS_SUBDIR)
+
+
+def list_global_targets():
+    """枚举全局索引里的全部工程条目。
+
+    返回 list[dict]：内容就是当初写下的 <c>.http-info</c>，额外补两个键
+    <c>_path</c>（条目文件绝对路径）与 <c>_hash</c>（工程 hash）。
+    这里<b>不做</b>存活过滤——判活必须 probe，光看文件时间会把"刚崩掉的编辑器"也当成活的。
+    """
+    items = []
+    try:
+        names = sorted(glob.glob(os.path.join(global_targets_dir(), "*.json")))
+    except OSError:
+        return items
+
+    for path in names:
+        data = load_info(path)
+        if not isinstance(data, dict):
+            continue
+        if not (data.get("url") or data.get("port")):
+            continue
+        data["_path"] = path
+        data["_hash"] = os.path.splitext(os.path.basename(path))[0]
+        items.append(data)
+
+    return items
+
+
+def target_from_info_info(info, source, expected_project=None, timeout=PROBE_TIMEOUT):
+    """由一个信息 dict 构造并探测 Target。纯函数，不读模块级全局状态。"""
+    url = normalize_url(info.get("url") or info.get("port"))
+    if not url:
+        return None, "信息里没有可用地址"
+
+    if expected_project is None:
+        owner = (info.get(IDENTITY_KEY) or {}).get("projectPath")
+        expected_project = owner or None
+
+    target = Target(url, info.get("token") or "", source,
+                    expected_project=expected_project, primary=True)
+    probe(target, timeout=timeout)
+    if not target.reachable:
+        return None, target.error or "端点不可达"
+    return target, None
+
+
+def target_from_project_root(project_root, timeout=PROBE_TIMEOUT):
+    """按工程根直接定位端点，返回 (target, info_path, error)。
+
+    <b>刻意不调用 configure()</b>：那是进程级全局状态，桥要同时服务多个工程，
+    各目标共享一份全局变量必然互相污染（A 工程 configure 完，B 工程的发现就串了）。
+    这里只用纯函数把路径算出来，可以被任意多个目标复用、也可以并发调用。
+    """
+    root = os.path.normpath(os.path.abspath(project_root))
+    ws_root = workspace_root_for(root)
+    info_path = os.path.join(ws_root, ".workbuddy", "UnityEditCommand",
+                             INFO_PREFIX + "." + project_hash(root))
+
+    info = load_info(info_path)
+    if not info:
+        return None, info_path, (
+            "找不到该工程的信息文件（%s）。\n"
+            "  编辑器可能没开着，或 Tools / 指令系统 / HTTP 指令服务 处于关闭状态。" % info_path)
+
+    target, error = target_from_info_info(info, "工程 " + os.path.basename(root),
+                                          expected_project=root, timeout=timeout)
+    if target is None:
+        return None, info_path, "工程 %s 的端点不可用：%s" % (root, error)
+    return target, info_path, None
+
+
+def target_from_info_path(info_path, timeout=PROBE_TIMEOUT):
+    """按 `.http-info*` 文件的绝对路径定位（用户最直观的指定方式）。"""
+    info = load_info(info_path)
+    if not info:
+        return None, info_path, "信息文件不存在或无法解析：%s" % info_path
+    target, error = target_from_info_info(info, "信息文件 " + os.path.basename(info_path),
+                                          timeout=timeout)
+    if target is None:
+        return None, info_path, "%s 不可用：%s" % (info_path, error)
+    return target, info_path, None
+
+
+def find_project_root_by_name(name):
+    """在全局索引里按工程名（或名字的一部分）找工程根。
+
+    唯一命中才算数：多个工程同名的常见情形（两个 clone）必须由调用方显式区分，
+    猜一个的代价是把指令发到别人工程里去。
+    """
+    key = (name or "").strip()
+    if not key:
+        return None, []
+
+    lowered = key.lower()
+    exact = []
+    partial = []
+    for item in list_global_targets():
+        identity = item.get(IDENTITY_KEY) or {}
+        project_name = (identity.get("projectName") or "").strip()
+        project_path = (identity.get("projectPath") or "").strip()
+        if not project_path:
+            continue
+        if project_name.lower() == lowered:
+            exact.append(project_path)
+        elif lowered in project_name.lower():
+            partial.append(project_path)
+
+    hits = exact or partial
+    # 去重：同一工程可能有多个编辑器实例写了同一条
+    unique = []
+    seen = set()
+    for path in hits:
+        norm = os.path.normcase(os.path.normpath(path))
+        if norm in seen:
+            continue
+        seen.add(norm)
+        unique.append(path)
+
+    if len(unique) == 1:
+        return unique[0], unique
+    return None, unique
+
+
+def _is_unity_project(path):
+    """目录是不是 Unity 工程根（有 Assets/ 或 ProjectSettings/ 就算）。"""
+    return os.path.isdir(os.path.join(path, "ProjectSettings")) or \
+        os.path.isdir(os.path.join(path, "Assets"))
+
+
+def resolve_target_selector(value):
+    """把 `--target` 的三种写法解析成 (project_root, info_path, error, candidates)。
+
+    - **工程根路径**（目录）：`D:/Work/MyUnityProject`
+    - **信息文件路径**：`…/.workbuddy/UnityEditCommand/.http-info.df0c4d80`
+    - **工程名**（或名字的一部分）：`MyUnityProject`，走全局索引
+
+    之所以要有这条通路：`.http-info` 是按**工作区**分散的，脚本只认自己所在的工作区。
+    在 A 工程目录里跑 `send.py status` 永远看不到 B 工程的编辑器，报出来的是
+    「Unity 编辑器可能没开着」——这是假阴性，会把人带偏（2026-11-03 实际踩到）。
+    全局索引（Unity 侧 GlobalTargetRegistry 写的）本来就汇总了所有开着的工程，
+    这里把它的能力暴露到 CLI，一行参数就能跨工程定位。
+
+    返回的 candidates 仅在按名解析有歧义时非空，供调用方打印候选清单。
+    """
+    text = (value or "").strip().strip("'\"")
+    if not text:
+        return None, None, "--target 不能为空", []
+
+    expanded = os.path.abspath(os.path.expanduser(text))
+    looks_like_path = ("/" in text or "\\" in text or text.endswith(".json"))
+
+    if os.path.isdir(expanded):
+        if not _is_unity_project(expanded):
+            return None, None, ("--target 指向的目录不是 Unity 工程根（缺 ProjectSettings/ 或 Assets/）：\n"
+                                "  %s" % expanded), []
+        return expanded, None, None, []
+
+    if os.path.isfile(expanded) or (looks_like_path and os.path.basename(expanded).startswith(INFO_PREFIX)):
+        info = load_info(expanded)
+        if not info:
+            return None, None, "信息文件不存在或无法解析：%s" % expanded, []
+        # 工程根从信息文件自带的身份里取；拿不到就只按信息文件定位（不做严格工程比对）
+        owner = (info.get(IDENTITY_KEY) or {}).get("projectPath")
+        if owner and os.path.isdir(owner):
+            return owner, expanded, None, []
+        return None, expanded, None, []
+
+    if looks_like_path:
+        return None, None, ("--target 看起来是路径但不存在：%s\n"
+                            "  要按工程名选，直接写名字（如 MyUnityProject）。" % expanded), []
+
+    root, hits = find_project_root_by_name(text)
+    if root:
+        return root, None, None, []
+    if hits:
+        return None, None, (
+            "工程名 '%s' 命中 %d 个工程，无法确定连哪个：\n%s\n"
+            "  把工程的绝对路径原样传给 --target 即可。"
+            % (text, len(hits), "\n".join("    " + item for item in hits))), hits
+
+    live = list_global_targets()
+    lines = ["找不到名叫 '%s' 的工程。" % text]
+    if live:
+        lines.append("  本机全局索引里有这些条目（是否还活着要 probe 才知道）：")
+        for item in live:
+            identity = item.get(IDENTITY_KEY) or {}
+            lines.append("    %-24s %s" % (
+                identity.get("projectName") or "?",
+                identity.get("projectPath") or item.get("_path") or "?"))
+        lines.append("  也可以直接给工程根路径。")
+    else:
+        lines.append("  全局索引是空的：没有任何 Unity 编辑器上报过自己（%s）。" % global_targets_dir())
+    return None, None, "\n".join(lines), []
+
+
+def global_targets_hint():
+    """没有本地信息文件时的一句话提示：本机还有谁开着。"""
+    live = []
+    for item in list_global_targets():
+        identity = item.get(IDENTITY_KEY) or {}
+        name = identity.get("projectName")
+        if name:
+            live.append(name)
+    if not live:
+        return ""
+    return ("  本机还有这些工程在全局索引里：%s\n"
+            "  它们不属于本工作区吗？如果其中有开着的编辑器，用 --target <工程名> 指定即可"
+            "（例：--target %s）。"
+            % ("、".join(sorted(set(live))), sorted(set(live))[0]))
+
+
 # ---------------------------------------------------------------- 端点定位
 
 
@@ -538,10 +776,12 @@ def discover(args):
     info_path, info = load_primary_info(args.info)
 
     if info is None and not args.url:
+        hint = global_targets_hint()
         return None, [], (
             "找不到服务信息文件（已尝试 %s 下的 %s.*）。\n"
             "  Unity 编辑器里的 HTTP 指令服务可能没启动。\n"
-            "  请在 Unity 中执行：Tools / 指令系统 / HTTP 指令服务" % (COMMAND_DIR, INFO_PREFIX)
+            "  请在 Unity 中执行：Tools / 指令系统 / HTTP 指令服务%s"
+            % (COMMAND_DIR, INFO_PREFIX, ("\n" + hint) if hint else "")
         )
 
     if args.no_resolve:
@@ -1193,6 +1433,9 @@ def build_parser():
     parser.add_argument("--info", help="服务信息文件路径（默认 %s）" % DEFAULT_INFO)
     parser.add_argument("--project-root", metavar="路径",
                         help="Unity 工程根（含 Assets/ 的那一层）。脚本不在 .workbuddy 下时用它显式指定。")
+    parser.add_argument("--target", metavar="工程名|路径",
+                        help="跨工程选址：工程名（如 MyUnityProject）、工程根路径或 .http-info 路径。"
+                             "不给时只看本工作区——脚本所在工作区之外的编辑器必须用它指定。")
     parser.add_argument("--url", help="直接指定服务地址，跳过信息文件（仍会校验身份）")
     parser.add_argument("--token", help="直接指定访问令牌，覆盖信息文件里的值")
     parser.add_argument("--port", type=int, help="信息文件缺端口时用它")
@@ -1214,6 +1457,21 @@ def main(argv=None):
     if getattr(args, "project_root", None):
         configure(args.project_root)
 
+    if getattr(args, "target", None):
+        if getattr(args, "project_root", None):
+            parser.error("--target 与 --project-root 是同一件事的两种写法，只留一个")
+        root, info_path, err, _ = resolve_target_selector(args.target)
+        if err:
+            sys.stderr.write(err + "\n")
+            return 2
+        # configure() 同时改 WS_ROOT / COMMAND_DIR / EXPECTED_PROJECT：
+        # 前两个让"信息文件在哪"指向目标工程所在工作区，后者让选址进入严格模式
+        # （只认 projectPath 完全一致的编辑器，绝不降级到别的工程——见 choose_target）。
+        if root:
+            configure(root)
+        if info_path:
+            args.info = info_path
+
     if args.command in ("send", "seq") and not args.file:
         parser.error("%s 需要指定 JSON 文件路径（'-' 表示标准输入）" % args.command)
 
@@ -1230,6 +1488,9 @@ def main(argv=None):
         for item in candidates:
             sys.stderr.write("  %-28s %-18s %s\n" % (item.url, item.source, item.summary()))
         sys.stderr.write("  Unity 编辑器可能没开着，或用菜单 Tools / 指令系统 / HTTP 指令服务 关掉了。\n")
+        hint = global_targets_hint()
+        if hint:
+            sys.stderr.write(hint + "\n")
         return 2
 
     report_choice(chosen, candidates)
