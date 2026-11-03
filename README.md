@@ -41,7 +41,7 @@ Aketsuki_Unity_MCP/                     ← Unity 工程根（用 Unity 直接�
 │   │   ├── Editor/Project/            工程客制化专区（不进包，本仓库为空占位）
 │   │   └── Editor/README.md           ★ 完整文档（协议、指令清单、扩展方式、打包维护）
 │   └── com.aketsuki.adb-debugger/     ★ 另一个独立工具（UPM 包）：ADB logcat → Unity 控制台
-├── Packages/manifest.json           只留 textmeshpro + ugui
+├── Packages/manifest.json           引这两个包（file:）+ textmeshpro + ugui
 ├── ProjectSettings/                 Unity 2021.3.16f1c1
 ├── Feedback/                        反馈表：其它工程踩到的 bug / 缺的指令
 │   ├── 待拍板/  未实现/  已实现/      移动文件 = 改状态（待拍板里由你直接写决策）
@@ -50,9 +50,7 @@ Aketsuki_Unity_MCP/                     ← Unity 工程根（用 Unity 直接�
     ├── deploy.py                    把两个包同步部署到各工程（Tools/deploy_targets.json 驱动）
     ├── deploy_targets.json          部署目标清单：工程根、Unity 版本
     ├── compile_adb.py               离线编译 ADB 程序集（asmdef 没有 csproj，先借主程序集的引用）
-    ├── build_unitypackage.py        【已停用】资产形态打包器，源目录已不存在，运行即报错退出
-    ├── install_unitypackage.py      【已停用】配套安装器
-    ├── verify_unitypackage.py       【已停用】配套校验器
+    ├── test_stack_frame.py          ADB 栈帧正则的 34 条用例（不进 Unity 包）
     └── feedback_index.py            重建 Feedback/索引.md + 校验状态/编号/必填字段
 ```
 
@@ -139,8 +137,8 @@ python Tools/deploy.py --module adb         # 部署 ADB（27 个文件，没有
 - **包内不留工程耦合内容**：MCP 包的 `Editor/Project/`（工程客制化）永远不进别人的工程；
   ADB 包没有这个目录。`deploy.py` 按前缀排除，`--prune` 也不会清它。
 - **`.meta` 一起带走**：GUID 稳定，重复导入不会产生重复资产。
-- **旧形态已停用**：`build_unitypackage.py` / `install_unitypackage.py` / `verify_unitypackage.py`
-  是 `.unitypackage`（资产形态）那一套，源目录已不存在，脚本会直接报错退出。
+- **旧形态已删除**（2026-11-03）：`build_unitypackage.py` / `install_unitypackage.py` /
+  `verify_unitypackage.py` 是 `.unitypackage`（资产形态）那一套，包化后已无意义，共 −1574 行。
   两种形态**不能共存**——同程序集在两处定义，一片 CS0101。
 
 ## 反馈表
