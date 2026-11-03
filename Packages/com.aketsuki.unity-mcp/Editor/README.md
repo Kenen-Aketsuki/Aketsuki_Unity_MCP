@@ -62,13 +62,13 @@ Assets/Script/ExternalCommandSystem/
     │   ├── ComponentCommands.cs   component.setField（含节点引用解析）
     │   ├── ListCommandsCommand.cs commands.list
     │   ├── EditorCommands.cs    asset.refresh / asset.save / scene.save / asset.compile
-    │   ├── SceneCommands.cs     scene.open（敏感操作，需人工确认）/ scene.reload（敏感操作，从磁盘重载）/ scene.list
-    │   ├── ConsentWindow.cs     敏感操作确认窗（非模态，允许/拒绝 + 倒计时，超时自动拒绝）
+    │   ├── SceneCommands.cs     scene.open（敏感操作，需人工确认）/ scene.reload（敏感操作，从磁盘重载）/ scene.state（当前场景只读快照）/ scene.list
+    │   ├── ConsentWindow.cs     敏感操作确认：ConsentModalPrompt 真模态框（EditorUtility.DisplayDialog）+ 批处理用的非模态兜底窗
     │   ├── ConsentCommands.cs   consent.list / consent.fetch（查确认结果）
     │   ├── AssetImportCommand.cs  asset.importSprite（项目外图片导入为 Sprite，支持九宫格）
     │   ├── DiagnosticsCommands.cs  asset.compileReport / console.read（编译反馈闭环）
     │   ├── PrefabCommands.cs     ui.savePrefab（场景节点保存为 Prefab）
-    │   ├── PrefabEditCommands.cs  prefab.addNode / duplicateNode / instantiatePrefab / renameNode / tree / removeNode / component.add（Prefab 资产编辑）
+    │   ├── PrefabEditCommands.cs  prefab.addNode / duplicateNode / instantiatePrefab / replaceWithInstanceOf / renameNode / tree / removeNode / component.add（Prefab 资产编辑）
     │   ├── EditorStateCommands.cs  editor.play / editor.stop / editor.state（Play 模式受控进出与状态查询）
     │   ├── ComponentGetCommands.cs  component.get / scene.inspect（字段读取，SerializedObject 全量快照）
 │   ├── CleanupCommand.cs        command.cleanup（清理指令目录下已执行/归档的文件）
@@ -156,10 +156,14 @@ new CommandRunner().RunSingle("log", JsonValue.Parse("{\"message\":\"hello\"}"))
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
-| GET | `/v1/ping` | 存活检测，返回协议版本与端口 |
-| GET | `/v1/status` | `compiling` / `updating` / `queue` / `busy` / `last` |
+| GET | `/v1/ping` | 存活检测，返回协议版本（当前 **2**）与端口 |
+| GET | `/v1/status` | `compiling` / `updating` / `queue` / `busy` / `last` / `pump` / `stale` |
 | GET | `/v1/commands` | 已注册指令列表（含 `editorOnly`） |
 | POST | `/v1/execute` | 下发指令；body 就是指令文件的 JSON 文本 |
+
+> 协议版本 2026-11-03 从 1 提到 **2**：只是 `status` 多了 `pump` 块与顶层 `stale`，
+> 属**纯附加**改动（新客户端读旧服务端按"字段缺失"降级，旧客户端忽略新字段），
+> 提版本号是为了让"响应结构确实变了"在握手时可见。
 
 请求头必须带 `X-Cmd-Token`。`/v1/execute` 支持 `?dryRun=1` 只校验不执行。
 
@@ -373,6 +377,7 @@ CommandRegistry.Default.RegisterInstance("my.cmd", new MyCommand(dependency));
 | `prefab.addNode` | 往 Prefab 资产里添加节点（可选复制源节点组件、按类型名追加组件）。`copyFrom` 支持**跨 Prefab**：写 `Assets/.../Other.prefab/节点/路径`（省略节点路径取该 Prefab 根）；跨 Prefab 只搬组件数据，对象引用需另行重指（结果里带 `warning`） | `prefab`(必填), `name`(必填), `parent`(默认根), `copyFrom`, `components`, `active` |
 | `prefab.duplicateNode` | 在 Prefab 资产内复制节点（**默认含子树与组件**，引用不重映射）。返回 `childCount` / `subtreeCount` / `subtreePaths` 便于核对层级；`includeChildren:false` 只要节点自身 | `prefab`(必填), `target`(必填), `name`, `parent`, `active`, `includeChildren`(默认 true) |
 | `prefab.instantiatePrefab` | 在 Prefab 资产内嵌一个**真正的嵌套 Prefab 实例**（`PrefabUtility.InstantiatePrefab`，结果 `instanceStatus=Connected`，源资产改了它跟着变）。`prefab.duplicateNode` 复制嵌套实例得到的是**展开的普通节点树**（断链），要保连接就用这条 | `prefab`(必填), `asset`(必填), `parent`(默认根), `name`, `index` |
+| `prefab.replaceWithInstanceOf` | 把已有的**展开节点**（断链平铺树）一步替换成 Prefab 实例：原地实例化 → 复用旧节点布局 → 删旧节点，省掉「建新的 + 手工搬布局 + 删旧的」三步。`layout` 默认 `rect`（RectTransform 时搬 anchors/pivot/sizeDelta/anchoredPosition，另外 localPosition/Rotation/Scale 一律搬），`transform` 只搬 TRS，`none` 不动。`keepChildren:true` 把旧子节点搬到新实例下；旧节点已是 `Connected` 实例时默认拒绝（会丢 override），`force:true` 放行。不支持替换根节点 | `prefab`(必填), `target`(必填), `asset`(必填), `name`(默认沿用旧名), `layout`(默认 rect), `keepChildren`(默认 false), `force`(默认 false) |
 | `prefab.renameNode` | 给 Prefab 资产内的节点改名（`gameobject.rename` 只认当前场景，prefab 域要用这条）。返回 `oldName`/`oldPath`，并提示按名字 `Find` 的代码会失效 | `prefab`(必填), `target`(必填), `name`(必填) |
 | `prefab.tree` | 列出 Prefab 资产的节点树（路径/组件/激活态，只读）。嵌套实例节点带 `isPrefabInstance`/`isPrefabInstanceRoot`/`instanceStatus`/`sourceAsset`，顶层另有 `instanceCount`（**只数实例根**） | `prefab`(必填), `maxDepth` |
 | `prefab.removeNode` | 删除 Prefab 资产内节点（含子树）；`keepChildren:true` 把子节点上移到父再删自身；禁止删根节点 | `prefab`(必填), `target`(必填), `keepChildren`(默认 false) |
@@ -391,6 +396,7 @@ CommandRegistry.Default.RegisterInstance("my.cmd", new MyCommand(dependency));
 | `scene.open` | 打开指定场景；**敏感操作：默认需人工确认**（见 §5.6）。确认被拒/超时会中止当前批次（后续指令标记 Skipped，即使 `stopOnError=false`）。Play 模式下直接拒绝 | `path`(必填，完整 Assets 路径或场景名), `additive`(默认 false), `saveCurrent`(默认 true) |
 | `scene.reload` | **从磁盘重载场景**：关掉内存里的场景、按路径重新打开，以 `.unity` 文件为准。有未保存改动时**默认拒绝**并列出脏场景清单，`force:true` 才真的丢弃。返回 `diskModifiedUtc`（磁盘 mtime，便于判断值不值得重载）。**敏感操作：默认需人工确认**（见 §5.6）；Play 模式下直接拒绝 | `path`(可选，默认当前活跃场景), `force`(默认 false) |
 | `scene.list` | 枚举场景：Build Settings 中启用的场景 + 磁盘 Assets 下全部 `.unity`（标注 `inBuildSettings`） | - |
+| `scene.state` | **只读**：当前打开的场景快照 —— `activeScenePath` / `activeSceneName` / `activeSceneIndex` / `sceneCount` / `dirtyCount` / `playing`，以及逐场景 `path/name/index/isActive/isDirty/isLoaded/rootCount/buildIndex`。用来回答"现在开的是哪个场景、改过没保存吗"，决定要不要 `scene.open`、`scene.reload` 会不会丢东西；不需要人工确认，Play 模式同样可查 | - |
 | `scene.create` | 新建场景资产：用 `NewScene(Additive)` 加载空场景再 `SaveScene` 到目标路径（**不关当前场景，杜绝丢档**），父目录逐层 `CreateFolder`；`path` 可只写名字/相对路径，自动补 `Assets/` 与 `.unity` 并过白名单；已存在则报错。`open:true` 留在新场景，`addToBuildSettings:true` 加入 Build Settings | `path`(必填), `open`(默认 false), `addToBuildSettings`(默认 false) |
 | `scene.delete` | 删除场景资产文件（`AssetDatabase.DeleteAsset`，路径过白名单）；目标场景当前已打开则拒绝 | `path`(必填，完整 Assets 路径或场景名) |
 | `asset.compile` | 请求 Unity 重新编译脚本程序集（默认先 `AssetDatabase.Refresh()` 同步资源数据库，否则外部直写的 .cs 不被 ADB 感知，用户随后 Ctrl+R 会再补编一次；`clean:true` 做干净重建）；**Play 模式下阻断** | `clean`, `refresh`(默认 true) |
@@ -796,7 +802,7 @@ HTTP 与 MCP 侧按已注册指令生成。
 `ConsentMessage` 要写清后果（"退出 Play 模式：运行中的游戏会立即结束……"），
 别只写指令描述 —— 人判断要不要点是靠这句话。
 
-### 为什么是异步的（别改回模态窗，实测过）
+### 为什么曾经是异步的（`EditorWindow.ShowModal()` 实测卡死）
 
 第一版用 `EditorWindow.ShowModal()` 同步等人点，结果**把编辑器彻底卡死**：
 
@@ -808,33 +814,60 @@ HTTP 与 MCP 侧按已注册指令生成。
 实测：发一条 `editor.stop`，卡了 180 秒仍未超时，只能人工点掉窗口。
 旧版 `scene.open` 所谓"30s 超时"因此从未真正生效过——用户点得快，没撞上而已。
 
+### 2026-11-03 起：确认框改「真模态」（IMPR-010）
+
+**为什么改**：中间那版用的是非模态 `ShowUtility()` 浮窗，反馈太弱 —— 会被别的 Unity 窗口压住、
+不抢焦点、没有声音，Console 里那条 warning 也可能被折叠。结果是人**根本没看见窗口**，
+30 秒后静默按拒绝。2026-11-02 在 `MyUnityProject` 连踩两次：AI 等到 `expired`，
+用户说"可能是弹窗弹了，但我没看到"。
+
+**现在**：`ConsentModalPrompt` 用 `EditorUtility.DisplayDialog` 弹**编辑器级模态框**，
+必然抢焦点，人必须点一下才走。好处是"绝不可能被忽略"，代价是**阻塞主线程**（这是接受的：
+HTTP 早已返回 `pending`，客户端不依赖编辑器同步响应）。
+
+三件配套（改这块时别删）：
+
+| 配套 | 原因 |
+| --- | --- |
+| **停表** `ConsentGate.PauseCountdown` | 模态期间 `EditorApplication.update` 不推进，`ExpireOverdue` 也不跑；窗口关掉后把这段时长补回 deadline，否则人刚看完就被判超时，排队中的记录也会被别人的思考时间吃掉 |
+| **`/v1/status` 的 `consent.modalOpen`** | 主线程停在对话框上时 `pump.stale` 会变 true，`pump.note` 据此说明"这是预期的等待、点掉就好"，避免被误判成编辑器死了 |
+| **逐条排队** | 一次弹一条（队列头），点完下一帧再弹下一条；一批里出现多条敏感指令极罕见（门禁在第一条处就中止整批），不值得为它做列表视图 |
+
+**行为差异（重要）**：真模态**没有超时**——对话框不点就一直等（主线程阻塞）。
+`consent.fetch` 在模态期间会返回 `countdownPaused: true` 且 `remainingSeconds` 报满值，
+别把它当成"还没开始倒计时"。`-batchmode` 下没有可交互界面，仍走原来的非模态窗 + 超时自动拒绝。
+
+**为什么不在 `update` 回调里直接开模态**：先跳到 `delayCall`，避免在 Unity 遍历更新列表时
+进入嵌套模态循环。
+
 现在的语义（两段式）：
 
 ```jsonc
-// ① 下发敏感指令 → 立即返回"待确认"，批次中止，编辑器不阻塞
+// ① 下发敏感指令 → 立即返回"待确认"，批次中止，编辑器不阻塞（对话框随后弹在编辑器上）
 { "id": "editor.play" }
-// → 跳过：已弹出确认窗等待人工点「允许」（30 秒后自动拒绝）
+// → 跳过：已弹出模态确认框，等待人工点「允许」
 //   data.consentId = "c1005130120ae"
 
-// ② 人点完 允许/拒绝/超时 之后，查结果
+// ② 人点完 允许/拒绝 之后，查结果
 { "id": "consent.fetch", "params": { "id": "c1005130120ae" } }
 // → data.state: pending | allowed | rejected | expired | failed
 ```
 
 要点：
 
-- **指令不会被自动重放**：人点「允许」后由确认窗单独执行那一条（`delayCall`，避开 GUI 回调里的域重载），
+- **指令不会被自动重放**：人点「允许」后由确认框单独执行那一条，
   原来那一批的其余指令已经中止，AI 要重新规划后续步骤。
 - **`consent.fetch` 返回成功 ≠ 那条指令执行成功**：成功只代表"查到了记录"，
   结论看 `data.state` 与 `data.resultMessage`。
 - **记录会落盘**：`<指令目录>/consent-results.json`。因为允许 `editor.play` 后立刻域重载，
   内存里的静态列表会被清空；落盘后 `ConsentGate` 启动时重新加载，AI 才查得到"到底执行了没有"。
   Pending 项不落盘（其上下文本来就不能跨域重载恢复）。
-- **`/v1/status` 有 `consent` 块**：`fullDelegation` / `timeoutSeconds` / `pendingCount`，
+- **`/v1/status` 有 `consent` 块**：`fullDelegation` / `timeoutSeconds` / `pendingCount` / `modalOpen`，
   客户端据此解释"指令为什么没执行"。
 
 > `PermissionWindow.cs`（旧的自定义模态许可窗）已删除。它正是上表那个卡死的来源，
-> 留着只会有人再调一次。要弹确认窗，走 `ConsentGate` + `ConsentWindow`。
+> 留着只会有人再调一次。交互场景走 `ConsentGate` + `ConsentModalPrompt`，
+> `ConsentWindow` 只剩批处理兜底这一条路。
 
 ### 加一条新的敏感指令
 

@@ -408,11 +408,21 @@ Unity 没启动时 `tools/list` 仍会在半秒内返回那 5 个元工具，调
 这三条**默认不会立刻执行**：它们会改变用户手上的现场（退出 Play = 游戏没了、换场景 = 当前场景没了），
 所以要先由人点一次「允许」。控制台勾了「全权委托」才直接放行。
 
+**弹的是编辑器级真模态对话框**（2026-11-03，IMPR-010）：必然抢焦点、必须人点一下才走。
+代价是**对话框开着期间编辑器主线程会阻塞** —— 不点就一直等，**没有自动超时**。
+所以看到 `pending` 就老实等人在场，别把"没反应"当成失败去重试。
+（`consent.fetch` 在窗口开着时会返回 `countdownPaused: true`，`/v1/status` 也会用
+`consent.modalOpen` + `pump.note` 说明"主线程停在确认框上，点掉就恢复"。）
+
+**想先知道现在开的是哪个场景**：用 `scene.state`（只读、不问人），返回
+`activeScenePath` / `activeSceneName` / `dirtyCount` / 逐场景 `isDirty` / `isLoaded`。
+判断"要不要换场景""重载会不会丢东西"先查它，比翻 `scene.hierarchy` 的大输出靠谱。
+
 **例外（IMPR-011）：`scene.open` 打开的就是当前场景时不问人。** 判定条件是三条同时成立
 ——非叠加（`additive=false`）、目标是当前**唯一**打开的场景、并且没有任何未保存改动。
 这时直接返回 `ok` + `「已是当前场景，无需切换：…」`（`data.noop=true`），
 既不弹确认窗也不重载场景。**这解决的是"先保险 open 一次"的常见写法**：调用方不知道编辑器现在开着
-哪个场景时可以先 `scene.open` 探一下，命中当前场景是零代价的。
+哪个场景时可以先 `scene.open` 探一下，命中当前场景是零代价的；知道 `scene.state` 的话直接查更省。
 反过来，`additive=true`、还有别的叠加场景、或场景有未保存改动（此时"打开自己"其实是保存语义），
 都仍然照常弹窗——别指望用这条规则绕过确认。
 
@@ -432,7 +442,8 @@ Unity 没启动时 `tools/list` 仍会在半秒内返回那 5 个元工具，调
 返回长这样（**指令没有执行**，批次已中止）：
 
 ```
-#0 editor.play [跳过] 'editor.play' 是敏感操作，已弹出确认窗等待人工点「允许」（30 秒后自动拒绝）。
+#0 editor.play [跳过] 'editor.play' 是敏感操作，已弹出模态确认框，等待人工点「允许」。
+                     注意：对话框会一直等、主线程在此期间阻塞（不点不会自动拒绝）。
                      用 consent.fetch id="c1005130120ae" 取结果；……
 data: { "pending": true, "consentId": "c1005130120ae", "timeoutSeconds": 30, "remainingSeconds": 30 }
 ```
@@ -445,7 +456,8 @@ data: { "pending": true, "consentId": "c1005130120ae", "timeoutSeconds": 30, "re
 
 ### 纪律
 
-1. **别重复下发**。看到 `pending` 就去轮询，不要连发三条 `editor.play` —— 那会弹三个确认窗，全等着人点。
+1. **别重复下发**。看到 `pending` 就去轮询，不要连发三条 `editor.play` —— 那会弹三个确认窗，
+   全等着人点，而且每个都阻塞编辑器主线程。
 2. **`consent.fetch` 返回成功 ≠ 指令执行成功**。成功只代表查到了记录，结论看 `data.state`。
    `rejected` / `expired` 都是"没执行"，别当成失败去重试（重试又是一次弹窗）。
 3. **批次被中止了**：待确认那一条之后的所有指令都会 `Skipped`（即使 `stopOnError=false`），
