@@ -362,6 +362,58 @@ Unity 没启动时 `tools/list` 仍会在半秒内返回元工具，调用会得
 
 参数语义、堆栈合并规则、两条节流与已知边界，全在 `Assets/Editor/AdbDebugger/README.md`。
 
+## 截图：先看见，再判断（`capture.scene` / `capture.game` / `capture.prefab`）
+
+### 什么时候必须用
+
+**只要有"看起来对不对"的问题，就先截图，别靠文本推。**
+
+| 症状 | 文本为什么看不出来 |
+| --- | --- |
+| 棋子 / 模型摆位歪了 | 坐标数字全对，但父节点缩放、锚点、Canvas Scaler 都不体现在数字上 |
+| UI 重叠 / 字被裁 | `RectTransform` 的尺寸是"设计值"，实际渲染还取决于 Canvas 与 Scaler |
+| 材质丢引用 / 过曝 / 后处理异常 | 字段值合法，渲染结果不对 |
+| Prefab 里某部件被挡住 | 层级顺序正确，视觉上是错的 |
+
+典型用法：
+
+```bash
+# 1) 先看一眼当前场景（默认覆盖写 <指令目录>/screenshots/scene-latest.png）
+send.py capture.scene
+
+# 2) 只看画面、不要工具栏：crop=window 是整窗，frame 是相机视口
+send.py capture.scene crop=frame
+
+# 3) Play 中截游戏画面（含 Screen Space-Overlay 的 UI）
+send.py capture.game
+
+# 4) 截一个没打开的 Prefab（会切换编辑器当前编辑对象，有副作用）
+send.py capture.prefab prefab=Assets/GameRes/.../ShopView.prefab openPrefab=true
+```
+
+MCP 通道下**不需要自己去读那个 PNG**：结果里带 `path` + `mimeType` 的，桥会自动把图片内联成
+image content（单张上限 2 MB，超了只回路径）。
+
+### 读返回：`warnings` 先看，`width/height` 别当请求值
+
+- `source: "printwindow"` = 窗口截屏（所见即所得）；`"camera-render"` = 降级路径，**一定少了东西**。
+- `width` / `height` 是**实际像素**。截图分辨率由窗口大小决定，想让图更大就把窗口拉大或传 `scale`。
+- `cropped` 是相对窗口的物理像素矩形，配合 `dpiScale` 可复算位置。
+
+### 纪律（这几条踩过）
+
+1. **`select` 拍不到选中高亮**。一条指令只跑一帧，指令内改的 `Selection` 来不及画进窗口表面。
+   想要"带高亮圈的图"这条路不通，别反复试。
+2. **编辑模式的 `capture.game` 一定没有 Overlay UI**。GameView 在编辑模式不渲染，只能相机渲染，
+   而 Overlay Canvas 不走相机。**别拿这张图判断 UI 有没有显示**——要看 UI 就进 Play 再截。
+3. **`crop=frame` 的上沿可能带一条工具栏**（GUI 叠加层剥不掉）。图里出现 `Center` / `Local` / `2D`
+   这类按钮时，别把它当场景内容。
+4. **窗口最小化 / 非 Windows 会直接失败**，这是设计，不是 bug；别试图"重试一次看看"。
+5. **截图不能代替 `scene.inspect`**。截图告诉你"不对"，`scene.hierarchy` / `component.get` 才告诉你
+   "哪个字段不对"。先截图定位，再用文本查值，比盲调字段快得多。
+6. **`openPrefab:true` 会把编辑器当前编辑对象切走**，而且场景有未保存改动时本指令会拒绝执行
+   （避免弹保存框把主线程卡住）。切完记得自己提醒用户回到原场景。
+
 ## 运行时指令（Play 模式干预，默认关闭）
 
 `runtime.*` 这一组指令操作的是**正在运行的游戏**：进/出 Play、找运行时节点、点按钮、拖列表、写输入框。

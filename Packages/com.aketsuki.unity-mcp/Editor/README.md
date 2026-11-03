@@ -420,6 +420,9 @@ CommandRegistry.Default.RegisterInstance("my.cmd", new MyCommand(dependency));
 | `command.cleanup` | 清理指令目录下"用过"的文件，防膨胀。作用域严格限制在指令目录与其 `_done` 子目录内（删前二次校验，绝不越界）。`target`：`done`(默认，只清 `_done`)/`files`(只清根下未归档 `.json`)/`all`；`olderThanMinutes` 按修改时间过滤；`dryRun` 只统计不删 | `target`, `olderThanMinutes`, `dryRun` |
 | `consent.list` | 列出敏感操作确认记录（pending / allowed / rejected / expired / failed），新的在前 | `limit`(默认 10，上限 50) |
 | `consent.fetch` | 查询某次确认的结果；返回成功只代表"查到了记录"，结论看 `data.state` | `id`(必填，即上一条指令返回的 `consentId`) |
+| `capture.scene` | 截 SceneView 当前画面（**含 Gizmos / 网格 / Overlay**），存 PNG；结果里带 `path` + `mimeType`，MCP 桥会自动把图片内联回给 AI | `path`, `crop`, `view`, `select`, `scale` |
+| `capture.game` | 截 GameView：Play 中走窗口截屏（所见即所得）；**编辑模式下降级为相机渲染，不含 Overlay UI**（`warnings` 会明说） | `path`, `crop`, `select`, `scale` |
+| `capture.prefab` | 截 Prefab 编辑模式的画面（复用 SceneView 截屏，含 Gizmos）；未打开时 `openPrefab:true` 可自动进入编辑模式（**有副作用**） | `path`, `crop`, `view`, `select`, `scale`, `prefab`, `openPrefab` |
 
 > **指令文件生命周期（防膨胀）**：`command.cleanup` 用于事后批量清理已攒下的指令文件；控制台窗口另有「执行后删除文件」(`DeleteAfterRun`) 开关——开启后 `CommandAutoRunner` 在指令文件执行成功后**直接删除该文件**，且**优先于**「归档到 `_done`」。`DeleteAfterRun` 是全局偏好（默认关），与 `ArchiveAfterRun` 同处控制台；HTTP 下发路径本就不落盘文件，无需清理。
 
@@ -612,7 +615,104 @@ Modal_Confirm              (铺满全屏)
 
 ---
 
-## 5.3 UI 根节点 MainUIRoot（与运行期代码对应）
+## 5.2 截图（`capture.scene` / `capture.game` / `capture.prefab`）
+
+### 为什么需要它
+
+`scene.hierarchy` / `scene.inspect` / `prefab.tree` 给的是 **YAML 级真相，不是画面**。
+摆位歪了（父节点缩放、锚点、Canvas Scaler 都不体现在数字上）、UI 遮挡、字被裁、
+材质丢引用、光照过曝——文本里一个字段都不报错，截图一眼就能看出来。
+
+### 实现：窗口截屏，不是离屏渲染
+
+三条指令都用 Win32 `PrintWindow(PW_RENDERFULLCONTENT)` 抓**整个编辑器窗口**，再按目标视图的
+矩形裁出来。原因（2026-10-28 实测，详见 `Feedback/已实现/FEAT-019-三视图截图能力.md`）：
+
+| 路径 | 能拿到 | 拿不到 |
+| --- | --- | --- |
+| `camera.Render()` → RenderTexture | 场景几何、材质、光照、后处理 | **没有 Gizmos、没有网格**、没有 Overlay |
+| `Handles.DrawGizmos`（在 `onPostRender` 里） | 3D 图标 + 选中高亮 | 线框类不保证；**只能叠加**，不能替代场景渲染 |
+| **`PrintWindow` + 按窗口矩形裁剪** | **所见即所得**：Gizmos、网格、Overlay、Play 中的 GameView | Windows 专用；窗口不能最小化；分辨率受窗口尺寸限制 |
+
+底层工具类 `Core/WindowCapture.cs`：`user32 !PrintWindow` + `gdi32 !CreateDIBSection` 拿 BGRA 像素，
+**不依赖 `System.Drawing`**——Unity 2021/2022 的 .NET Standard profile 里那份 `System.Drawing.dll`
+只是十几 KB 的类型转发壳，真去 `new Bitmap()` 是运行期崩。
+
+### 参数
+
+| 参数 | 适用 | 说明 |
+| --- | --- | --- |
+| `path` | 全部 | 输出 PNG。默认 `<指令目录>/screenshots/<view>-latest.png`，**覆盖写**，不堆积历史图 |
+| `crop` | 全部 | `frame`(默认，相机视口) / `window`(整个 EditorWindow) / `full`(整个 Unity 窗口) |
+| `view` | scene / prefab | `SceneView` 索引；缺省取 `lastActiveSceneView`。没有打开任何 SceneView 时**直接失败**，不替你开窗 |
+| `select` | 全部 | 截图前临时选中某节点，截完还原。**注意下面这条限制** |
+| `scale` | 全部 | 后置缩放（0.1–4，默认 1）。CPU 双线性，不走 `Graphics.Blit`（线性色彩空间下 Blit 会改颜色） |
+| `prefab` | prefab | Prefab 资产路径或名字；不给则要求当前已在 Prefab 编辑模式 |
+| `openPrefab` | prefab | `true` 时自动 `PrefabStageUtility.OpenPrefab` 进入编辑模式（**有副作用**，默认 false） |
+
+**不提供 `width` / `height`**：窗口截屏的分辨率由窗口决定，声称能设尺寸只会骗人。
+要固定尺寸就用 `scale` 后置缩放，或者看返回里的实际像素。
+
+### 返回
+
+```jsonc
+{
+  "path": "D:/…/screenshots/scene-latest.png",
+  "mimeType": "image/png",              // 有这个字段的，MCP 桥会自动内联图片
+  "view": "scene",
+  "width": 1070, "height": 509,         // 实际像素，不是请求值
+  "bytes": 40677,
+  "source": "printwindow",              // printwindow | camera-render（降级时说明）
+  "cropped": { "x": 352, "y": 132, "w": 1070, "h": 509 },  // 相对窗口（物理像素，左上原点）
+  "dpiScale": 1,
+  "warnings": []
+}
+```
+
+`warnings` 不是装饰：**没说清"少了什么 / 多了什么"的截图比没有截图更危险**。
+
+### 五条必须知道的限制（都是实测出来的）
+
+1. **`select` 拍不到 selected gizmo**。选中高亮是渲染结果，而一条指令只跑一帧；
+   指令内改的 `Selection` 还来不及画进窗口表面。别指望用 `select` 拍高亮圈，
+   它只适合"顺便把选中改成某个对象，方便后续指令接手"。
+2. **`crop=frame` 的上沿/左沿可能压着工具栏与 Overlay**。矩形取自相机 `pixelRect`，
+   而 SceneView 工具栏、左侧 Overlay、GameView 顶部工具条都是**画在视口之上的 GUI 叠加层**，
+   窗口截屏没法把它们剥掉（实测 Unity 2022.3 上沿会带进约 19px 工具栏）。
+3. **编辑模式下的 `capture.game` 拿不到 Screen Space-Overlay 的 UI**：GameView 不渲染，
+   只能退到相机渲染，而 Overlay Canvas 不走相机。返回的 `warnings` 会明写这一条。
+4. **窗口最小化时直接报错**，不产出黑图；`crop=frame` 的矩形算空时同样报错并给出窗口尺寸。
+5. **Windows 专用**：`PrintWindow` / `CreateDIBSection` 是 Win32 API。非 Windows 编辑器直接返回明确失败。
+
+### 裁剪矩形的算法（改之前先读）
+
+`EditorWindow.position` 是**逻辑像素（GUI 点）**，`GetWindowRect` 是**物理像素**，125% / 150% 缩放下不等：
+
+```csharp
+var scale = EditorGUIUtility.pixelsPerPoint;
+int left = Mathf.RoundToInt(view.position.x * scale) - windowRect.x;   // 先把 GUI 点换成物理像素，再减窗口原点
+```
+
+**别写成 `(view.position.x - windowRect.x) * scale`**：`windowRect.x` 是物理像素，先减再乘等于多减了
+`windowRect.x * (scale - 1)`，高 DPI 下整幅图会偏移。
+
+`crop=frame` 用相机 `pixelRect` 定位。它的参照系**跨版本不一致**（2022.3 实测是"相对视口"，
+2021.3 的记录像"屏幕坐标"），所以 `CaptureSupport.TryGetFrameRect` 会按
+**相对视口(物理) → 相对视口(GUI 点) → 屏幕坐标(GUI 点)** 顺序试三个候选，取第一个能完整落进视口矩形的；
+三个都不成立就退回整窗裁剪并给 warning，**不硬算一张偏移的图**。
+
+### 行序（最容易踩的一个坑）
+
+两个翻转是**两个独立问题**，混在一起调会反复颠倒：
+
+1. GDI 写进 DIB 的是**自下而上**（第 0 行 = 图像底行）。`WindowCapture.TryGrabWindow` 把它翻成
+   `Frame` 约定的**自上而下**，这样裁剪矩形里的 `y` 才能照"向下增长"直读。
+2. Unity 的 `Texture2D.LoadRawTextureData` 又是**自下而上**（第 0 行 = 图像底行）。
+   `WindowCapture.ToTexture` 送进去之前要再翻一次。
+
+少翻/多翻任意一次，PNG 就是整幅上下颠倒。PNG 是自上而下的，所以最终给到文件的一定是"第 0 行 = 顶部"。
+
+
 
 游戏运行时的 UI 根节点由工程自己的 `UIManager.EnsureUIRoot()` 确保（序列化引用缺失时自动查找/创建
 MainUIRoot 并赋值，见工程内 `MainUIRootBuilder`）：
