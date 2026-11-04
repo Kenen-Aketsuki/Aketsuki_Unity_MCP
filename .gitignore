@@ -113,6 +113,10 @@ InitTestScene*.unity*
 /.workbuddy/
 .cursor
 
+# 本机记忆库（humanity-memory 的 SQLite + 向量库）：装着历史对话摘要、项目事实、
+# 踩过的坑，属于个人工作记录，换台机器也是另一份，不入库
+/.ai_memory/
+
 # 部署目标清单是本机配置：各工程在本机的绝对路径（盘符/用户名）、Unity 版本、
 # 以及写给自己的批注。换台机器就是一份全新的，入库等于把本机目录结构公开。
 # 模板在 Tools/deploy_targets.example.json，用的时候复制成下面这个名字再改。
