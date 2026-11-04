@@ -1224,7 +1224,13 @@ def cmd_simple(client, args, path):
         return 0
 
     commands = payload.get("commands") or []
-    print("已注册 %d 条指令：" % payload.get("count", len(commands)))
+    print_command_list(commands, payload.get("count", len(commands)))
+    return 0
+
+
+def print_command_list(commands, count=None):
+    """把指令数组打印成人读的样子（联网取到的和本地清单共用）。"""
+    print("已注册 %d 条指令：" % (count if count is not None else len(commands)))
     width = max([len(item.get("id", "")) for item in commands] or [0])
     for item in commands:
         flag = "  [编辑器]" if item.get("editorOnly") else ""
@@ -1233,6 +1239,100 @@ def cmd_simple(client, args, path):
         usage = item.get("usage") or ""
         if usage:
             print("      %s参数: %s" % (" " * width, usage))
+
+
+# ---------------------------------------------------------------- 本地清单
+
+
+def catalog_paths():
+    """指令目录下所有清单文件，mtime 新的排前面。
+
+    清单由服务端写（`commands.<projectHash>.json`），与 `.http-info` 同目录：
+    那个目录由 `CommandSystemSettings` 决定，所以这里不硬编码任何客户端约定。
+    """
+    pattern = os.path.join(COMMAND_DIR, "commands.*.json")
+    found = glob.glob(pattern)
+    found.sort(key=lambda path: os.path.getmtime(path), reverse=True)
+    return found
+
+
+def read_catalog(path):
+    """读一份清单；坏文件返回 (None, 原因)。"""
+    try:
+        with open(path, "r", encoding="utf-8-sig") as handle:
+            data = json.load(handle)
+    except Exception as error:
+        return None, str(error)
+    if not isinstance(data, dict) or not isinstance(data.get("commands"), list):
+        return None, "不是清单格式（缺 commands 数组）"
+    return data, None
+
+
+def pick_catalog(args):
+    """按 --target / 工作区选一份清单。
+
+    返回 (data, path, error)。同目录有多份（一个工作区放多个工程）时：
+    指定了工程根就按 identity.projectPath 精确挑，否则取最新那份并提示还有别的。
+    """
+    paths = catalog_paths()
+    if not paths:
+        return None, None, (
+            "指令目录里没有清单（%s）。\n"
+            "  Unity 编辑器里的 HTTP 指令服务没启动过，或跑的还是旧版包（未落盘清单）。\n"
+            "  先 `send.py commands` 联网取一次，或升级目标工程的服务端包。"
+            % COMMAND_DIR)
+
+    if EXPECTED_PROJECT:
+        want = os.path.normcase(os.path.abspath(EXPECTED_PROJECT))
+        for path in paths:
+            data, _ = read_catalog(path)
+            identity = (data or {}).get(IDENTITY_KEY) or {}
+            owner = identity.get("projectPath")
+            if owner and os.path.normcase(os.path.abspath(owner)) == want:
+                return data, path, None
+        return None, None, (
+            "指令目录里的清单都不属于 %s：\n%s\n"
+            "  该工程的编辑器可能没启动过（清单由服务端写），先用 `send.py commands --target <工程>` 联网确认。"
+            % (EXPECTED_PROJECT, "\n".join("    " + path for path in paths)))
+
+    data, error = read_catalog(paths[0])
+    if data is None:
+        return None, paths[0], "清单读不了：%s" % error
+    if len(paths) > 1:
+        sys.stderr.write("（本工作区有 %d 份清单，取最新那份：%s）\n" % (len(paths), paths[0]))
+    return data, paths[0], None
+
+
+def cmd_catalog(args):
+    """只读本地清单，不发任何 HTTP 请求。"""
+    data, path, error = pick_catalog(args)
+    if error:
+        sys.stderr.write(error + "\n")
+        return 2
+
+    commands = data.get("commands") or []
+    prefix = getattr(args, "prefix", None)
+    if prefix:
+        commands = [item for item in commands if (item.get("id") or "").startswith(prefix)]
+
+    if args.json:
+        payload = dict(data)
+        if prefix:
+            payload["commands"] = commands
+            payload["count"] = len(commands)
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+
+    identity = data.get(IDENTITY_KEY) or {}
+    print("指令清单（本地，未联网）：%s" % path)
+    print("  工程 %s · 生成于 %s · 协议 v%s"
+          % (identity.get("projectName") or "?",
+             data.get("generatedUtc") or "?",
+             data.get("protocolVersion") or "?"))
+    print_command_list(commands, len(commands) if prefix else data.get("count"))
+    sys.stderr.write(
+        "⚠ 这是编辑器上次运行时写下的快照，指令集会随包升级/模块增删变化；\n"
+        "  真正下发前以服务端校验为准（`send.py commands` 联网版是权威来源）。\n")
     return 0
 
 
@@ -1416,9 +1516,10 @@ def build_parser():
         prog="send.py",
         description="向 Unity 编辑器的指令系统下发 JSON 指令",
     )
-    parser.add_argument("command", choices=["ping", "status", "commands", "send", "seq", "resolve", "cancel", "compile"],
-                        help="要执行的操作；resolve 只做端点定位诊断，cancel 请求协作式取消，"
-                             "compile 触发编译并回传错误，seq 顺序执行多步（步间客户端等待）")
+    parser.add_argument("command", choices=["ping", "status", "commands", "catalog", "send", "seq", "resolve", "cancel", "compile"],
+                        help="要执行的操作；catalog 读本地清单（不联网），resolve 只做端点定位诊断，"
+                             "cancel 请求协作式取消，compile 触发编译并回传错误，"
+                             "seq 顺序执行多步（步间客户端等待）")
     parser.add_argument("file", nargs="?",
                         help="send 的指令 JSON / seq 的步骤 JSON 文件路径，'-' 表示从标准输入读")
     parser.add_argument("--dry-run", action="store_true", help="只校验不真正执行")
@@ -1443,6 +1544,8 @@ def build_parser():
                         help="单次请求超时秒数（默认 %d）" % DEFAULT_TIMEOUT)
     parser.add_argument("--json", action="store_true",
                         help="输出原始 JSON，不做人话排版")
+    parser.add_argument("--prefix", metavar="前缀",
+                        help="catalog 时只列这个前缀的指令（如 ui / prefab / scene）")
     parser.add_argument("--no-resolve", action="store_true",
                         help="关闭端点定位：直接用信息文件/--url，不做身份校验")
     parser.add_argument("--force", action="store_true",
@@ -1478,15 +1581,33 @@ def main(argv=None):
     if args.command == "resolve":
         return cmd_resolve(args)
 
+    # catalog 只读本地清单，不发 HTTP：放在 discover 之前，
+    # 于是"编辑器没开"也能列出上次运行时的指令集。
+    if args.command == "catalog":
+        return cmd_catalog(args)
+
     chosen, candidates, error = discover(args)
     if error:
         sys.stderr.write(error + "\n")
         return 2
 
     if chosen is None:
-        sys.stderr.write("找不到任何可连通的端点。\n")
-        for item in candidates:
-            sys.stderr.write("  %-28s %-18s %s\n" % (item.url, item.source, item.summary()))
+        # 不可达的候选**压成一行**：端口扫描会一次列十个"目标计算机积极拒绝"，
+        # 每条都带一长串 WinError，真正的建议（编辑器没开 / 用 --target）会被淹掉。
+        # 可达但身份不对的反而要逐条列出——那是"有东西在跑，但不是能干活的编辑器"。
+        reachable = [item for item in candidates if item.reachable]
+        unreachable = [item for item in candidates if not item.reachable]
+        if reachable:
+            sys.stderr.write("找到 %d 个可达端点，但没有一个能执行指令：\n" % len(reachable))
+            for item in reachable:
+                sys.stderr.write("  %-28s %-18s %s\n" % (item.url, item.source, item.summary()))
+        else:
+            sys.stderr.write("找不到任何可连通的端点（探测 %d 个候选，全部不可达）。\n"
+                             % len(candidates))
+            if unreachable:
+                first = unreachable[0]
+                sys.stderr.write("  首个候选 %s → %s\n"
+                                 % (first.url, first.error or "未知原因"))
         sys.stderr.write("  Unity 编辑器可能没开着，或用菜单 Tools / 指令系统 / HTTP 指令服务 关掉了。\n")
         hint = global_targets_hint()
         if hint:

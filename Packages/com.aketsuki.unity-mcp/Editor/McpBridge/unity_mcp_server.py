@@ -863,18 +863,79 @@ def tool_targets(arguments):
     return _text_result("\n".join(lines))
 
 
+def _catalog_directory(bridge):
+    """该 Bridge 对应的指令目录（清单与 .http-info 同目录）。"""
+    if bridge.info_path:
+        return os.path.dirname(bridge.info_path)
+    if bridge.project_root:
+        return os.path.join(send.workspace_root_for(bridge.project_root),
+                            ".workbuddy", "UnityEditCommand")
+    return send.COMMAND_DIR
+
+
+def commands_from_catalog(bridge):
+    """读服务端落盘的指令清单。
+
+    返回 (commands, path, generated_utc)，读不到返回 (None, None, None)。
+    清单是编辑器上次运行时写的**快照**：它让"编辑器没开"不再等于"不知道有哪些指令"，
+    但指令集会随包升级/模块增删变化，所以调用方必须把"这是快照"告诉模型。
+    """
+    directory = _catalog_directory(bridge)
+    try:
+        names = [name for name in os.listdir(directory)
+                 if name.startswith("commands.") and name.endswith(".json")]
+    except OSError:
+        return None, None, None
+    if not names:
+        return None, None, None
+
+    want = os.path.normcase(bridge.project_root) if bridge.project_root else None
+    fallback = None
+    for name in names:
+        path = os.path.join(directory, name)
+        try:
+            with open(path, "r", encoding="utf-8-sig") as handle:
+                data = json.load(handle)
+        except Exception:
+            continue
+        if not isinstance(data, dict) or not isinstance(data.get("commands"), list):
+            continue
+        identity = data.get(send.IDENTITY_KEY) or {}
+        owner = identity.get("projectPath")
+        if want and owner and os.path.normcase(os.path.normpath(owner)) == want:
+            return data["commands"], path, data.get("generatedUtc")
+        if fallback is None:
+            fallback = (data["commands"], path, data.get("generatedUtc"))
+    return fallback or (None, None, None)
+
+
 def tool_list_commands(arguments):
     """列指令。
 
     默认只输出「id + 一句描述」，参数说明要显式要（verbose）。原因很实在：
     75 条指令带上参数说明是 ~2 万字符，而模型多数时候只需要知道"有这么条指令"，
     真正关心参数时它已经能按 prefix 把范围缩到十来条了。
+
+    取数顺序：进程内缓存 → 服务端 `/v1/commands` → 本地清单快照。
+    最后一档是"编辑器没开也能列"的兜底，输出里会明确标注它是快照。
     """
     try:
         bridge = bridge_for(arguments)
-        commands = bridge.commands(refresh=True)
     except (BridgeError, SelectorError) as error:
         return _text_result(str(error), is_error=True)
+
+    source_note = ""
+    try:
+        commands = bridge.commands(refresh=bool(arguments.get("refresh")))
+    except BridgeError as error:
+        cached, path, generated = commands_from_catalog(bridge)
+        if cached is None:
+            return _text_result(str(error), is_error=True)
+        commands = cached
+        source_note = ("※ 服务端连不上，以下来自本地清单快照（生成于 %s，%s）。\n"
+                       "  快照可能已过期：真正下发前以服务端校验为准，\n"
+                       "  Unity 编辑器启动后重试本工具即可拿到权威列表。\n"
+                       % (generated or "?", os.path.basename(path)))
 
     prefix = (arguments.get("prefix") or "").strip().lower()
     keyword = (arguments.get("keyword") or "").strip().lower()
@@ -902,7 +963,7 @@ def tool_list_commands(arguments):
     if filters:
         head += "（过滤 %s → %d 条）" % (" ".join(filters), len(commands))
 
-    lines = [head + "："]
+    lines = ([source_note] if source_note else []) + [head + "："]
     width = max([len(item.get("id", "")) for item in commands] or [0])
     for item in commands:
         flag = "  [编辑器]" if item.get("editorOnly") else ""
@@ -1180,6 +1241,8 @@ META_TOOLS = [
                             "description": "在指令 ID 与描述里按子串过滤（中文也可）。"},
                 "verbose": {"type": "boolean",
                             "description": "是否附上每条指令的参数说明（默认 false，输出会长很多）。"},
+                "refresh": {"type": "boolean",
+                            "description": "强制向编辑器重新取（默认用 60 秒缓存；刚部署完新指令才需要）。"},
             },
             "additionalProperties": False,
         },

@@ -22,7 +22,8 @@ description: 向本项目的 Unity 编辑器下发 JSON 指令、查询编辑器
 
 ```bash
 python scripts/send.py status                 # 探活 + 看编辑器状态（含当前指令与耗时）
-python scripts/send.py commands               # 列出全部可用指令（带参数说明）
+python scripts/send.py commands               # 列出全部可用指令（联网，权威）
+python scripts/send.py catalog                # 读本地清单（不联网，编辑器没开也能列）
 python scripts/send.py resolve                # 端点定位诊断：列出所有候选并说明最终连哪个
 python scripts/send.py send <文件>.json        # 下发并同步等执行报告
 python scripts/send.py send <文件>.json --dry-run   # 只校验不真执行
@@ -183,7 +184,7 @@ stdio 桥把发现逻辑关在桥进程内部（复用 `send.py` 的 `.http-info
 | `unity_status` | 编辑器状态 + 当前执行中的指令与耗时 |
 | `unity_targets` | 列出本机开着的 Unity 工程（`probe=true` 时逐个探活） |
 | `unity_execute` | 一次下发多条指令（服务端串行执行），支持 `dryRun` / `requestId` |
-| `unity_list_commands` | 指令清单（`prefix` 收窄、`verbose` 看参数） |
+| `unity_list_commands` | 指令清单（`prefix` 收窄、`verbose` 看参数、`refresh` 强制重取） |
 | `unity_cancel` | 协作式取消当前批次 |
 | `unity_compile_and_wait` | 触发重编译并等到编辑器重新空闲（跨域重载自动重连） |
 
@@ -208,9 +209,21 @@ Unity 没启动时 `tools/list` 仍会在半秒内返回元工具，调用会得
 
 ## 指令速查（`meta` 模式下先看这里，能省一次 `unity_list_commands`）
 
-> 下面是本仓库（`com.aketsuki.unity-mcp`）的完整指令集。目标工程若额外装了客制化指令
-> （如 `capture.*`）或没装某个模块（如 `ProjectB` 不装 `adb.*`），以
-> `unity_list_commands` 的实际返回为准。**权威来源永远是服务端**，本表只是省一次往返。
+> **第一选择是读本地清单，不是这张表。** 服务端每次启动 / 域重载都会把当前指令集写成
+> `<工作空间>/.workbuddy/UnityEditCommand/commands.<projectHash>.json`（与 `.http-info` 同目录）。
+> `send.py catalog` 直接读它、**不发 HTTP**；MCP 的 `unity_list_commands` 在连不上编辑器时
+> 也会自动退回它，并在输出里标注"这是快照"。
+>
+> 清单一律是**快照**：包升级、模块增删（`ProjectB` 不装 `adb.*`）都会让它过期。
+> 真正下发前以服务端为准；刚部署完新指令时用 `unity_list_commands {refresh: true}`。
+
+**清单里有什么**：每条指令的 `id` / `description` / `usage` / `editorOnly` /
+`runtime` / `playState` / `requiresConsent`，与 `/v1/commands` 同一份字段（服务端同一段代码生成，
+不会漂移）。清单顶层还有 `generatedUtc`、`protocolVersion`、`identity`（工程名与路径）。
+
+下面是本仓库（`com.aketsuki.unity-mcp`）的完整指令集，供肉眼扫。目标工程可能没装某个模块
+（如 `ProjectB` 不装 `adb.*`），也可能带着**未合入分支**的指令（`capture.*` 目前在
+`develop_screen_viewer` 上），以清单或 `unity_list_commands` 的实际返回为准。
 
 **GameObject**（`gameobject.*`）：`create` 建节点、`instantiate` 实例化 Prefab（保连接）、
 `find` 按名/类型/路径找、`rename`、`setActive`、`setParent`、`setProperty`（layer/tag/isStatic）、
@@ -717,8 +730,9 @@ HTTP 状态码只表示"请求是否被处理"，**业务结果看 body 里的 `
 | 内容 | 路径 |
 | --- | --- |
 | 服务信息（端口 + 令牌） | `<工作空间>/.workbuddy/UnityEditCommand/.http-info.<projectHash>` |
+| 指令清单（离线副本） | `<工作空间>/.workbuddy/UnityEditCommand/commands.<projectHash>.json` |
 | 指令文件 | `<工作空间>/.workbuddy/UnityEditCommand/*.json` |
 | 本 Skill | `<工作空间>/.workbuddy/skills/unity-cmd/` |
-| 服务端源码 | `CivilizationRevival/Assets/Editor/ExternalCommandSystem/CommandHttpServer.cs` |
-| 协议层源码 | `CivilizationRevival/Assets/Editor/ExternalCommandSystem/Core/HttpProtocol.cs` |
-| 路径策略源码 | `CivilizationRevival/Assets/Editor/ExternalCommandSystem/Core/CommandPathUtil.cs` |
+| 服务端源码 | `Packages/com.aketsuki.unity-mcp/Editor/CommandHttpServer.cs` |
+| 协议层源码 | `Packages/com.aketsuki.unity-mcp/Editor/Core/HttpProtocol.cs` |
+| 路径策略源码 | `Packages/com.aketsuki.unity-mcp/Editor/Core/CommandPathUtil.cs` |
