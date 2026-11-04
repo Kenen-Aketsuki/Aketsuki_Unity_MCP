@@ -6,8 +6,11 @@
 
     python Tools/test_targets.py
 """
+import atexit
 import os
+import shutil
 import sys
+import tempfile
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -19,10 +22,29 @@ import unity_mcp_server as mcp  # noqa: E402
 
 FAILED = []
 
-# 用本机真实存在的两个 Unity 工程根做测试路径：parse_selector 会去查
-# ProjectSettings/ProjectVersion.txt，凭空编的假路径会被判成 invalid。
-PROJECT_A = "D:/Work/MyUnityProject"
-PROJECT_B = "D:/Work/ProjectB"
+# 测试用的"工程根"现场造，不依赖本机任何真实工程 —— clone 下来就能跑。
+# parse_selector 判 root 的判据是 `<目录>/ProjectSettings/ProjectVersion.txt` 存在，
+# 所以这里把这两个文件真建出来；整个临时目录在退出时删掉。
+_TEST_ROOT = tempfile.mkdtemp(prefix="mcp_targets_")
+atexit.register(shutil.rmtree, _TEST_ROOT, True)
+
+
+def _make_fake_project(name):
+    root = os.path.join(_TEST_ROOT, name)
+    os.makedirs(os.path.join(root, "ProjectSettings"), exist_ok=True)
+    with open(os.path.join(root, "ProjectSettings", "ProjectVersion.txt"),
+              "w", encoding="utf-8") as handle:
+        handle.write("m_EditorVersion: 0.0.0\n")
+    return root
+
+
+PROJECT_A = _make_fake_project("project_a")
+PROJECT_B = _make_fake_project("project_b")
+# 存在、但不是 Unity 工程根（缺 ProjectSettings/ProjectVersion.txt）
+NOT_A_PROJECT = os.path.join(_TEST_ROOT, "not_a_project")
+os.makedirs(NOT_A_PROJECT, exist_ok=True)
+# 根本不存在
+MISSING_PATH = os.path.join(_TEST_ROOT, "no_such_project")
 
 
 def check(name, condition, detail=""):
@@ -60,26 +82,30 @@ def new_pool(live_paths, alive=True):
 
 def test_parse_selector():
     print("parse_selector：")
-    info = os.path.join(HERE, "..", ".workbuddy", "UnityEditCommand", ".http-info.ad39ac9d")
+    # 信息文件也现场造：判 info 的依据是"这个文件存在且以 .http-info 开头"，
+    # 不能靠本机残留的那份（别人的 clone 里没有，测试会假失败）。
+    info = os.path.join(_TEST_ROOT, send.INFO_PREFIX + ".deadbeef")
+    with open(info, "w", encoding="utf-8") as handle:
+        handle.write("{}\n")
     kind, value = mcp.parse_selector(os.path.abspath(info))
     check("绝对路径 .http-info → info", kind == "info", "%s %s" % (kind, value))
 
     kind, value = mcp.parse_selector(PROJECT_A)
     check("工程根目录 → root", kind == "root", "%s %s" % (kind, value))
 
-    kind, value = mcp.parse_selector("MyUnityProject")
-    check("裸名字 → name", kind == "name" and value == "MyUnityProject")
+    kind, value = mcp.parse_selector("project_a")
+    check("裸名字 → name", kind == "name" and value == "project_a")
 
-    kind, value = mcp.parse_selector("  \"ProjectB\"  ")
-    check("去掉引号与空白", kind == "name" and value == "ProjectB", repr(value))
+    kind, value = mcp.parse_selector("  \"project_b\"  ")
+    check("去掉引号与空白", kind == "name" and value == "project_b", repr(value))
 
     check("空串 → (None, None)", mcp.parse_selector("") == (None, None))
 
     # 存在但不是 Unity 工程根（没有 ProjectSettings/ProjectVersion.txt）
-    kind, value = mcp.parse_selector("D:/Work")
+    kind, value = mcp.parse_selector(NOT_A_PROJECT)
     check("非工程目录 → invalid", kind == "invalid", "%s %s" % (kind, value))
 
-    kind, value = mcp.parse_selector("D:/no/such/project")
+    kind, value = mcp.parse_selector(MISSING_PATH)
     check("不存在的路径 → invalid（不退化成名）", kind == "invalid", "%s %s" % (kind, value))
 
 
@@ -126,8 +152,8 @@ def test_sticky():
     # 沿用目标已经死掉时要自动放弃粘性，而不是一直报错
     pool2 = mcp.TargetPool()
     pool2._dispatch = lambda kind, value: FakeBridge("D", alive=False)
-    pool2._sticky = ("root", "D:/p/D")
-    pool2._live = [("D:/p/E", FakeBridge("E"))]
+    pool2._sticky = ("root", os.path.join(_TEST_ROOT, "D"))
+    pool2._live = [(os.path.join(_TEST_ROOT, "E"), FakeBridge("E"))]
     pool2._live_at = time.time()
     try:
         bridge = pool2.get(None)
@@ -142,7 +168,7 @@ def test_name_resolution():
     try:
         send.find_project_root_by_name = lambda name: (PROJECT_A, [])
         pool = new_pool([])
-        pool.get("MyUnityProject")
+        pool.get("project_a")
         sticky = pool.sticky_value()
         check("唯一命中 → 解析成工程根并记下",
               sticky[0] == "root" and os.path.normpath(sticky[1]) == os.path.normpath(PROJECT_A),
@@ -179,10 +205,10 @@ def test_cli_target_selector():
     original_targets = send.list_global_targets
     try:
         send.find_project_root_by_name = lambda name: (PROJECT_A, [])
-        root, info, err, _ = send.resolve_target_selector("MyUnityProject")
+        root, info, err, _ = send.resolve_target_selector("project_a")
         check("按工程名 → 工程根", err is None and os.path.normpath(root) == os.path.normpath(PROJECT_A), err or root)
 
-        root, info, err, hits = send.resolve_target_selector("D:/Work/MyUnityProject")
+        root, info, err, hits = send.resolve_target_selector(PROJECT_A)
         check("工程根路径 → 原样返回",
               err is None and os.path.normpath(root) == os.path.normpath(PROJECT_A), err or root)
 
@@ -196,9 +222,9 @@ def test_cli_target_selector():
             {"_path": "x", "identity": {"projectName": PROJECT_A, "projectPath": PROJECT_A}}]
         root, info, err, hits = send.resolve_target_selector("NotExist")
         check("查不到 → 列出全局索引里的条目",
-              root is None and "全局索引" in err and "MyUnityProject" in err, err or "")
+              root is None and "全局索引" in err and "project_a" in err, err or "")
 
-        root, info, err, _ = send.resolve_target_selector("D:/no/such/project")
+        root, info, err, _ = send.resolve_target_selector(MISSING_PATH)
         check("像路径但不存在 → 明确报错", err is not None and "不存在" in err, err or "")
 
         root, info, err, _ = send.resolve_target_selector("")
@@ -233,6 +259,78 @@ def test_tool_modes():
     check("meta 模式体积 < 4k 字符", size_meta < 4000, "%d" % size_meta)
 
 
+def test_catalog():
+    """本地指令清单：读得到、按工程精确挑、不串到别的工程。"""
+    print("本地指令清单：")
+    import json as _json
+    import shutil
+    import tempfile
+
+    directory = tempfile.mkdtemp(prefix="catalog_")
+    original_dir = send.COMMAND_DIR
+    original_project = send.EXPECTED_PROJECT
+
+    def write_catalog(project_path, commands, stamp, mtime):
+        payload = {
+            "ok": True,
+            "count": len(commands),
+            "generatedUtc": stamp,
+            "protocolVersion": 2,
+            "identity": {"projectPath": project_path,
+                         "projectName": os.path.basename(project_path)},
+            "commands": commands,
+        }
+        path = os.path.join(directory,
+                            "commands.%d.json" % (abs(hash(project_path)) % 100000))
+        with open(path, "w", encoding="utf-8") as handle:
+            _json.dump(payload, handle)
+        # mtime 决定"不指定工程时取哪份"，显式给出来，免得两次写盘落在同一秒
+        os.utime(path, (mtime, mtime))
+        return path
+
+    try:
+        send.COMMAND_DIR = directory
+        send.EXPECTED_PROJECT = None
+
+        write_catalog(PROJECT_A, [{"id": "ui.node"}, {"id": "prefab.renameNode"}],
+                      "2026-11-04T00:00:00Z", 1001)
+        write_catalog(PROJECT_B, [{"id": "adb.logcat.read"}],
+                      "2026-11-04T01:00:00Z", 1002)
+
+        data, path, error = send.pick_catalog(_Args())
+        check("不指定工程 → 取最新那份",
+              data is not None and data["count"] == 1 and not error,
+              "%s / %s" % (error, path))
+
+        send.EXPECTED_PROJECT = os.path.normcase(os.path.abspath(PROJECT_A))
+        data, path, error = send.pick_catalog(_Args())
+        check("指定工程根 → 精确挑到它的清单",
+              data is not None and [c["id"] for c in data["commands"]] == ["ui.node", "prefab.renameNode"],
+              "%s / %s" % (error, path))
+
+        send.EXPECTED_PROJECT = os.path.normcase(os.path.abspath(NOT_A_PROJECT))
+        data, path, error = send.pick_catalog(_Args())
+        check("指定工程没有清单 → 报错而不串用别人的",
+              data is None and error and "都不属于" in error, str(error))
+
+        send.EXPECTED_PROJECT = None
+        shutil.rmtree(directory, ignore_errors=True)
+        data, path, error = send.pick_catalog(_Args())
+        check("没有清单 → 提示先联网取一次",
+              data is None and error and "没有清单" in error, str(error))
+    finally:
+        send.COMMAND_DIR = original_dir
+        send.EXPECTED_PROJECT = original_project
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+class _Args(object):
+    """catalog 只用到这两个字段。"""
+
+    json = False
+    prefix = None
+
+
 def main():
     print("== 目标选择与工具折叠测试 ==")
     test_parse_selector()
@@ -242,6 +340,7 @@ def main():
     test_name_resolution()
     test_cli_target_selector()
     test_tool_modes()
+    test_catalog()
 
     print("")
     if FAILED:
