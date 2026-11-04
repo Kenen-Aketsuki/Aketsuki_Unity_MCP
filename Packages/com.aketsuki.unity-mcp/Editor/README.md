@@ -149,6 +149,16 @@ new CommandRunner().RunSingle("log", JsonValue.Parse("{\"message\":\"hello\"}"))
 `<工作空间>/.workbuddy/UnityEditCommand/.http-info`——**客户端从那里读端口和令牌，不要硬编码**，
 端口被占用时服务端会自动向后避让。
 
+同一个目录里还会落一份**指令清单** `commands.<projectHash>.json`（与 `/v1/commands` 同一段代码生成，
+`count` / `generatedUtc` / `protocolVersion` / `identity` / `commands` 五块），供客户端**不联网**列出
+可用指令；服务停止时与 `.http-info` 一起删掉。写它的时机是"每次写 `.http-info`"，因此跟编辑器状态自愈。
+
+> **启动顺序陷阱（2026-11-04 实测，已修）**：`CommandHttpServerBoot` 与 `CommandAutoRunner`
+> 都是 `[InitializeOnLoad]`，Unity 不保证谁先跑。服务先起来时注册表还是空的，
+> 旧代码"空就不写"于是清单**永远不出现**（客户端只能退回联网）。现在改成空则排队一次
+> `delayCall` 重试（那时注册已完成），最多 3 次；连续失败才记一条告警。
+> 排障：清单不存在但服务在跑 → 先看 Console 有没有「指令集仍为空」。
+
 > 旧的「文件状态监听」（FileSystemWatcher + 去抖 + 去重）已被移除，下发指令改走 HTTP 通路，
 > 不再有"保存即自动执行"；需要批量执行目录里的文件时，用控制台窗口的 **扫描目录**。
 

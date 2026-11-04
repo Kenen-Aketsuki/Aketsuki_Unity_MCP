@@ -1093,6 +1093,12 @@ namespace Aketsuki.UnityMcp.Editor
         /// 每次写信息文件都会重写（服务启动 / 域重载 / 令牌轮换），所以它跟着编辑器状态自愈。
         /// 指令数为 0 时不写：宁可保留上一份能用的清单，也不要拿空文件覆盖掉。
         /// </para>
+        /// <para>
+        /// <b>启动顺序陷阱（2026-11-04 实测）</b>：本类与 <c>CommandAutoRunner</c> 都是
+        /// <c>[InitializeOnLoad]</c>，Unity 不保证谁先跑。若本类先跑，注册表还是空的，
+        /// 于是每次都"跳过写清单"——清单文件永远不出现，客户端只能退回联网取。
+        /// 现在改成：空就排一次 <c>delayCall</c> 重试（那时注册早已完成），仍空才记一条告警。
+        /// </para>
         /// </summary>
         private static void WriteCommandCatalog(HttpIdentity identity)
         {
@@ -1102,9 +1108,11 @@ namespace Aketsuki.UnityMcp.Editor
                     ((IHttpEnvironment)CommandHttpServer.Instance).Commands);
                 if (items.Count == 0)
                 {
-                    CommandLog.Warning("指令集为空，跳过写清单（避免用空文件覆盖上一份可用的）");
+                    ScheduleCatalogRetry();
                     return;
                 }
+
+                _catalogRetryCount = 0;
 
                 var payload = JsonValue.NewObject();
                 payload.Set("ok", JsonValue.True);
@@ -1124,6 +1132,58 @@ namespace Aketsuki.UnityMcp.Editor
                 // 清单只是便利副本，写不进去不该影响服务本身
                 CommandLog.Warning("写入指令清单失败：" + e.Message);
             }
+        }
+
+        /// <summary>本域内清单重试已用的次数（写成功即清零）</summary>
+        private static int _catalogRetryCount;
+
+        /// <summary>已排入队列、尚未执行的重试（避免每帧堆一条）</summary>
+        private static bool _catalogRetryPending;
+
+        /// <summary>最多重试几次；注册表若是真的空，多排也只是刷日志</summary>
+        private const int CatalogRetryLimit = 3;
+
+        /// <summary>
+        /// 指令集为空时，等服务启动流程走完（<c>[InitializeOnLoad]</c> 全部执行完、注册表已填）再写一次。
+        /// <para>
+        /// 用 <c>delayCall</c> 而不是 <c>update</c>：前者只跑一次，不会每秒检查；
+        /// 也不做无限重试——<c>CommandAutoRunner</c> 只在域重载时注册，
+        /// 这一轮没注册上（例如程序集被条件编译排除）就是没有，多试无益。
+        /// </para>
+        /// </summary>
+        private static void ScheduleCatalogRetry()
+        {
+            if (_catalogRetryPending)
+            {
+                return;
+            }
+
+            if (_catalogRetryCount >= CatalogRetryLimit)
+            {
+                CommandLog.Warning(
+                    $"指令集仍为空，未写指令清单（已重试 {_catalogRetryCount} 次）；" +
+                    "客户端此工程只能联网取指令列表");
+                return;
+            }
+
+            // batchmode 进程没有编辑器主循环，delayCall 不会触发；那种进程本来也不写清单
+            if (UnityEngine.Application.isBatchMode)
+            {
+                return;
+            }
+
+            _catalogRetryPending = true;
+            _catalogRetryCount++;
+            EditorApplication.delayCall += () =>
+            {
+                _catalogRetryPending = false;
+                if (!CommandHttpServer.Instance.IsRunning)
+                {
+                    return;
+                }
+
+                WriteCommandCatalog(CommandHttpServer.Instance.Identity);
+            };
         }
 
         /// <summary>
