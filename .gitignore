@@ -129,3 +129,12 @@ InitTestScene*.unity*
 
 # Python 缓存（桥脚本与 Tools 下的自检脚本都会生成）
 __pycache__/
+
+# 反馈工单只存本机：一条工单就是一份项目内部记录（在哪个工程踩的、贴了哪些路径、
+# 日志原文、内部模块与排期），公开出去等于把开发和项目结构一起摊开。
+# 仓库里只保留规则（Feedback/README.md）与模板（Feedback/_模板.md）。
+# 索引.md 由 Tools/feedback_index.py 扫本机目录生成，同样不入库。
+/Feedback/待拍板/
+/Feedback/未实现/
+/Feedback/已实现/
+/Feedback/索引.md
