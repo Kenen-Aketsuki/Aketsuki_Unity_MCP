@@ -1086,7 +1086,7 @@ namespace Aketsuki.UnityMcp.Editor
         /// 客户端读它就能省掉一次往返，也让"编辑器没开"不再是"不知道有哪些指令"。
         /// </para>
         /// <para>
-        /// <b>它一定会过期</b>：包升级、模块增删（lilith 不装 adb、island_back 装了 capture）都会让指令集变化。
+        /// <b>它一定会过期</b>：包升级、模块增删（ProjectB 不装 adb、MyUnityProject 装了 capture）都会让指令集变化。
         /// 所以带 <c>generatedUtc</c>，客户端只拿它当"候选"，真正下发前仍以服务端校验为准。
         /// </para>
         /// <para>

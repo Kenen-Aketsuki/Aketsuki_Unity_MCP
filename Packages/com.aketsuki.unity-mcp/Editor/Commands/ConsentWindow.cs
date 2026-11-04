@@ -138,7 +138,7 @@ namespace Aketsuki.UnityMcp.Editor
     /// <para>
     /// <b>为什么必须换成真模态：</b>原来的非模态浮窗（<see cref="ConsentWindow"/>）反馈太弱 ——
     /// 会被其它 Unity 窗口压住、不抢焦点、没声音、Console 那条 warning 也可能被折叠，
-    /// 结果是人根本没看见窗口，30 秒后静默按拒绝（2026-11-02 在 island_back 连踩两次：
+    /// 结果是人根本没看见窗口，30 秒后静默按拒绝（2026-11-02 在 MyUnityProject 连踩两次：
     /// AI 等到 <c>expired</c>，用户说"可能是弹窗弹了，但我没看到"）。
     /// </para>
     ///

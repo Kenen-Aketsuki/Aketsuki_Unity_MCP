@@ -285,7 +285,7 @@ JSON 里可以写 `//` 与 `/* */` 注释，也允许结尾多一个逗号。
 | `Assets/Cfgs/a.json` | 项目根/Assets/Cfgs/a.json |
 | `Cfgs/a.json` | 依次尝试 **引用它的指令文件所在目录 → 默认指令目录 → Assets 目录**，取第一个命中的 |
 
-**默认指令目录 = `<工作空间根>/.workbuddy/UnityEditCommand`**（本工程即 `Demo/.workbuddy/UnityEditCommand`，
+**默认指令目录 = `<工作空间根>/.workbuddy/UnityEditCommand`**（如 `<工程>/.workbuddy/UnityEditCommand`，
 位于 Unity 项目之外，既不参与资源导入、也不会生成 .meta，且与编辑器工作空间放在一起管理）。
 
 判定规则：项目根的上一级若存在 `.workbuddy` 子目录，则它为工作空间根；否则退化为项目根，
@@ -614,8 +614,8 @@ Modal_Confirm              (铺满全屏)
 
 ## 5.3 UI 根节点 MainUIRoot（与运行期代码对应）
 
-游戏运行时的 UI 根节点由 `Demo.UI.UIManager.EnsureUIRoot()` 确保（序列化引用缺失时自动查找/创建
-MainUIRoot 并赋值，见工程内 `Demo.UI.MainUIRootBuilder`）：
+游戏运行时的 UI 根节点由工程自己的 `UIManager.EnsureUIRoot()` 确保（序列化引用缺失时自动查找/创建
+MainUIRoot 并赋值，见工程内 `MainUIRootBuilder`）：
 
 ```
 MainUIRoot                      DontDestroyOnLoad
@@ -664,8 +664,8 @@ public static class MainUIRootBuilder
 - 找不到（如导入到没有此类的工程）→ 使用本节的内置默认结构，行为与过去完全一致；
 - 发现范围只扫工程程序集（跳过 Unity/System 等前缀），结果按进程缓存。
 
-> 沿用这一约定的是 GameProject 的 `Demo.UI.MainUIRootBuilder`（`UIManager.EnsureUIRoot`
-> 运行期也调它）。island_back 等其它工程没有该类，走内置默认，互不影响。
+> 沿用这一约定的是有的工程自定义的 `MainUIRootBuilder`（`UIManager.EnsureUIRoot`
+> 运行期也调它）。没定义该接口的工程走内置默认，互不影响。
 
 ### 5.3.2 工程客制化内容（`Project/` 目录）：允许存在，但绝不进包
 

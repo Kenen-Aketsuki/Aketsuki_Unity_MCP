@@ -5,7 +5,7 @@
     python3 Tools/deploy.py --list              查看目标清单与同步状态
     python3 Tools/deploy.py --check             只报告差异，不写文件
     python3 Tools/deploy.py                     部署到全部目标
-    python3 Tools/deploy.py island ProjectC   只部署名字能匹配上的目标
+    python3 Tools/deploy.py Project  只部署名字能匹配上的目标
     python3 Tools/deploy.py --dry-run           显示将写入哪些文件
     python3 Tools/deploy.py --verify            部署后让目标工程编译并回传错误
     python3 Tools/deploy.py --prune             额外删除目标侧的孤儿文件（默认只报告）
@@ -892,7 +892,7 @@ def verify_package_assembly(target, dest_root, since, timeout=300):
       ② `Library/ScriptAssemblies/<程序集>.dll` 的 mtime 晚于本次部署开始时间。
     两条都过才算通过。
 
-    **只解析出不等于编出来了**（实测 island_back：lock 已 embedded，dll 还是没影）。
+    **只解析出不等于编出来了**（实测 MyUnityProject：lock 已 embedded，dll 还是没影）。
     目标工程如果同时装着指令系统，就借它的 `asset.refresh` 主动推一把 ——
     `asset.compile` 不会导入新文件，只会在旧状态上回一句"无需重编"。
     """

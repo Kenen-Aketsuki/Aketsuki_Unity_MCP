@@ -92,7 +92,7 @@ python .workbuddy/skills/unity-cmd/scripts/send.py compile --wait 300
 python Tools/deploy.py --list      # 各工程同步状态 + Unity 是否在跑
 python Tools/deploy.py --check     # 只报告差异，不改文件
 python Tools/deploy.py             # 部署到全部目标
-python Tools/deploy.py island      # 只部署名字能匹配上的（子串匹配）
+python Tools/deploy.py Project     # 只部署名字能匹配上的（子串匹配）
 python Tools/deploy.py --verify            # 部署后让目标工程编译一遍，回传错误
 python Tools/deploy.py --offline-compile   # 不依赖编辑器，离线编译验证编辑程序集（2 秒级）
 python Tools/deploy.py --force-refresh     # 编辑器在后台不响应时，提到前台代按 Ctrl+R
@@ -102,8 +102,8 @@ python Tools/deploy.py --module adb --list  # ADB 工具（不带 --module 就�
 python Tools/deploy.py --module adb         # 部署 ADB（27 个文件，没有桥）
 ```
 
-当前登记：`MyUnityProject`、`ProjectC`、`ProjectB`、`GameProject`
-（工程根在 `GameProject/Demo/CivilizationRevival`，比工作区根低一层——配置里写的是**工程根**，
+当前登记了若干个目标（具体清单只在本机 `deploy_targets.json` 里，不进仓库）。
+有的工程根在子目录、比工作区根低一层——配置里写的是**工程根**，
 不是 `.workbuddy` 所在的那层）。
 
 目标可以按模块分别开关：条目里写 `"excludeModules": ["adb"]` 就表示这个工程只装指令系统。
