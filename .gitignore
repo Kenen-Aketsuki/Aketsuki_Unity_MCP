@@ -138,3 +138,7 @@ __pycache__/
 /Feedback/未实现/
 /Feedback/已实现/
 /Feedback/索引.md
+
+# 钩子的私有词表是"本机有哪些工程"的清单，由 Tools/install_hooks.py 生成，不入库。
+# 钩子本体会读它；没有这个文件时降级为只查通用模式（盘符路径、用户名、私钥块）。
+/.githooks/private-names.txt

@@ -1,0 +1,77 @@
+#!/bin/sh
+# 仓库卫生检查（pre-commit）
+#
+# 拦三类东西：
+#   1. 本机专属文件/目录（部署配置、反馈工单、本地记忆、运行期令牌）
+#   2. 本机绝对路径、用户名、私钥块
+#   3. 私有工程名（词表在本机 .githooks/private-names.txt，不入库）
+#
+# 规则与由来见仓库根的 AGENTS.md。
+# 误报不要用 --no-verify 绕过：先改内容，或把该词从 private-names.txt 里去掉。
+
+set -u
+status=0
+
+# ---- 不该入库的路径 -------------------------------------------------------
+BLOCKED_PATH_RE='^(Feedback/(待拍板|未实现|已实现)/|Feedback/索引\.md$|Tools/deploy_targets\.json$|\.ai_memory/|\.workbuddy/|HANDOVER\.md$)'
+
+# ---- 通用敏感内容 ---------------------------------------------------------
+# 故意拆开写：这个文件本身也要能过自己的检查
+USER_NAME="poi""77"
+WORK_DIR="Wrok""_proj"
+CONTENT_RE="([A-Za-z]:[\\\\/]((${WORK_DIR})|([Uu]sers))[\\\\/]|${USER_NAME}|BEGIN [A-Z ]*PRIVATE KEY)"
+
+# ---- 私有工程名词表（本机，不入库）----------------------------------------
+root=$(git rev-parse --show-toplevel 2>/dev/null || echo ".")
+names_file="$root/.githooks/private-names.txt"
+if [ -f "$names_file" ]; then
+  while IFS= read -r name; do
+    case "$name" in ''|'#'*) continue ;; esac
+    # 去掉可能带上的行尾空白
+    name=$(printf '%s' "$name" | tr -d '\r')
+    [ -z "$name" ] && continue
+    CONTENT_RE="${CONTENT_RE}|${name}"
+  done < "$names_file"
+fi
+
+# ---- 待检查的暂存文件 -----------------------------------------------------
+# core.quotepath=false 必须给：否则中文路径会被转义成 "Feedback/\345\267\262..." 带引号的样子，
+# 下面的路径正则一条都匹配不上（2026-11-04 实测漏过一次）。
+list=$(mktemp 2>/dev/null || echo "/tmp/precommit.$$")
+git -c core.quotepath=false diff --cached --name-only --diff-filter=ACMR > "$list"
+
+while IFS= read -r file; do
+  [ -z "$file" ] && continue
+
+  # 钩子自身与词表不参与内容扫描（否则规则文档自己过不了）
+  case "$file" in
+    .githooks/*) continue ;;
+  esac
+
+  if printf '%s\n' "$file" | grep -Eq "$BLOCKED_PATH_RE"; then
+    echo "[pre-commit] 拒绝提交：这个路径不该入库 -> $file" >&2
+    status=1
+    continue
+  fi
+
+  # 二进制只查路径，不查内容
+  case "$file" in
+    *.png|*.jpg|*.jpeg|*.bmp|*.gif|*.webp|*.dll|*.so|*.dylib|*.zip|*.tgz|*.unitypackage) continue ;;
+  esac
+
+  hits=$(git show ":$file" 2>/dev/null | grep -nE "$CONTENT_RE" | head -5)
+  if [ -n "$hits" ]; then
+    echo "[pre-commit] 拒绝提交：$file 里有敏感内容 ——" >&2
+    printf '%s\n' "$hits" | sed 's/^/    /' >&2
+    status=1
+  fi
+done < "$list"
+
+rm -f "$list"
+
+if [ "$status" -ne 0 ]; then
+  echo "" >&2
+  echo "处理方式见 AGENTS.md 的「仓库卫生」一节。不要用 --no-verify 硬推。" >&2
+fi
+
+exit $status
