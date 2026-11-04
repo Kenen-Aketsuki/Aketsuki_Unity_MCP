@@ -92,7 +92,7 @@ git log -S"<关键词>" --all           # 全空才算完
 | 项 | 说明 |
 |---|---|
 | 本体 | `.githooks/pre-commit`（入库，自身不含任何敏感串 —— 敏感词是拼接出来的） |
-| 私有词表 | `.githooks/private-names.txt`（**本机生成，不入库**；从 `Tools/deploy_targets.json` 的 `targets[].name` 提取） |
+| 私有词表 | `.githooks/private-names.txt`（**本机生成，不入库**）：上段自动从 `Tools/deploy_targets.json` 的 `targets[].name` 提取，下段「手工增补」放不在部署目标里的内部命名，重装时原样保留 |
 | 安装 | `python Tools/install_hooks.py` —— 生成词表、打可执行位、设 `core.hooksPath` |
 | 生效范围 | 本仓库所有提交（含 AI 的） |
 
