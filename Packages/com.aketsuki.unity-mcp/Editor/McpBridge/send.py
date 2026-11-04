@@ -477,6 +477,16 @@ def resolve_target_selector(value):
 
     root, hits = find_project_root_by_name(text)
     if root:
+        # 名字是**子串**匹配（`--target island` 也能命中 MyUnityProject）。
+        # 唯一命中就直接用，但必须明说实际连的是谁：`ProjectA` 与 `MyUnityProject`
+        # 互为前缀，静默近似会让人以为在操作 A，指令其实落进了 B（写错工程是事故级）。
+        actual = os.path.basename(os.path.normpath(root))
+        lowered = text.lower()
+        if actual.lower() != lowered:
+            sys.stderr.write(
+                "提示：'%s' 按名字部分匹配到工程 %s（%s）。\n"
+                "      要精确锁定请给完整工程名或工程根路径。\n"
+                % (text, actual, root))
         return root, None, None, []
     if hits:
         return None, None, (
