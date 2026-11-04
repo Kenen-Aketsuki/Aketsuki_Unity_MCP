@@ -51,7 +51,7 @@ python scripts/send.py status --target <工程>   # 跨工程：按工程名/路
 
 ```bash
 python scripts/send.py status --target MyUnityProject    # 工程名（也支持部分匹配）
-python scripts/send.py status --target D:/Work/MyUnityProject   # 工程根路径
+python scripts/send.py status --target D:/Work/MyUnityProject # 工程根路径（盘符随本机）
 python scripts/send.py status --target ".../.http-info.df0c4d80"          # 信息文件
 ```
 

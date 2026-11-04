@@ -574,12 +574,12 @@ Modal_Confirm              (铺满全屏)
 
 ```json
 { "id": "asset.importSprite", "params": {
-    "source": "D:/Work/ProjectC-art/UI/Z-主界面/WT主界面-切图资源/轮盘菜单",
+    "source": "<工程外美术资源目录>/UI/主界面-切图资源/轮盘菜单",
     "destination": "Assets/GameAssets/UI/RoundMenu",
     "pattern": "*.png", "pixelsPerUnit": 100, "filterMode": "Point", "overwrite": true } }
 
 { "id": "asset.importSprite", "params": {
-    "source": "D:/Work/ProjectC-art/UI/Z-主界面/WT主界面-切图资源/轮盘菜单/RM_info_keyBG.png",
+    "source": "<工程外美术资源目录>/UI/主界面-切图资源/轮盘菜单/RM_info_keyBG.png",
     "destination": "Assets/GameAssets/UI/RoundMenu", "border": [44, 44, 44, 44] } }
 ```
 

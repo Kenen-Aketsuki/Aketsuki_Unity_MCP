@@ -34,7 +34,6 @@ SRC_REL = "Packages/com.aketsuki.adb-debugger/Editor"
 
 OFFLINE_COMPILER_CANDIDATES = [
     os.path.expanduser("~/.workbuddy/tools/unity-offline-compile/unity_offline_compile.py"),
-    "C:/Users/user/.workbuddy/tools/unity-offline-compile/unity_offline_compile.py",
 ]
 
 
