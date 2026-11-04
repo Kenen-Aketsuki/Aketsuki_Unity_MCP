@@ -681,8 +681,16 @@ Modal_Confirm              (铺满全屏)
    窗口截屏没法把它们剥掉（实测 Unity 2022.3 上沿会带进约 19px 工具栏）。
 3. **编辑模式下的 `capture.game` 拿不到 Screen Space-Overlay 的 UI**：GameView 不渲染，
    只能退到相机渲染，而 Overlay Canvas 不走相机。返回的 `warnings` 会明写这一条。
-4. **窗口最小化时直接报错**，不产出黑图；`crop=frame` 的矩形算空时同样报错并给出窗口尺寸。
-5. **Windows 专用**：`PrintWindow` / `CreateDIBSection` 是 Win32 API。非 Windows 编辑器直接返回明确失败。
+4. **编辑模式的 `capture.game` 还要求场景里有一个"会清屏的相机"**。
+   `clearFlags = Depth only` 的叠加相机单独 `Render()` 到一张空 RT，没有任何人清颜色缓冲，
+   输出就是黑的——**而且不报错**。2026-11-04 实测踩到：某场景两个相机都是 Depth only，
+   指令返回 1920×1080 纯黑图还报成功，这比失败更危险（调用方会以为"场景里就是黑的"）。
+   现在的做法是：候选相机按「会清屏的优先、同组内 depth 小的优先」排序，**逐个渲染并做全黑检测**
+   （`WindowCapture.IsNearlyBlack`，0.1% 亮像素阈值），见黑图换下一个；
+   全都黑就**明确失败**并列出每个候选的 `名称(clearFlags, depth)`，不再交出黑图。
+   纯 UI 场景（画面全在 Overlay Canvas 里）属于这一类，只能进 Play 再截。
+5. **窗口最小化时直接报错**，不产出黑图；`crop=frame` 的矩形算空时同样报错并给出窗口尺寸。
+6. **Windows 专用**：`PrintWindow` / `CreateDIBSection` 是 Win32 API。非 Windows 编辑器直接返回明确失败。
 
 ### 裁剪矩形的算法（改之前先读）
 

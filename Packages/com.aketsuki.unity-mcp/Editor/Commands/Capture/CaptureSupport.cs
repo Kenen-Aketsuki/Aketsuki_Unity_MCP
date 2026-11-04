@@ -332,37 +332,10 @@ namespace Aketsuki.UnityMcp.Editor
         }
 
         /// <summary>
-        /// 编辑模式下退而求其次的相机：GameView 相机 → <c>Camera.main</c> → 已启用相机里 depth 最大的。
+        /// 编辑模式的候选相机选择已迁到 <see cref="CaptureGameCommand.CollectCameras"/>：
+        /// 那边的排序是"会清屏的优先 + 逐个试、见黑图换下一个"，不能再退回"取 depth 最大"的旧逻辑
+        /// （2026-11-04 实测：depth 最大的恰恰是 Depth only 的叠加相机，单独渲染必黑）。
         /// </summary>
-        public static Camera FindFallbackCamera(Camera preferred)
-        {
-            if (preferred != null)
-            {
-                return preferred;
-            }
-
-            var main = Camera.main;
-            if (main != null)
-            {
-                return main;
-            }
-
-            Camera best = null;
-            foreach (var camera in Camera.allCameras)
-            {
-                if (camera == null || !camera.isActiveAndEnabled)
-                {
-                    continue;
-                }
-
-                if (best == null || camera.depth > best.depth)
-                {
-                    best = camera;
-                }
-            }
-
-            return best;
-        }
 
         #endregion
 

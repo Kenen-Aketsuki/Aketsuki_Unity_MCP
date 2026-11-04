@@ -476,6 +476,41 @@ namespace Aketsuki.UnityMcp.Editor
         #region 相机渲染（GameView 编辑模式降级）
 
         /// <summary>
+        /// 帧是否"几乎全黑"。
+        /// <para>
+        /// 存在的理由：<c>clearFlags = Depth only</c> 的叠加相机单独 <c>Render()</c> 到一张空 RenderTexture 时，
+        /// 由于没有任何人清过颜色缓冲，输出就是黑的——而且**不报错**。2026-11-04 实测踩到：
+        /// 场景里两个相机都是 Depth only，<c>capture.game</c> 返回 1920×1080 的纯黑图，指令却报成功。
+        /// 黑图比失败更危险（调用方会以为"场景里就是黑的"），所以宁可多采一遍像素。
+        /// </para>
+        /// </summary>
+        /// <param name="frame">待检测帧</param>
+        /// <param name="brightRatio">判定为"不是黑图"所需的亮像素占比，默认 0.1%</param>
+        public static bool IsNearlyBlack(Frame frame, float brightRatio = 0.001f)
+        {
+            if (frame == null || frame.Bgra == null || frame.Bgra.Length < 4)
+            {
+                return true;
+            }
+
+            // 每 16 个像素采样一次即可：黑图与有内容的图在这个密度下差异极大，不必全量扫描
+            const int step = 16 * 4;
+            var samples = 0;
+            var bright = 0;
+            for (var i = 0; i + 2 < frame.Bgra.Length; i += step)
+            {
+                samples++;
+                // 三通道之和 > 18 ≈ 平均每通道 > 6，足以把"纯黑"和"深色但有内容"分开
+                if (frame.Bgra[i] + frame.Bgra[i + 1] + frame.Bgra[i + 2] > 18)
+                {
+                    bright++;
+                }
+            }
+
+            return samples == 0 || (float)bright / samples < brightRatio;
+        }
+
+        /// <summary>
         /// 把一个相机渲染到 RenderTexture 再读成像素，返回 BGRA 帧。
         /// <para>
         /// <b>只能在 update 上下文里调用</b>：在 <c>Camera.onPostRender</c> 里调 <see cref="Camera.Render"/>
@@ -513,6 +548,15 @@ namespace Aketsuki.UnityMcp.Editor
                 camera.targetTexture = renderTexture;
                 camera.aspect = (float)width / height;
                 camera.rect = new Rect(0f, 0f, 1f, 1f);
+
+                // 先自己把 RT 清干净再让相机画。
+                // RenderTexture.GetTemporary 拿到的是池子里复用的纹理，里面可能还留着上一次的内容；
+                // 遇到 clearFlags = Depth only 的相机（它只清深度、不清颜色），那些残留就会直接混进画面，
+                // 于是同一条指令在不同时刻能截出不同的图。清一次的成本可以忽略，确定性更重要。
+                RenderTexture.active = renderTexture;
+                GL.Clear(true, true, new Color(0f, 0f, 0f, 0f));
+                RenderTexture.active = previousActive;
+
                 camera.Render();
 
                 RenderTexture.active = renderTexture;

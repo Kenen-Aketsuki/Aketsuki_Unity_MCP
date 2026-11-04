@@ -64,37 +64,121 @@ namespace Aketsuki.UnityMcp.Editor
                     warnings.Add("Play 中但找不到 GameView 窗口（可能被关掉了），已降级为相机渲染");
                 }
 
-                // ---- 编辑模式：GameView 不渲染，退到相机渲染
-                var camera = CaptureSupport.FindFallbackCamera(gameViewCamera);
-                if (camera == null)
+                // ---- 编辑模式：GameView 不渲染，退到相机渲染。
+                // 这里不能只挑一个相机就渲染：clearFlags = Depth only 的叠加相机单独渲染到空 RT 必然全黑，
+                // 而且不报错。所以按"最可能出图"的顺序逐个试，见图像算数，见黑图换下一个。
+                var candidates = CollectCameras(gameViewCamera);
+                if (candidates.Count == 0)
                 {
                     return CommandResult.Fail(
                         "编辑模式下 GameView 不渲染，且场景里没有可用相机（Camera.main / 已启用相机都为空），无法出图");
                 }
 
-                var scale = CaptureSupport.DpiScale;
-                int width, height;
-                ResolveRenderSize(gameView, camera, scale, out width, out height);
+                var scaleFactor = CaptureSupport.ParseScale(context);
+                var dpi = CaptureSupport.DpiScale;
+                var failures = new List<string>();
 
-                WindowCapture.Frame frame;
-                string error;
-                if (!WindowCapture.TryRenderCamera(camera, width, height, out frame, out error))
+                foreach (var candidate in candidates)
                 {
-                    return CommandResult.Fail(error);
+                    int width, height;
+                    ResolveRenderSize(gameView, candidate, dpi, out width, out height);
+
+                    WindowCapture.Frame frame;
+                    string error;
+                    if (!WindowCapture.TryRenderCamera(candidate, width, height, out frame, out error))
+                    {
+                        failures.Add($"{candidate.name}：渲染失败（{error}）");
+                        continue;
+                    }
+
+                    if (WindowCapture.IsNearlyBlack(frame))
+                    {
+                        failures.Add(string.Format(
+                            "{0}（clearFlags={1}, depth={2}）：画面全黑",
+                            candidate.name, candidate.clearFlags, candidate.depth));
+                        continue;
+                    }
+
+                    frame = WindowCapture.Scale(frame, scaleFactor);
+
+                    warnings.Add("编辑模式下 GameView 不渲染，画面来自相机渲染（不经过 GameView 的 Aspect / 分辨率设置）");
+                    warnings.Add("不含 Screen Space-Overlay 的 UI：Overlay Canvas 不经过相机，渲染图里一定看不到它");
+                    if (!ReferenceEquals(candidate, gameViewCamera))
+                    {
+                        warnings.Add($"用的不是 GameView 的相机，而是场景里的 {candidate.name}");
+                    }
+
+                    var path = CaptureSupport.ResolveOutputPath(context, "game");
+                    var result = CaptureSupport.Save(
+                        path, frame, "game", "camera-render",
+                        new RectInt(0, 0, frame.Width, frame.Height), warnings);
+
+                    if (result.Success && result.Data is JsonValue data)
+                    {
+                        data.Set("camera", JsonValue.Of(candidate.name ?? string.Empty));
+                    }
+
+                    return result;
                 }
 
-                frame = WindowCapture.Scale(frame, CaptureSupport.ParseScale(context));
+                return CommandResult.Fail(
+                    "编辑模式下没有相机能渲染出有效画面：" + string.Join("；", failures.ToArray()) +
+                    "。Depth only 的叠加相机单独渲染一定黑屏，需要一个负责清屏的底层相机；" +
+                    "要看完整游戏画面请进 Play 模式再截（窗口截屏不受此限制），只想看场景内容请用 capture.scene");
+            }
+        }
 
-                warnings.Add("编辑模式下 GameView 不渲染，画面来自相机渲染（不经过 GameView 的 Aspect / 分辨率设置）");
-                warnings.Add("不含 Screen Space-Overlay 的 UI：Overlay Canvas 不经过相机，渲染图里一定看不到它");
-                if (!ReferenceEquals(camera, gameViewCamera))
+        /// <summary>
+        /// 编辑模式下的候选相机，按"最可能渲染出有效画面"排序。
+        /// <para>
+        /// 排序规则：GameView 相机 → <c>Camera.main</c> → 其余（**会清屏的排前面**，同组内 depth 小的优先）。
+        /// depth 大的往往是 UI / 叠加相机，单独渲染只会得到黑图（实测踩过），所以不能简单地取 depth 最大。
+        /// 渲染到 RenderTexture 的相机（小地图之类）会被排除：它们画的不是屏幕画面。
+        /// </para>
+        /// </summary>
+        private static List<Camera> CollectCameras(Camera gameViewCamera)
+        {
+            var ordered = new List<Camera>();
+            AddCandidate(ordered, gameViewCamera);
+            AddCandidate(ordered, Camera.main);
+
+            var rest = new List<Camera>();
+            foreach (var camera in Camera.allCameras)
+            {
+                if (camera == null || ordered.Contains(camera))
                 {
-                    warnings.Add($"用的不是 GameView 的相机，而是场景里的 {camera.name}（GameView 相机取不到）");
+                    continue;
                 }
 
-                var path = CaptureSupport.ResolveOutputPath(context, "game");
-                return CaptureSupport.Save(
-                    path, frame, "game", "camera-render", new RectInt(0, 0, frame.Width, frame.Height), warnings);
+                if (!camera.isActiveAndEnabled || camera.targetTexture != null)
+                {
+                    continue;
+                }
+
+                rest.Add(camera);
+            }
+
+            rest.Sort((left, right) =>
+            {
+                var leftOverlay = left.clearFlags == CameraClearFlags.Depth ? 1 : 0;
+                var rightOverlay = right.clearFlags == CameraClearFlags.Depth ? 1 : 0;
+                return leftOverlay != rightOverlay ? leftOverlay - rightOverlay : left.depth.CompareTo(right.depth);
+            });
+
+            ordered.AddRange(rest);
+            return ordered;
+        }
+
+        private static void AddCandidate(List<Camera> cameras, Camera camera)
+        {
+            if (camera == null || !camera.isActiveAndEnabled || camera.targetTexture != null)
+            {
+                return;
+            }
+
+            if (!cameras.Contains(camera))
+            {
+                cameras.Add(camera);
             }
         }
 

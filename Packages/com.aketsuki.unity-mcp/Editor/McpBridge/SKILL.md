@@ -406,6 +406,9 @@ image content（单张上限 2 MB，超了只回路径）。
    想要"带高亮圈的图"这条路不通，别反复试。
 2. **编辑模式的 `capture.game` 一定没有 Overlay UI**。GameView 在编辑模式不渲染，只能相机渲染，
    而 Overlay Canvas 不走相机。**别拿这张图判断 UI 有没有显示**——要看 UI 就进 Play 再截。
+   另外：如果场景里的相机全是 `clearFlags = Depth only` 的叠加相机（纯 UI 场景常见），
+   相机渲染根本铺不出底色，指令会**明确失败**并列出每个候选的 `clearFlags/depth`——
+   这是如实报告，不是坏了，出路同上（进 Play，或者用 `capture.scene` 看场景）。
 3. **`crop=frame` 的上沿可能带一条工具栏**（GUI 叠加层剥不掉）。图里出现 `Center` / `Local` / `2D`
    这类按钮时，别把它当场景内容。
 4. **窗口最小化 / 非 Windows 会直接失败**，这是设计，不是 bug；别试图"重试一次看看"。
