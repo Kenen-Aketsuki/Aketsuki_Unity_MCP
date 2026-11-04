@@ -113,6 +113,11 @@ InitTestScene*.unity*
 /.workbuddy/
 .cursor
 
+# 部署目标清单是本机配置：各工程在本机的绝对路径（盘符/用户名）、Unity 版本、
+# 以及写给自己的批注。换台机器就是一份全新的，入库等于把本机目录结构公开。
+# 模板在 Tools/deploy_targets.example.json，用的时候复制成下面这个名字再改。
+/Tools/deploy_targets.json
+
 # 打包产物：Tools/build_unitypackage.py 生成的 .unitypackage / 可分发目录 / 压缩包，
 # 每次打包都能重建，且是几百 KB 的二进制，不入库
 /Tools/UnityPackage/

@@ -52,6 +52,9 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)                                   # 仓库根 = Tools/ 的上一级
 CONFIG_PATH = os.path.join(HERE, "deploy_targets.json")
+# 本机配置的模板：deploy_targets.json 里全是各工程在本机的绝对路径，
+# 换台机器就全错，所以它不进仓库（.gitignore 挡住），仓库里只放这份脱敏模板。
+CONFIG_EXAMPLE_PATH = os.path.join(HERE, "deploy_targets.example.json")
 
 # 两个并列的工具，各有自己的源码根、MCP 桥副本、技能目录与程序集。
 # 它们共用同一批目标工程，但互不依赖：可以只部署其中一个（--module adb）。
@@ -150,7 +153,6 @@ _EOL_CACHE = {}                     # 工程根 -> 行尾
 # 离线编译校验器（跨工程通用的本机工具，找不到就跳过）
 OFFLINE_COMPILER_CANDIDATES = [
     os.path.expanduser("~/.workbuddy/tools/unity-offline-compile/unity_offline_compile.py"),
-    "C:/Users/user/.workbuddy/tools/unity-offline-compile/unity_offline_compile.py",
 ]
 
 
@@ -243,7 +245,12 @@ def detect_eol(root):
 
 def load_targets():
     if not os.path.isfile(CONFIG_PATH):
-        raise SystemExit("缺少配置文件：%s" % CONFIG_PATH)
+        raise SystemExit(
+            "缺少本机部署配置：%s\n"
+            "这份文件记录各工程在本机的绝对路径（盘符/用户名），属于本机配置，不进仓库。\n"
+            "第一次用请从模板复制一份，再把每个 root 改成本机实际路径：\n"
+            "    copy \"%s\" \"%s\"\n"
+            % (CONFIG_PATH, CONFIG_EXAMPLE_PATH, CONFIG_PATH))
     import json
     with open(CONFIG_PATH, "r", encoding="utf-8") as handle:
         data = json.load(handle)

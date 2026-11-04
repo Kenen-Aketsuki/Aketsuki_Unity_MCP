@@ -47,8 +47,8 @@ Aketsuki_Unity_MCP/                     ← Unity 工程根（用 Unity 直接�
 │   ├── 待拍板/  未实现/  已实现/      移动文件 = 改状态（待拍板里由你直接写决策）
 │   └── 索引.md                       由 Tools/feedback_index.py 生成
 └── Tools/
-    ├── deploy.py                    把两个包同步部署到各工程（Tools/deploy_targets.json 驱动）
-    ├── deploy_targets.json          部署目标清单：工程根、Unity 版本
+    ├── deploy.py                    把两个包同步部署到各工程（读本机 deploy_targets.json）
+    ├── deploy_targets.example.json  部署目标模板：复制成 deploy_targets.json 再改（后者本地配置，不入库）
     ├── compile_adb.py               离线编译 ADB 程序集（asmdef 没有 csproj，先借主程序集的引用）
     ├── test_stack_frame.py          ADB 栈帧正则的 34 条用例（不进 Unity 包）
     └── feedback_index.py            重建 Feedback/索引.md + 校验状态/编号/必填字段
@@ -76,14 +76,17 @@ python .workbuddy/skills/unity-cmd/scripts/send.py compile --wait 300
 
 整套 `Packages/com.aketsuki.unity-mcp/Editor/` 直接拷走即可：它**零工程编译依赖**
 （唯一可选的挂钩 `MainUIRootBuilder` 是按类型名反射发现，找不到就走内置默认）。
-搬过一次之后，把工程登记进 [`Tools/deploy_targets.json`](Tools/deploy_targets.json)，
+搬过一次之后，把工程登记进 `Tools/deploy_targets.json`（从
+[`Tools/deploy_targets.example.json`](Tools/deploy_targets.example.json) 复制一份再改 `root`），
 以后都用 `Tools/deploy.py` 增量同步（见下一节），别再手工拷。
 真正的接口细节、指令清单、新增指令的写法、`.unitypackage` 打包与校验，全部在
 [`Packages/com.aketsuki.unity-mcp/Editor/README.md`](Packages/com.aketsuki.unity-mcp/Editor/README.md)。
 
 ## 部署到多个工程
 
-`Tools/deploy_targets.json` 登记了正在用这套工具的工程。本仓库改完后**不用手工拷贝**，一条命令同步：
+`Tools/deploy_targets.json` 登记了正在用这套工具的工程。**它是一份本机配置**（写的是各工程在这台机器上的绝对路径，
+已被 `.gitignore` 排除，不进仓库）——第一次用先 `cp Tools/deploy_targets.example.json Tools/deploy_targets.json`
+再按本机改 `root`。配好之后本仓库改完**不用手工拷贝**，一条命令同步：
 
 ```bash
 python Tools/deploy.py --list      # 各工程同步状态 + Unity 是否在跑
