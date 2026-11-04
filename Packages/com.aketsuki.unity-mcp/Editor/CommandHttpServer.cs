@@ -1069,10 +1069,60 @@ namespace Aketsuki.UnityMcp.Editor
                 // 让位给别的编辑器时也照写：同工程两个编辑器的端口都是有效目标，
                 // 客户端 probe 时会自己校验 identity.projectPath，选哪个都能连到同一工程。
                 GlobalTargetRegistry.Publish(text, ProjectHash);
+
+                WriteCommandCatalog(identity);
             }
             catch (Exception e)
             {
                 CommandLog.Warning("写入 HTTP 服务信息文件失败：" + e.Message);
+            }
+        }
+
+        /// <summary>
+        /// 把当前指令集落盘成清单，供客户端**不联网**就能列出可用指令。
+        /// <para>
+        /// <b>为什么值得写</b>：<c>unity_list_commands</c> 每调一次就是一轮 HTTP，编辑器没开时直接没有来源
+        /// （<c>group</c> / <c>full</c> 模式会退化成只剩元工具）。清单是同一份数据的离线副本，
+        /// 客户端读它就能省掉一次往返，也让"编辑器没开"不再是"不知道有哪些指令"。
+        /// </para>
+        /// <para>
+        /// <b>它一定会过期</b>：包升级、模块增删（lilith 不装 adb、island_back 装了 capture）都会让指令集变化。
+        /// 所以带 <c>generatedUtc</c>，客户端只拿它当"候选"，真正下发前仍以服务端校验为准。
+        /// </para>
+        /// <para>
+        /// 每次写信息文件都会重写（服务启动 / 域重载 / 令牌轮换），所以它跟着编辑器状态自愈。
+        /// 指令数为 0 时不写：宁可保留上一份能用的清单，也不要拿空文件覆盖掉。
+        /// </para>
+        /// </summary>
+        private static void WriteCommandCatalog(HttpIdentity identity)
+        {
+            try
+            {
+                var items = HttpProtocol.BuildCommandList(
+                    ((IHttpEnvironment)CommandHttpServer.Instance).Commands);
+                if (items.Count == 0)
+                {
+                    CommandLog.Warning("指令集为空，跳过写清单（避免用空文件覆盖上一份可用的）");
+                    return;
+                }
+
+                var payload = JsonValue.NewObject();
+                payload.Set("ok", JsonValue.True);
+                payload.Set("count", JsonValue.Of(items.Count));
+                payload.Set("generatedUtc", JsonValue.Of(DateTime.UtcNow.ToString("o")));
+                payload.Set("protocolVersion", JsonValue.Of(HttpProtocol.ProtocolVersion));
+                payload.Set(HttpIdentityFields.Key,
+                    identity != null ? identity.ToJson() : JsonValue.Null);
+                payload.Set("commands", JsonValue.FromArray(items));
+
+                // 与 .http-info 一致：无 BOM 的 UTF-8，原子写
+                AtomicFileWriter.WriteAllText(CommandCatalogFilePath, payload.ToJson(true),
+                    new UTF8Encoding(false));
+            }
+            catch (Exception e)
+            {
+                // 清单只是便利副本，写不进去不该影响服务本身
+                CommandLog.Warning("写入指令清单失败：" + e.Message);
             }
         }
 
@@ -1210,6 +1260,7 @@ namespace Aketsuki.UnityMcp.Editor
         {
             DeleteIfExists(InfoFilePath);
             DeleteIfExists(PerPidInfoFilePath);
+            DeleteIfExists(CommandCatalogFilePath);
 
             // 全局索引条目也一起撤掉：否则客户端会一直把已经关掉的服务列在候选里
             GlobalTargetRegistry.Unpublish(ProjectHash);
@@ -1247,6 +1298,26 @@ namespace Aketsuki.UnityMcp.Editor
                 var self = CommandHttpServer.Instance.Identity;
                 var pid = self != null ? self.Pid : 0;
                 return InfoFilePath + (pid > 0 ? "." + pid : ".unknown");
+            }
+        }
+
+        /// <summary>
+        /// 指令清单的落盘路径：<c>&lt;指令目录&gt;/commands.&lt;projectHash&gt;.json</c>
+        /// <para>
+        /// 与 <c>.http-info</c> 同一个目录 —— 那个目录由 <see cref="CommandSystemSettings"/> 决定，
+        /// 换环境只改设置，清单跟着走，不绑死任何 MCP 客户端。
+        /// </para>
+        /// <para>
+        /// 名字刻意避开 <c>.http-info</c> 前缀：<c>PruneStaleInfoCopies</c> 按该前缀通配清理，
+        /// 用同一个前缀会被当成陈旧副本删掉。
+        /// </para>
+        /// </summary>
+        public static string CommandCatalogFilePath
+        {
+            get
+            {
+                return Path.Combine(CommandPathUtil.EnsureDefaultCommandDirectory(),
+                    "commands." + ProjectHash + ".json");
             }
         }
 

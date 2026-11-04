@@ -673,10 +673,27 @@ namespace Aketsuki.UnityMcp
 
         private static HttpResponse Commands(IHttpEnvironment env)
         {
+            var items = BuildCommandList(env.Commands);
+            var payload = JsonValue.NewObject();
+            payload.Set("ok", JsonValue.Of(true));
+            payload.Set("count", JsonValue.Of(items.Count));
+            payload.Set("commands", JsonValue.FromArray(items));
+            return HttpResponse.Ok(payload);
+        }
+
+        /// <summary>
+        /// 把指令快照转成 JSON 数组。
+        /// <para>
+        /// <c>/v1/commands</c> 与落盘清单共用这一份：两边字段一旦各写一遍就会漂移，
+        /// 而客户端正是靠字段名判断"这条要不要确认""是不是运行时指令"。
+        /// </para>
+        /// </summary>
+        public static List<JsonValue> BuildCommandList(IEnumerable<HttpCommandInfo> commands)
+        {
             var items = new List<JsonValue>();
-            if (env.Commands != null)
+            if (commands != null)
             {
-                foreach (var info in env.Commands)
+                foreach (var info in commands)
                 {
                     if (info == null || string.IsNullOrEmpty(info.Id))
                     {
@@ -701,11 +718,7 @@ namespace Aketsuki.UnityMcp
                 }
             }
 
-            var payload = JsonValue.NewObject();
-            payload.Set("ok", JsonValue.Of(true));
-            payload.Set("count", JsonValue.Of(items.Count));
-            payload.Set("commands", JsonValue.FromArray(items));
-            return HttpResponse.Ok(payload);
+            return items;
         }
 
         private static HttpResponse Execute(HttpRequest request, IHttpEnvironment env)
