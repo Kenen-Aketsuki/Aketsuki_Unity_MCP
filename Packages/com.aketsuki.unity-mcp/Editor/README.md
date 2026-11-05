@@ -427,7 +427,7 @@ CommandRegistry.Default.RegisterInstance("my.cmd", new MyCommand(dependency));
 | `ui.tmpText` | TextMeshPro 文本节点（中文等复杂字形首选）；**父节点下已有同名子节点时改为"改属性"** | `name`, `parent`, `text`, `fontSize`, `color`, `align`, `bold`, `wrap`, `font` + 布局 |
 | `ui.button` | Button 节点（Image+Button+子标签，不绑事件）；布局参数与 `ui.image` 通用，因此能锚到任意角落 | `name`, `parent`, `label`, `size`, `color`, `textColor`, `fontSize`, `tmp`, `tmpFont` |
 | `ui.savePrefab` | 把场景节点（含子树）保存为 Prefab（保留 Prefab 连接，可选删除场景实例）；缺省落到 `Assets/GameAssets/UI/` | `target`(必填), `path`, `overwrite`(默认 false), `removeSceneInstance`, `select` |
-| `command.cleanup` | 清理指令目录下"用过"的文件，防膨胀。作用域严格限制在指令目录与其 `_done` 子目录内（删前二次校验，绝不越界）。`target`：`done`(默认，只清 `_done`)/`files`(只清根下未归档 `.json`)/`all`；`olderThanMinutes` 按修改时间过滤；`dryRun` 只统计不删 | `target`, `olderThanMinutes`, `dryRun` |
+| `command.cleanup` | 清理指令目录下"用过"的文件与缓存截图，防膨胀。作用域严格限制在指令目录（含任意层子目录）内，删前二次校验，绝不越界。`target`：`done`(默认，只清 `_done`)/`files`(只清根下未归档 `.json`)/`screenshots`(只清子目录里的 `*.png/jpg`)/`all`(三者都清)；`olderThanMinutes` 按修改时间过滤（**截图默认 60**，按时间差豁免、不看自然日）；`dryRun` 只统计不删 | `target`, `olderThanMinutes`, `dryRun` |
 | `consent.list` | 列出敏感操作确认记录（pending / allowed / rejected / expired / failed），新的在前 | `limit`(默认 10，上限 50) |
 | `consent.fetch` | 查询某次确认的结果；返回成功只代表"查到了记录"，结论看 `data.state` | `id`(必填，即上一条指令返回的 `consentId`) |
 | `capture.scene` | 截 SceneView 当前画面（**含 Gizmos / 网格 / Overlay**），存 PNG；结果里带 `path` + `mimeType`，MCP 桥会自动把图片内联回给 AI | `path`, `crop`, `view`, `select`, `scale` |
@@ -435,6 +435,8 @@ CommandRegistry.Default.RegisterInstance("my.cmd", new MyCommand(dependency));
 | `capture.prefab` | 截 Prefab 编辑模式的画面（复用 SceneView 截屏，含 Gizmos）；未打开时 `openPrefab:true` 可自动进入编辑模式（**有副作用**） | `path`, `crop`, `view`, `select`, `scale`, `prefab`, `openPrefab` |
 
 > **指令文件生命周期（防膨胀）**：`command.cleanup` 用于事后批量清理已攒下的指令文件；控制台窗口另有「执行后删除文件」(`DeleteAfterRun`) 开关——开启后 `CommandAutoRunner` 在指令文件执行成功后**直接删除该文件**，且**优先于**「归档到 `_done`」。`DeleteAfterRun` 是全局偏好（默认关），与 `ArchiveAfterRun` 同处控制台；HTTP 下发路径本就不落盘文件，无需清理。
+>
+> **清理不会碰服务端自有的文件**（2026-11-05）：指令目录里除了指令 json，还躺着 `commands.<hash>.json`（指令清单快照，FEAT-020）和 `consent-results.json`（确认结果落盘，IMPR-010）——它们删掉会打断运行期功能，所以 `target=files|all` 一律跳过。截图只清**子目录**里的图片（`screenshots/`、`Temp/` 等），根目录的 png 不动。
 
 > **歧义与消歧规则（重要，2026-10-22 修复）**：场景里**同名 / 同类型节点很常见**（旧模块留着不删 + 新模块先建后切），所以查找一律遵循：
 > - 名字 / 层级路径匹配**始终含未激活节点**（全树遍历，不会"有时找得到有时找不到"）。
@@ -547,6 +549,18 @@ CommandRegistry.Default.RegisterInstance("my.cmd", new MyCommand(dependency));
 ### 颜色写法
 
 三种都可以：`"#RRGGBB"`、`"#RRGGBBAA"`、`[r,g,b,a]`（0~1，写 0~255 也会自动换算）。
+
+### 建出来的节点落在哪一层（`layer`）
+
+`ui.*` 建出的节点**继承父级的 layer**；新建的画布根（`ui.canvas` / `ui.uiRoot`）落在内置 `UI` 层。
+
+> 这条是 2026-11-05 修的（BUG-014，真机实测）：`new GameObject()` 恒为 `Default(0)`，
+> 而 `SetParent` 不会跟着改 layer，于是整条 `ui.*` 链路建出来的 UI 全在 0 层。
+> Overlay Canvas 不看 layer，所以**肉眼与截图都正常**，只有 `gameobject.find` 才会露出 `"layer": 0`；
+> 一旦工程用了相机 `cullingMask` 或按层过滤的 Raycaster，新建的 UI 就会不显示/点不到，
+> 而且几乎不可能怀疑到"建出来那一刻就错了"。以前得靠补一条 `gameobject.setProperty layer=5` 兜住。
+>
+> 想显式指定就照旧用 `gameobject.setProperty`（`includeChildren:true` 可整棵子树一起改）。
 
 ### 示例文件
 
@@ -1066,6 +1080,7 @@ HTTP 早已返回 `pending`，客户端不依赖编辑器同步响应）。
 | `StopOnError`（默认 true） | 失败后中止后续指令，剩余指令标记为"因前序指令失败而中止" |
 | `DryRun` | 只记录将要执行的指令，不产生副作用 |
 | 嵌套 | `batch` / `file.run` 最多 8 层，且 `file.run` 有循环引用检测 |
+| 未知参数 | **不改行为、只警告**：参数传了但指令没读、`usage` 里也没声明时，回一条"未知参数：root, depth（本指令可用：target, maxDepth）"。落在响应顶层 `warnings[]` 与 `records[].warnings`，结论行也会带"另有 N 条警告"。刻意不抛异常——多塞 `note` 这类上下文字段的老调用方不该因此失败 |
 | 报告 | `CommandRunReport` 提供 成功/失败/跳过 计数、逐条记录与耗时 |
 
 ---

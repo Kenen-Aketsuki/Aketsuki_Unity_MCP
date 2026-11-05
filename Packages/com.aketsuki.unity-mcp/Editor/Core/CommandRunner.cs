@@ -268,7 +268,7 @@ namespace Aketsuki.UnityMcp
 
                 var result = ExecuteEntry(entry, source, bag, depth);
 
-                report.Add(new CommandRecord
+                var record = new CommandRecord
                 {
                     CommandId = entry.Id,
                     Index = i,
@@ -276,7 +276,16 @@ namespace Aketsuki.UnityMcp
                     Status = result.Status,
                     Message = result.Message,
                     Data = result.Data
-                });
+                };
+
+                // 警告跟着记录走，最终由 HttpProtocol 落到 records[].warnings 与顶层 warnings
+                var warnings = result.Warnings;
+                for (var w = 0; w < warnings.Count; w++)
+                {
+                    record.Warnings.Add(warnings[w]);
+                }
+
+                report.Add(record);
 
                 if (!result.Success && StopOnError)
                 {
@@ -422,6 +431,7 @@ namespace Aketsuki.UnityMcp
             try
             {
                 var result = instance.Execute(context) ?? CommandResult.Ok();
+                WarnOnUnknownArgs(descriptor, context, result);
 
                 if (result.Status == CommandStatus.Failed)
                 {
@@ -437,12 +447,19 @@ namespace Aketsuki.UnityMcp
             catch (CommandException e)
             {
                 CommandLog.Error($"{entry.Id} 执行失败：{e.Message}");
-                return CommandResult.Fail(e.Message);
+
+                // 失败也照样点出"参数名可能写错了"：像 gameobject.find 传了 target（它要 query）时，
+                // 报错只说"缺少必填参数 query"，看不出是参数名搬错了家
+                var failed = CommandResult.Fail(e.Message);
+                WarnOnUnknownArgs(descriptor, context, failed);
+                return failed;
             }
             catch (Exception e)
             {
                 CommandLog.Error($"{entry.Id} 抛出未处理异常：{e}");
-                return CommandResult.Fail($"异常：{e.Message}");
+                var crashed = CommandResult.Fail($"异常：{e.Message}");
+                WarnOnUnknownArgs(descriptor, context, crashed);
+                return crashed;
             }
             finally
             {
@@ -485,6 +502,73 @@ namespace Aketsuki.UnityMcp
                 CommandLog.Warning($"{context.CommandId} 的确认预检异常，按需要人工确认处理：{error.Message}");
                 return null;
             }
+        }
+
+        /// <summary>
+        /// 调用方写了个不存在的参数名时补一条警告（IMPR-013）。
+        /// <para>
+        /// 起因：<c>scene.hierarchy</c> 的参数叫 <c>target</c> / <c>maxDepth</c>，调用方按
+        /// <c>runtime.hierarchy</c> 的习惯写成 <c>root</c> / <c>depth</c>，两个都被静默丢掉，
+        /// 指令按"无 target + 全深度"返回整个场景（2.9 MB），调用方只看到成功的 <c>[OK]</c>。
+        /// 这套指令的参数名本来就有 <c>target</c> / <c>root</c> / <c>prefab</c> 几种风格，跨工具迁移几乎必踩。
+        /// </para>
+        /// <para>
+        /// 刻意<b>只警告不报错</b>：有些调用方会顺手多塞上下文字段（<c>note</c> 之类），
+        /// 一刀切抛 <see cref="CommandArgumentException"/> 会误伤；而警告足够让人回头改参数名。
+        /// </para>
+        /// <para>
+        /// 判定看的是"指令有没有真的读过这个 key"，不是"usage 里写没写"——只有
+        /// <b>既没读过、也没在 usage 里声明</b> 的才算未知，这样"条件分支里才读的参数"不会误报。
+        /// </para>
+        /// </summary>
+        private static void WarnOnUnknownArgs(CommandDescriptor descriptor, CommandContext context, CommandResult result)
+        {
+            if (result == null || context == null || context.Args == null)
+            {
+                return;
+            }
+
+            var unconsumed = context.Args.UnconsumedKeys();
+            if (unconsumed.Count == 0)
+            {
+                return;
+            }
+
+            var declared = CommandArgs.DeclaredParameterNames(descriptor != null ? descriptor.Usage : null);
+            var unknown = new List<string>();
+            for (var i = 0; i < unconsumed.Count; i++)
+            {
+                if (IsContextArg(unconsumed[i]))
+                {
+                    continue;
+                }
+
+                if (Array.IndexOf(declared, unconsumed[i]) >= 0)
+                {
+                    continue;
+                }
+
+                unknown.Add(unconsumed[i]);
+            }
+
+            if (unknown.Count == 0)
+            {
+                return;
+            }
+
+            var hint = declared.Length > 0
+                ? "（本指令可用：" + string.Join(", ", declared) + "）"
+                : "（本指令不接受参数）";
+            var text = "未知参数：" + string.Join(", ", unknown.ToArray()) + hint;
+            result.AddWarning(text);
+            CommandLog.Warning($"{context.CommandId} {text}");
+        }
+
+        /// <summary>纯上下文备注类字段：写在 params 里不构成"参数名写错"，不警告</summary>
+        private static bool IsContextArg(string key)
+        {
+            return string.Equals(key, "note", StringComparison.OrdinalIgnoreCase)
+                   || string.Equals(key, "comment", StringComparison.OrdinalIgnoreCase);
         }
 
         /// <summary>

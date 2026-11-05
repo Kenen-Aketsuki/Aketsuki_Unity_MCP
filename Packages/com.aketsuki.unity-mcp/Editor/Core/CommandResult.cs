@@ -1,3 +1,5 @@
+using System.Collections.Generic;
+
 namespace Aketsuki.UnityMcp
 {
     /// <summary>
@@ -31,6 +33,28 @@ namespace Aketsuki.UnityMcp
 
         /// <summary>可选的输出数据，会写入运行报告</summary>
         public object Data { get; }
+
+        private readonly List<string> _warnings = new List<string>();
+
+        /// <summary>
+        /// 与"成功/失败"无关、但调用方必须知道的提醒（如"参数名写错了，按默认值执行的"）。
+        /// <para>
+        /// 独立于 <see cref="Message"/> 的原因：message 是"这条指令做了什么"，
+        /// 警告是"你这次调用有地方不对，但还不到失败"——混进 message 会被当成正常输出扫过去。
+        /// </para>
+        /// </summary>
+        public IReadOnlyList<string> Warnings => _warnings;
+
+        /// <summary>追加一条警告</summary>
+        public CommandResult AddWarning(string warning)
+        {
+            if (!string.IsNullOrEmpty(warning))
+            {
+                _warnings.Add(warning);
+            }
+
+            return this;
+        }
 
         private CommandResult(CommandStatus status, string message, object data)
         {

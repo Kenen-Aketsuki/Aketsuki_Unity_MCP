@@ -890,13 +890,24 @@ namespace Aketsuki.UnityMcp
 
             var records = new List<JsonValue>();
             var failures = new List<JsonValue>();
+            var warnings = new List<JsonValue>();
             for (var i = 0; i < report.Records.Count; i++)
             {
                 var record = report.Records[i];
                 records.Add(RecordToJson(record));
-                if (record != null && !IsNonFailure(record.Status))
+                if (record == null)
+                {
+                    continue;
+                }
+
+                if (!IsNonFailure(record.Status))
                 {
                     failures.Add(FailureToJson(record));
+                }
+
+                for (var w = 0; w < record.Warnings.Count; w++)
+                {
+                    warnings.Add(WarningToJson(record, record.Warnings[w]));
                 }
             }
 
@@ -906,8 +917,28 @@ namespace Aketsuki.UnityMcp
                 payload.Set("failures", JsonValue.FromArray(failures));
             }
 
+            // 警告同理会排在 records 前面（IMPR-013）：参数名写错时响应体可能被截断到几十万字符，
+            // 埋在最后一条 record 里的提示等于没有。逐条 warnings 也在 records[] 里各留一份。
+            if (warnings.Count > 0)
+            {
+                payload.Set("warnings", JsonValue.FromArray(warnings));
+            }
+
             payload.Set("records", JsonValue.FromArray(records));
             return payload;
+        }
+
+        /// <summary>
+        /// 警告的顶层视图：<c>{"index":0,"id":"scene.hierarchy","warning":"未知参数：root, depth（…）"}</c>
+        /// <para>带上 index / id，是因为一个批次里可能有多条指令各带警告，光看文本分不清是谁的。</para>
+        /// </summary>
+        private static JsonValue WarningToJson(CommandRecord record, string text)
+        {
+            var item = JsonValue.NewObject();
+            item.Set("index", JsonValue.Of(record.Index));
+            item.Set("id", JsonValue.Of(record.CommandId ?? string.Empty));
+            item.Set("warning", JsonValue.Of(text ?? string.Empty));
+            return item;
         }
 
         /// <summary>成功与跳过都不算失败；其余（Failed / UnknownCommand / 任何新状态）一律算</summary>
@@ -931,14 +962,24 @@ namespace Aketsuki.UnityMcp
             {
                 // 有跳过但一条都没真跑（典型：敏感操作等人工确认、或全批次被 dry-run 拦下）时，
                 // 说"全部成功"会把人带偏——它其实什么都没做。
+                string baseText;
                 if (report.Succeeded == 0 && report.Skipped > 0)
                 {
-                    return $"{report.Total} 条指令都没有真正执行（{report.Skipped} 条被跳过）";
+                    baseText = $"{report.Total} 条指令都没有真正执行（{report.Skipped} 条被跳过）";
+                }
+                else
+                {
+                    baseText = report.Skipped > 0
+                        ? $"{report.Total} 条指令全部成功（其中 {report.Skipped} 条跳过）"
+                        : $"{report.Total} 条指令全部成功";
                 }
 
-                return report.Skipped > 0
-                    ? $"{report.Total} 条指令全部成功（其中 {report.Skipped} 条跳过）"
-                    : $"{report.Total} 条指令全部成功";
+                // 参数名写错这类问题不会让指令失败，但结论行必须提一句，
+                // 否则"全部成功"会让人以为参数真的生效了（IMPR-013）
+                var warningCount = CountWarnings(report);
+                return warningCount > 0
+                    ? baseText + $"；另有 {warningCount} 条警告（见 warnings）"
+                    : baseText;
             }
 
             var names = new List<string>();
@@ -958,6 +999,21 @@ namespace Aketsuki.UnityMcp
 
             var suffix = report.Failed > names.Count ? " 等" : string.Empty;
             return $"⚠ {report.Failed}/{report.Total} 条指令失败：{string.Join("、", names)}{suffix}（明细见 failures，逐条见 records）";
+        }
+
+        /// <summary>整份报告里的警告条数（逐条记录累加）</summary>
+        private static int CountWarnings(CommandRunReport report)
+        {
+            var count = 0;
+            foreach (var record in report.Records)
+            {
+                if (record != null)
+                {
+                    count += record.Warnings.Count;
+                }
+            }
+
+            return count;
         }
 
         /// <summary>失败项精简视图：只留定位与原因，不含可能很大的 data</summary>
@@ -988,6 +1044,19 @@ namespace Aketsuki.UnityMcp
             item.Set("message", JsonValue.Of(record.Message ?? string.Empty));
             item.Set("elapsedMs", JsonValue.Of(Math.Round(record.ElapsedMs, 2)));
             item.Set("data", DataToJson(record.Data));
+
+            // 没有警告时不写这个字段：老调用方看到的结构与之前完全一致
+            if (record.Warnings.Count > 0)
+            {
+                var warnings = new List<JsonValue>();
+                for (var i = 0; i < record.Warnings.Count; i++)
+                {
+                    warnings.Add(JsonValue.Of(record.Warnings[i] ?? string.Empty));
+                }
+
+                item.Set("warnings", JsonValue.FromArray(warnings));
+            }
+
             return item;
         }
 

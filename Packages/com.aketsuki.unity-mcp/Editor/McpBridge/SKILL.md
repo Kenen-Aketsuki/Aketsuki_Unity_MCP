@@ -699,7 +699,7 @@ HTTP 状态码只表示"请求是否被处理"，**业务结果看 body 里的 `
 | 503 `compiling` / `updating` | Unity 正在编译或刷新资源 | **等**，见下方纪律 |
 | 连接失败 | 服务没启动 | 让用户去菜单开启，不要重试轰炸 |
 
-`records` 里每条含 `index` / `id` / `status` / `message` / `data`。
+`records` 里每条含 `index` / `id` / `status` / `message` / `data`（有警告时多一个 `warnings` 数组）。
 `status` 取值：`Success` / `Failed` / `Skipped` / `UnknownCommand`。
 `UnknownCommand` 说明指令 ID 拼错或未注册，用 `commands` 子命令核对。
 
@@ -708,6 +708,14 @@ HTTP 状态码只表示"请求是否被处理"，**业务结果看 body 里的 `
 > `failures` 是只含失败项的精简数组（`index` / `id` / `status` / `message`，不含 `data`）。
 > 两者都排在 `records` 之前，就是为了让"有东西失败了"这件事不可能被忽略——
 > 别跳过它们直接翻 `records`，records 可能有几十条。
+
+> **`ok:true` 也可能带 `warnings`（IMPR-013，2026-11-05）。** 典型是参数名写错：
+> `scene.hierarchy` 的参数叫 `target` / `maxDepth`，写成 `root` / `depth`（那是 `runtime.hierarchy` 的叫法）
+> 时两个都被静默丢弃，指令按默认语义回了整个场景（实测 2.9 MB），调用方只看到成功的 `[OK]`。
+> 现在这种情形会在响应顶层 `warnings[]` 里给一条
+> `未知参数：root, depth（本指令可用：target, maxDepth）`，结论行也会变成
+> `"1 条指令全部成功；另有 1 条警告（见 warnings）"`。
+> **结论行出现"另有 N 条警告"时，先去看 warnings，别当成没问题。**
 
 ## 自愈流程（本 Skill 的核心价值）
 

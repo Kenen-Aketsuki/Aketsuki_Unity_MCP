@@ -755,6 +755,16 @@ def _summarize_execute(payload):
                     item.get("index"), item.get("id"), item.get("status"), item.get("message", "")))
         lines.append("")
 
+    # IMPR-013：参数名写错不会让指令失败，但结论必须显眼——否则"全部成功"会被当成参数真的生效了
+    warnings = payload.get("warnings") or []
+    if warnings:
+        lines.append("")
+        lines.append("**警告（指令执行了，但这次调用有问题）：**")
+        for item in warnings:
+            lines.append("  ! #%s %s %s" % (
+                item.get("index"), item.get("id"), item.get("warning", "")))
+        lines.append("")
+
     for record in payload.get("records") or []:
         status = record.get("status")
         mark = "OK" if status == "Success" else ("SKIP" if status == "Skipped" else "FAIL")

@@ -49,6 +49,39 @@ namespace Aketsuki.UnityMcp.Editor
             return false;
         }
 
+        /// <summary>
+        /// 内置「UI」层号（Unity 约定为 5）；工程的层名被改过时 <see cref="LayerMask.NameToLayer"/> 会返回 -1，
+        /// 这时退回 5——UI 层被改名但层号被挪走的工程极少，而"没有 UI 层"是不可能的。
+        /// </summary>
+        public static int UiLayer
+        {
+            get
+            {
+                var layer = LayerMask.NameToLayer("UI");
+                return layer >= 0 ? layer : 5;
+            }
+        }
+
+        /// <summary>
+        /// 让新建节点落在父级的 layer 上（无父级时用 UI 层）。
+        /// <para>
+        /// <c>new GameObject()</c> 恒为 <c>Default(0)</c>，而 <c>SetParent</c> <b>不会</b>跟着改 layer
+        /// （Unity 只在 Inspector 里手工拖拽时按提示处理，代码设置父级是原样保留）。
+        /// 结果就是 <c>ui.*</c> 建出来的节点全场落在 0 层：Overlay Canvas 不看 layer 所以肉眼正常，
+        /// 一旦工程有相机 <c>cullingMask</c> 或按层过滤的 Raycaster，新建的 UI 就不显示/点不到，
+        /// 而且几乎不可能想到"节点建出来那一刻 layer 就已经错了"（BUG-014，2026-11-05 真机实测）。
+        /// </para>
+        /// </summary>
+        public static void InheritLayer(GameObject go, Transform parent)
+        {
+            if (go == null)
+            {
+                return;
+            }
+
+            go.layer = parent != null ? parent.gameObject.layer : UiLayer;
+        }
+
         /// <summary>创建一个空的 RectTransform 节点</summary>
         public static RectTransform CreateRect(string name, Transform parent)
         {
@@ -57,6 +90,8 @@ namespace Aketsuki.UnityMcp.Editor
             {
                 go.transform.SetParent(parent, false);
             }
+
+            InheritLayer(go, parent);
 
             var rect = go.GetComponent<RectTransform>();
             rect.anchorMin = Vector2.zero;
@@ -533,6 +568,11 @@ namespace Aketsuki.UnityMcp.Editor
             // 显式带上 RectTransform：Canvas / CanvasScaler 都需要它，不写则依赖 Unity 自动补
             var go = new GameObject(name, typeof(RectTransform), typeof(Canvas), typeof(CanvasScaler),
                 typeof(GraphicRaycaster));
+
+            // 新建的画布是整个 UI 树的根，没有父级可继承，直接放 UI 层；
+            // 留在 Default 的话，带 cullingMask 的相机看不到它，而 Overlay 模式下又"看起来正常"，两头都难查
+            go.layer = UiLayer;
+
             var canvas = go.GetComponent<Canvas>();
             canvas.renderMode = RenderMode.ScreenSpaceOverlay;
             canvas.sortingOrder = 0;
@@ -574,6 +614,10 @@ namespace Aketsuki.UnityMcp.Editor
             if (parent != null)
             {
                 go.transform.SetParent(parent, false);
+                // 与节点保持一致：挂在 UI 底下就不该留在 Default 层。
+                // 无父级时不动它——EventSystem 没有渲染组件，层号对渲染/射线都没影响，
+                // 保持 Unity 自己创建 EventSystem 时的 Default 层。
+                InheritLayer(go, parent);
             }
         }
 
