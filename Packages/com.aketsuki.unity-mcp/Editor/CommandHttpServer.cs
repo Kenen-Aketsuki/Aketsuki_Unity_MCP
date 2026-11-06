@@ -1316,14 +1316,32 @@ namespace Aketsuki.UnityMcp.Editor
         }
 
         /// <summary>删除信息文件（服务停止后客户端能据此判断服务已下线）</summary>
-        public static void DeleteInfoFile()
+        /// <param name="dropGlobalEntry">
+        /// 是否连跨工程全局索引条目一起撤掉。
+        /// <para>
+        /// <b>域重载时必须是 false。</b>重编译 / 进出 Play 会先删本地信息文件，新域要等 20 秒左右才写回；
+        /// 这期间如果连全局索引条目也没了，客户端的「按工程名选址」就查不到这个工程，
+        /// 只能退化成按名字**子串**去猜——实测会把 <c>A</c> 的指令发进名字以 <c>A</c> 开头的另一个工程 <c>B</c>
+        /// （2026-11-07 实际踩到：精确名查不到，回落到前缀相同的隔壁工程）。
+        /// 保留条目则选址照样定位到本工程，只是连接失败并如实报「端点不可达 / 可能正在重编译」，
+        /// 把「发错工程」降级成一次明确的失败。
+        /// </para>
+        /// <para>
+        /// 用户主动关服务（<see cref="StopServer"/>）才撤条目：那是真的下线，留着只会污染候选清单。
+        /// 编辑器退出本来就不删（<see cref="OnQuitting"/> 只 Stop），行为与之一致。
+        /// </para>
+        /// </param>
+        public static void DeleteInfoFile(bool dropGlobalEntry = true)
         {
             DeleteIfExists(InfoFilePath);
             DeleteIfExists(PerPidInfoFilePath);
             DeleteIfExists(CommandCatalogFilePath);
 
-            // 全局索引条目也一起撤掉：否则客户端会一直把已经关掉的服务列在候选里
-            GlobalTargetRegistry.Unpublish(ProjectHash);
+            if (dropGlobalEntry)
+            {
+                // 全局索引条目也一起撤掉：否则客户端会一直把已经关掉的服务列在候选里
+                GlobalTargetRegistry.Unpublish(ProjectHash);
+            }
         }
 
         private static void DeleteIfExists(string path)
@@ -1434,8 +1452,10 @@ namespace Aketsuki.UnityMcp.Editor
             // 先终结所有等待方，避免后台线程在域销毁后永久挂起
             CommandHttpServer.Instance.FlushPending("Unity 正在重新编译，请稍后重试");
             CommandHttpServer.Instance.Stop();
-            // 信息文件一并删掉；新域重建后 RestoreFromSettings 会重新写
-            DeleteInfoFile();
+            // 信息文件一并删掉；新域重建后 RestoreFromSettings 会重新写。
+            // 全局索引条目**刻意保留**：这 20 秒里按工程名选址不能失去精确性，
+            // 否则会退化成子串匹配、把指令发进名字相近的另一个工程。
+            DeleteInfoFile(dropGlobalEntry: false);
         }
 
         private static void OnQuitting()

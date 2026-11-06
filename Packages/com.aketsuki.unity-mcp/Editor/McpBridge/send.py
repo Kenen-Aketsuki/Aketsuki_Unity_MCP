@@ -291,6 +291,10 @@ def load_primary_info(explicit_path=None):
 
 GLOBAL_TARGETS_SUBDIR = ("Aketsuki", "UnityMcp", "targets")
 
+# 选址过程中产生的、必须让人看见的提示（目前只有"名字只命中子串"一种）。
+# 攒起来由 print_report 打到 **stdout**：只走 stderr 的提示会被"只读 stdout"的脚本漏掉。
+TARGET_NOTICES = []
+
 
 def global_targets_dir():
     """全局目标目录（与 .NET 的 SpecialFolder.LocalApplicationData 对齐）。"""
@@ -366,7 +370,9 @@ def target_from_project_root(project_root, timeout=PROBE_TIMEOUT):
     if not info:
         return None, info_path, (
             "找不到该工程的信息文件（%s）。\n"
-            "  编辑器可能没开着，或 Tools / 指令系统 / HTTP 指令服务 处于关闭状态。" % info_path)
+            "  编辑器可能没开着，或 Tools / 指令系统 / HTTP 指令服务 处于关闭状态。\n"
+            "  也可能它正在重编译 / 进出 Play：域重载会先删掉信息文件，新域要 20 秒左右才写回。\n"
+            "  刚部署完或刚触发过编译的话，等半分钟再试，别直接断定「没开着」。" % info_path)
 
     target, error = target_from_info_info(info, "工程 " + os.path.basename(root),
                                           expected_project=root, timeout=timeout)
@@ -390,8 +396,14 @@ def target_from_info_path(info_path, timeout=PROBE_TIMEOUT):
 def find_project_root_by_name(name):
     """在全局索引里按工程名（或名字的一部分）找工程根。
 
+    匹配优先级：**全名精确命中** > 子串唯一命中。
+
     唯一命中才算数：多个工程同名的常见情形（两个 clone）必须由调用方显式区分，
     猜一个的代价是把指令发到别人工程里去。
+
+    索引条目在工程被关掉 / 目录被挪走之后**不会自己消失**（编辑器退出不撤条目，域重载也刻意保留，
+    见 CommandHttpServer.DeleteInfoFile）。所以这里要滤掉磁盘上已经不存在的工程根，
+    否则「按名字选址」会稳定命中一个幽灵目录，报出来的错还是"端点不可达"，指不到真正的原因。
     """
     key = (name or "").strip()
     if not key:
@@ -404,7 +416,7 @@ def find_project_root_by_name(name):
         identity = item.get(IDENTITY_KEY) or {}
         project_name = (identity.get("projectName") or "").strip()
         project_path = (identity.get("projectPath") or "").strip()
-        if not project_path:
+        if not project_path or not os.path.isdir(project_path):
             continue
         if project_name.lower() == lowered:
             exact.append(project_path)
@@ -483,10 +495,13 @@ def resolve_target_selector(value):
         actual = os.path.basename(os.path.normpath(root))
         lowered = text.lower()
         if actual.lower() != lowered:
-            sys.stderr.write(
-                "提示：'%s' 按名字部分匹配到工程 %s（%s）。\n"
-                "      要精确锁定请给完整工程名或工程根路径。\n"
-                % (text, actual, root))
+            notice = ("'%s' 按名字部分匹配到工程 %s（%s），不是精确命中。\n"
+                      "      要精确锁定请给完整工程名或工程根路径。" % (text, actual, root))
+            TARGET_NOTICES.append(notice)
+            # stderr 给人看；stdout 那份由 print_report 补上 ——
+            # 只写 stderr 的提示会被"只读 stdout"的脚本和 agent 漏掉（2026-11-07 实际漏过一次，
+            # 于是以为自己在操作 A，指令其实进了名字以 A 开头的 B）。
+            sys.stderr.write("提示：" + notice + "\n")
         return root, None, None, []
     if hits:
         return None, None, (
@@ -883,11 +898,19 @@ def report_choice(chosen, candidates):
 # ---------------------------------------------------------------- 输出
 
 
+def print_target_notices():
+    """把选址阶段的提示打到 stdout（`--json` 模式不调用：那条通道必须是纯 JSON）。"""
+    for notice in TARGET_NOTICES:
+        print("⚠ " + notice)
+
+
 def print_report(payload, as_json=False):
     """把执行报告打印成人能看懂的样子。"""
     if as_json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return
+
+    print_target_notices()
 
     if not isinstance(payload, dict):
         print("响应不是 JSON 对象：%r" % (payload,))
@@ -1092,6 +1115,7 @@ def cmd_seq(client, args):
     started_all = time.time()
 
     if not args.json:
+        print_target_notices()
         print("顺序执行 %d 步（步间等待在客户端做，服务端零改动）" % total)
 
     for position, step in enumerate(steps, 1):
@@ -1407,6 +1431,8 @@ def cmd_compile(client, args):
     只等编辑器空闲是不够的：编译失败时同样会空闲，不读报告就会误判成功。
     """
     wait = max(1, args.wait)
+    if not args.json:
+        print_target_notices()
     before = fetch_compile_report(client, limit=0)
     before_finished = (before or {}).get("finishedUtc")
 

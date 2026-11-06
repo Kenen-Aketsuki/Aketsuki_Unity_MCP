@@ -331,6 +331,54 @@ class _Args(object):
     prefix = None
 
 
+def test_name_match_real():
+    """`find_project_root_by_name` 的真实匹配规则（不 stub 它，只换掉索引内容）。
+
+    背景：`shop` 与 `shop_back` 这种前缀关系很常见（真实工程名多半长这样）。
+    全名必须精确命中；精确查不到时才会退到子串唯一命中；目录已经不存在的条目
+    （关掉 / 挪走的工程，索引条目不会自动消失）必须被滤掉，否则会稳定命中一个幽灵目录。
+    """
+    print("按名字匹配（真实索引表）：")
+    original_targets = send.list_global_targets
+    original_notices = list(send.TARGET_NOTICES)
+    project_a_back = _make_fake_project("project_a_back")
+    ghost = os.path.join(_TEST_ROOT, "ghost_project")
+    try:
+        send.list_global_targets = lambda: [
+            {"_path": "a", "identity": {"projectName": "project_a", "projectPath": PROJECT_A}},
+            {"_path": "b", "identity": {"projectName": "project_a_back", "projectPath": project_a_back}},
+            {"_path": "c", "identity": {"projectName": "project_a", "projectPath": ghost}},
+        ]
+
+        root, hits = send.find_project_root_by_name("project_a")
+        check("全名精确命中不会被前缀更长的同名工程抢走",
+              root is not None and os.path.normpath(root) == os.path.normpath(PROJECT_A), str(hits))
+
+        root, hits = send.find_project_root_by_name("project_a_ba")
+        check("精确查不到 → 子串唯一命中", root is not None and
+              os.path.normpath(root) == os.path.normpath(project_a_back), str(hits))
+
+        # 目录不存在的条目要被滤掉：否则 ghost 会与 PROJECT_A 一起命中 "project_a"
+        root, hits = send.find_project_root_by_name("ghost_project")
+        check("目录已不存在的条目被滤掉", root is None and not hits, str(hits))
+
+        # 部分匹配必须留下一条"不是精确命中"的提示，且要能打到 stdout
+        del send.TARGET_NOTICES[:]
+        root, info, err, _ = send.resolve_target_selector("project_a_ba")
+        check("部分匹配 → 仍可选中但记下提示",
+              err is None and len(send.TARGET_NOTICES) == 1 and "部分匹配" in send.TARGET_NOTICES[0],
+              str(send.TARGET_NOTICES))
+
+        del send.TARGET_NOTICES[:]
+        send.resolve_target_selector("project_a")
+        check("精确命中 → 不产生提示", not send.TARGET_NOTICES, str(send.TARGET_NOTICES))
+    finally:
+        send.list_global_targets = original_targets
+        del send.TARGET_NOTICES[:]
+        send.TARGET_NOTICES.extend(original_notices)
+        shutil.rmtree(project_a_back, ignore_errors=True)
+
+
 def main():
     print("== 目标选择与工具折叠测试 ==")
     test_parse_selector()
@@ -339,6 +387,7 @@ def main():
     test_sticky()
     test_name_resolution()
     test_cli_target_selector()
+    test_name_match_real()
     test_tool_modes()
     test_catalog()
 
