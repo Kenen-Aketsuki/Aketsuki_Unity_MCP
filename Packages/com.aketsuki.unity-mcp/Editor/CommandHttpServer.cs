@@ -1064,11 +1064,126 @@ namespace Aketsuki.UnityMcp.Editor
 
                 PruneStaleInfoCopies(identity != null ? identity.Pid : 0);
                 AtomicFileWriter.WriteAllText(PerPidInfoFilePath, text, encoding);
+
+                // 顺手更新跨工程全局索引（MCP 客户端只配一条 server 时靠它发现本工程）。
+                // 让位给别的编辑器时也照写：同工程两个编辑器的端口都是有效目标，
+                // 客户端 probe 时会自己校验 identity.projectPath，选哪个都能连到同一工程。
+                GlobalTargetRegistry.Publish(text, ProjectHash);
+
+                WriteCommandCatalog(identity);
             }
             catch (Exception e)
             {
                 CommandLog.Warning("写入 HTTP 服务信息文件失败：" + e.Message);
             }
+        }
+
+        /// <summary>
+        /// 把当前指令集落盘成清单，供客户端**不联网**就能列出可用指令。
+        /// <para>
+        /// <b>为什么值得写</b>：<c>unity_list_commands</c> 每调一次就是一轮 HTTP，编辑器没开时直接没有来源
+        /// （<c>group</c> / <c>full</c> 模式会退化成只剩元工具）。清单是同一份数据的离线副本，
+        /// 客户端读它就能省掉一次往返，也让"编辑器没开"不再是"不知道有哪些指令"。
+        /// </para>
+        /// <para>
+        /// <b>它一定会过期</b>：包升级、模块增删（ProjectB 不装 adb、MyUnityProject 装了 capture）都会让指令集变化。
+        /// 所以带 <c>generatedUtc</c>，客户端只拿它当"候选"，真正下发前仍以服务端校验为准。
+        /// </para>
+        /// <para>
+        /// 每次写信息文件都会重写（服务启动 / 域重载 / 令牌轮换），所以它跟着编辑器状态自愈。
+        /// 指令数为 0 时不写：宁可保留上一份能用的清单，也不要拿空文件覆盖掉。
+        /// </para>
+        /// <para>
+        /// <b>启动顺序陷阱（2026-11-04 实测）</b>：本类与 <c>CommandAutoRunner</c> 都是
+        /// <c>[InitializeOnLoad]</c>，Unity 不保证谁先跑。若本类先跑，注册表还是空的，
+        /// 于是每次都"跳过写清单"——清单文件永远不出现，客户端只能退回联网取。
+        /// 现在改成：空就排一次 <c>delayCall</c> 重试（那时注册早已完成），仍空才记一条告警。
+        /// </para>
+        /// </summary>
+        private static void WriteCommandCatalog(HttpIdentity identity)
+        {
+            try
+            {
+                var items = HttpProtocol.BuildCommandList(
+                    ((IHttpEnvironment)CommandHttpServer.Instance).Commands);
+                if (items.Count == 0)
+                {
+                    ScheduleCatalogRetry();
+                    return;
+                }
+
+                _catalogRetryCount = 0;
+
+                var payload = JsonValue.NewObject();
+                payload.Set("ok", JsonValue.True);
+                payload.Set("count", JsonValue.Of(items.Count));
+                payload.Set("generatedUtc", JsonValue.Of(DateTime.UtcNow.ToString("o")));
+                payload.Set("protocolVersion", JsonValue.Of(HttpProtocol.ProtocolVersion));
+                payload.Set(HttpIdentityFields.Key,
+                    identity != null ? identity.ToJson() : JsonValue.Null);
+                payload.Set("commands", JsonValue.FromArray(items));
+
+                // 与 .http-info 一致：无 BOM 的 UTF-8，原子写
+                AtomicFileWriter.WriteAllText(CommandCatalogFilePath, payload.ToJson(true),
+                    new UTF8Encoding(false));
+            }
+            catch (Exception e)
+            {
+                // 清单只是便利副本，写不进去不该影响服务本身
+                CommandLog.Warning("写入指令清单失败：" + e.Message);
+            }
+        }
+
+        /// <summary>本域内清单重试已用的次数（写成功即清零）</summary>
+        private static int _catalogRetryCount;
+
+        /// <summary>已排入队列、尚未执行的重试（避免每帧堆一条）</summary>
+        private static bool _catalogRetryPending;
+
+        /// <summary>最多重试几次；注册表若是真的空，多排也只是刷日志</summary>
+        private const int CatalogRetryLimit = 3;
+
+        /// <summary>
+        /// 指令集为空时，等服务启动流程走完（<c>[InitializeOnLoad]</c> 全部执行完、注册表已填）再写一次。
+        /// <para>
+        /// 用 <c>delayCall</c> 而不是 <c>update</c>：前者只跑一次，不会每秒检查；
+        /// 也不做无限重试——<c>CommandAutoRunner</c> 只在域重载时注册，
+        /// 这一轮没注册上（例如程序集被条件编译排除）就是没有，多试无益。
+        /// </para>
+        /// </summary>
+        private static void ScheduleCatalogRetry()
+        {
+            if (_catalogRetryPending)
+            {
+                return;
+            }
+
+            if (_catalogRetryCount >= CatalogRetryLimit)
+            {
+                CommandLog.Warning(
+                    $"指令集仍为空，未写指令清单（已重试 {_catalogRetryCount} 次）；" +
+                    "客户端此工程只能联网取指令列表");
+                return;
+            }
+
+            // batchmode 进程没有编辑器主循环，delayCall 不会触发；那种进程本来也不写清单
+            if (UnityEngine.Application.isBatchMode)
+            {
+                return;
+            }
+
+            _catalogRetryPending = true;
+            _catalogRetryCount++;
+            EditorApplication.delayCall += () =>
+            {
+                _catalogRetryPending = false;
+                if (!CommandHttpServer.Instance.IsRunning)
+                {
+                    return;
+                }
+
+                WriteCommandCatalog(CommandHttpServer.Instance.Identity);
+            };
         }
 
         /// <summary>
@@ -1201,10 +1316,32 @@ namespace Aketsuki.UnityMcp.Editor
         }
 
         /// <summary>删除信息文件（服务停止后客户端能据此判断服务已下线）</summary>
-        public static void DeleteInfoFile()
+        /// <param name="dropGlobalEntry">
+        /// 是否连跨工程全局索引条目一起撤掉。
+        /// <para>
+        /// <b>域重载时必须是 false。</b>重编译 / 进出 Play 会先删本地信息文件，新域要等 20 秒左右才写回；
+        /// 这期间如果连全局索引条目也没了，客户端的「按工程名选址」就查不到这个工程，
+        /// 只能退化成按名字**子串**去猜——实测会把 <c>A</c> 的指令发进名字以 <c>A</c> 开头的另一个工程 <c>B</c>
+        /// （2026-11-07 实际踩到：精确名查不到，回落到前缀相同的隔壁工程）。
+        /// 保留条目则选址照样定位到本工程，只是连接失败并如实报「端点不可达 / 可能正在重编译」，
+        /// 把「发错工程」降级成一次明确的失败。
+        /// </para>
+        /// <para>
+        /// 用户主动关服务（<see cref="StopServer"/>）才撤条目：那是真的下线，留着只会污染候选清单。
+        /// 编辑器退出本来就不删（<see cref="OnQuitting"/> 只 Stop），行为与之一致。
+        /// </para>
+        /// </param>
+        public static void DeleteInfoFile(bool dropGlobalEntry = true)
         {
             DeleteIfExists(InfoFilePath);
             DeleteIfExists(PerPidInfoFilePath);
+            DeleteIfExists(CommandCatalogFilePath);
+
+            if (dropGlobalEntry)
+            {
+                // 全局索引条目也一起撤掉：否则客户端会一直把已经关掉的服务列在候选里
+                GlobalTargetRegistry.Unpublish(ProjectHash);
+            }
         }
 
         private static void DeleteIfExists(string path)
@@ -1239,6 +1376,26 @@ namespace Aketsuki.UnityMcp.Editor
                 var self = CommandHttpServer.Instance.Identity;
                 var pid = self != null ? self.Pid : 0;
                 return InfoFilePath + (pid > 0 ? "." + pid : ".unknown");
+            }
+        }
+
+        /// <summary>
+        /// 指令清单的落盘路径：<c>&lt;指令目录&gt;/commands.&lt;projectHash&gt;.json</c>
+        /// <para>
+        /// 与 <c>.http-info</c> 同一个目录 —— 那个目录由 <see cref="CommandSystemSettings"/> 决定，
+        /// 换环境只改设置，清单跟着走，不绑死任何 MCP 客户端。
+        /// </para>
+        /// <para>
+        /// 名字刻意避开 <c>.http-info</c> 前缀：<c>PruneStaleInfoCopies</c> 按该前缀通配清理，
+        /// 用同一个前缀会被当成陈旧副本删掉。
+        /// </para>
+        /// </summary>
+        public static string CommandCatalogFilePath
+        {
+            get
+            {
+                return Path.Combine(CommandPathUtil.EnsureDefaultCommandDirectory(),
+                    "commands." + ProjectHash + ".json");
             }
         }
 
@@ -1295,8 +1452,10 @@ namespace Aketsuki.UnityMcp.Editor
             // 先终结所有等待方，避免后台线程在域销毁后永久挂起
             CommandHttpServer.Instance.FlushPending("Unity 正在重新编译，请稍后重试");
             CommandHttpServer.Instance.Stop();
-            // 信息文件一并删掉；新域重建后 RestoreFromSettings 会重新写
-            DeleteInfoFile();
+            // 信息文件一并删掉；新域重建后 RestoreFromSettings 会重新写。
+            // 全局索引条目**刻意保留**：这 20 秒里按工程名选址不能失去精确性，
+            // 否则会退化成子串匹配、把指令发进名字相近的另一个工程。
+            DeleteInfoFile(dropGlobalEntry: false);
         }
 
         private static void OnQuitting()

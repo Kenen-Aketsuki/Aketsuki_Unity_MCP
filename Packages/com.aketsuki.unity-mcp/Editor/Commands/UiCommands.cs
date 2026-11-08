@@ -194,6 +194,9 @@ namespace Aketsuki.UnityMcp.Editor
             var go = new GameObject(name, typeof(RectTransform));
             go.transform.SetParent(null);
 
+            // 画布根没有父级可继承，直接放 UI 层（同 UiNodeFactory.EnsureCanvas，见 BUG-014）
+            go.layer = UiNodeFactory.UiLayer;
+
             var canvas = go.AddComponent<Canvas>();
             var scaler = go.AddComponent<CanvasScaler>();
             go.AddComponent<GraphicRaycaster>();

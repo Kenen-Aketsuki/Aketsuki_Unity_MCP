@@ -17,6 +17,11 @@ Feedback/
     └── FEAT-002-xxx.md
 ```
 
+**工单只存本机，不入库。** 进版本库的只有 `README.md` 与 `_模板.md`——别人 clone 下来看到的是
+规则和模板；`待拍板/` `未实现/` `已实现/` 三个目录与 `索引.md` 都在 `.gitignore` 里。
+理由是工单本身写着在哪个工程踩的、贴了哪些路径和日志原文，属于开发过程记录，
+不该随这条仓库一起公开。新增工单照常往目录里写，`feedback_index.py` 也照常扫本机。
+
 ## 状态怎么变
 
 **移动文件就是改状态**，没有第三个地方要同步（`status` 字段跟着改，`updated` 跟着改）：
@@ -54,7 +59,7 @@ Feedback/
 ## 必填字段
 
 `id` `type` `title` `status` `source` `created`。缺一个脚本就报错。
-`source` 写来源工程目录名（如 `GameProject` / `ProjectA` / `ProjectC`），
+`source` 写来源工程目录名（如 `MyUnityProject` / `GameProject`），
 这是判断"只在那个工程才炸，还是通用问题"的唯一线索，别省。
 
 ## 写的时候
@@ -68,7 +73,8 @@ Feedback/
 ## 给 AI 的约定
 
 1. 处理反馈前先读 `索引.md`，别一条条翻文件。
-2. 改代码 → 验证（C# 改动跑 `Tools/verify_unitypackage.py --with-ui`，Python 跑一遍实际指令）→ 才允许移文件。
+2. 改代码 → 验证（C# 改动跑 `python Tools/deploy.py --offline-compile` 只算参考，
+   最终以目标工程的 HTTP 编译结果为准；Python 跑一遍实际指令）→ 才允许移文件。
 3. **修完必须部署到各工程**：`python Tools/deploy.py --verify`（目标编辑器开着就顺带编译校验）。
    只在仓库里改完不移文件，等于没修——`source` 那个工程里跑的还是旧代码。
    部署成功后再移反馈文件。

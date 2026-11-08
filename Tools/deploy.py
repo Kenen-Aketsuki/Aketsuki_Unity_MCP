@@ -5,7 +5,7 @@
     python3 Tools/deploy.py --list              查看目标清单与同步状态
     python3 Tools/deploy.py --check             只报告差异，不写文件
     python3 Tools/deploy.py                     部署到全部目标
-    python3 Tools/deploy.py island ProjectC   只部署名字能匹配上的目标
+    python3 Tools/deploy.py Project  只部署名字能匹配上的目标
     python3 Tools/deploy.py --dry-run           显示将写入哪些文件
     python3 Tools/deploy.py --verify            部署后让目标工程编译并回传错误
     python3 Tools/deploy.py --prune             额外删除目标侧的孤儿文件（默认只报告）
@@ -52,6 +52,9 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)                                   # 仓库根 = Tools/ 的上一级
 CONFIG_PATH = os.path.join(HERE, "deploy_targets.json")
+# 本机配置的模板：deploy_targets.json 里全是各工程在本机的绝对路径，
+# 换台机器就全错，所以它不进仓库（.gitignore 挡住），仓库里只放这份脱敏模板。
+CONFIG_EXAMPLE_PATH = os.path.join(HERE, "deploy_targets.example.json")
 
 # 两个并列的工具，各有自己的源码根、MCP 桥副本、技能目录与程序集。
 # 它们共用同一批目标工程，但互不依赖：可以只部署其中一个（--module adb）。
@@ -150,7 +153,6 @@ _EOL_CACHE = {}                     # 工程根 -> 行尾
 # 离线编译校验器（跨工程通用的本机工具，找不到就跳过）
 OFFLINE_COMPILER_CANDIDATES = [
     os.path.expanduser("~/.workbuddy/tools/unity-offline-compile/unity_offline_compile.py"),
-    "C:/Users/user/.workbuddy/tools/unity-offline-compile/unity_offline_compile.py",
 ]
 
 
@@ -243,7 +245,12 @@ def detect_eol(root):
 
 def load_targets():
     if not os.path.isfile(CONFIG_PATH):
-        raise SystemExit("缺少配置文件：%s" % CONFIG_PATH)
+        raise SystemExit(
+            "缺少本机部署配置：%s\n"
+            "这份文件记录各工程在本机的绝对路径（盘符/用户名），属于本机配置，不进仓库。\n"
+            "第一次用请从模板复制一份，再把每个 root 改成本机实际路径：\n"
+            "    copy \"%s\" \"%s\"\n"
+            % (CONFIG_PATH, CONFIG_EXAMPLE_PATH, CONFIG_PATH))
     import json
     with open(CONFIG_PATH, "r", encoding="utf-8") as handle:
         data = json.load(handle)
@@ -699,7 +706,12 @@ def wait_endpoint(send, root, timeout):
             continue
         if proc.returncode == 0:
             return True, ""
-        last = ((proc.stderr or proc.stdout or "").strip().splitlines() or [""])[-1]
+        # 取**第一**行而不是最后一行：send.py 的报错是「原因 + 若干条建议」的结构，
+        # 末尾那几行是"要不要 --target 试试别的工程"之类的提示，当成原因输出会读成
+        # "指令服务没响应：它们不属于本工作区吗？…"（2026-11-03 实际出现过）。
+        lines = [line.strip() for line in (proc.stderr or proc.stdout or "").splitlines()
+                 if line.strip()]
+        last = (lines[0] if lines else "")[:160]
         time.sleep(5)
     return False, last
 
@@ -880,7 +892,7 @@ def verify_package_assembly(target, dest_root, since, timeout=300):
       ② `Library/ScriptAssemblies/<程序集>.dll` 的 mtime 晚于本次部署开始时间。
     两条都过才算通过。
 
-    **只解析出不等于编出来了**（实测 island_back：lock 已 embedded，dll 还是没影）。
+    **只解析出不等于编出来了**（实测 MyUnityProject：lock 已 embedded，dll 还是没影）。
     目标工程如果同时装着指令系统，就借它的 `asset.refresh` 主动推一把 ——
     `asset.compile` 不会导入新文件，只会在旧状态上回一句"无需重编"。
     """

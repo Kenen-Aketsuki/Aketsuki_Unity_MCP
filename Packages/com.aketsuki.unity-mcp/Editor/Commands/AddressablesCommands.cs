@@ -17,7 +17,7 @@ namespace Aketsuki.UnityMcp.Editor
     /// ——自动化流程必须在保存时就闭环，不能靠 Play 时炸出来发现。
     /// </para>
     /// <para>
-    /// 关键架构约束：部分目标工程（如 island_back）没装 com.unity.addressables 包，
+    /// 关键架构约束：部分目标工程（如 MyUnityProject）没装 com.unity.addressables 包，
     /// ECS 若直接 <c>using UnityEditor.AddressableAssets</c>，包一导入那边就编译失败
     /// ——所以这里全部走<b>反射</b>，缺包时报友好错误而不是编译炸。
     /// </para>

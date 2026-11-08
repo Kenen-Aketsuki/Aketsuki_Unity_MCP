@@ -22,7 +22,8 @@ description: 向本项目的 Unity 编辑器下发 JSON 指令、查询编辑器
 
 ```bash
 python scripts/send.py status                 # 探活 + 看编辑器状态（含当前指令与耗时）
-python scripts/send.py commands               # 列出全部可用指令（带参数说明）
+python scripts/send.py commands               # 列出全部可用指令（联网，权威）
+python scripts/send.py catalog                # 读本地清单（不联网，编辑器没开也能列）
 python scripts/send.py resolve                # 端点定位诊断：列出所有候选并说明最终连哪个
 python scripts/send.py send <文件>.json        # 下发并同步等执行报告
 python scripts/send.py send <文件>.json --dry-run   # 只校验不真执行
@@ -30,12 +31,42 @@ python scripts/send.py send <文件>.json --request-id <ID>  # 幂等下发（�
 python scripts/send.py cancel                 # 请求协作式取消当前批次
 python scripts/send.py compile                # 编译 + 等待 + 回传错误（改 .cs 后的闭环）
 python scripts/send.py seq <步骤>.json         # 顺序执行多步，步间由客户端等待（跨帧节奏）
+python scripts/send.py status --target <工程>   # 跨工程：按工程名/路径定位另一个工程的编辑器
 ```
 
 客户端从 `<工作空间>/.workbuddy/UnityEditCommand/.http-info.<projectHash>` 读取端口与令牌，
 **不要硬编码端口**——端口被占用时服务端会自动避让，写死必然连错。
 文件名带工程 hash（工程路径 SHA1 前 8 位）：同一工作区下同时开着多个 Unity 工程时，
 各自的信息文件互不覆盖。旧版无 hash 的 `.http-info` 仍被兼容读取（过渡期）。
+
+### 跨工程选址（`--target`）
+
+`.http-info` 是**按工作区**分散的，脚本默认只认自己所在的那个工作区。在一份 MCP 仓库里
+跑 `send.py status`，看不到隔壁工程的编辑器 —— 报出来是「Unity 编辑器可能没开着」，
+**这是假阴性**（2026-11-03 实际踩到：编辑器活得很好，在 57843，脚本却对着本仓库残留的
+57831 扫了一圈说"没开"）。
+
+`--target` 把 Unity 侧写的**全局索引**（`%LOCALAPPDATA%\Aketsuki\UnityMcp\targets\*.json`）
+暴露给 CLI，三种写法等价，都能落到同一个工程根：
+
+```bash
+python scripts/send.py status --target MyUnityProject    # 工程名（也支持部分匹配）
+python scripts/send.py status --target D:/Work/MyUnityProject # 工程根路径（盘符随本机）
+python scripts/send.py status --target ".../.http-info.df0c4d80"          # 信息文件
+```
+
+- 名字有歧义（两个同名 clone）时**报错并列出全部候选**，绝不猜一个 —— 猜错等于把指令发进别人工程。
+- **全名精确命中优先，子串命中只是兜底**，且时**一定**会提示实际连的是谁。
+  2026-11-07 实际踩到：`--target A` 而 A 的索引条目当时不在（正在重编译），
+  于是回落到名字以 `A` 开头的 `A_back`，指令差点发进隔壁工程；提示只写了 stderr，
+  而调用方只读 stdout，等于没提示。现在这类提示会同时出现在**报告顶部**（`--json` 模式仍只走 stderr）。
+  **跨工程下发时请写完整工程名或工程根路径**，别指望前缀。
+- 全局索引条目在工程关掉、目录挪走之后**不会自己消失**（编辑器退出不撤条目，域重载也刻意保留）。
+  所以按名字选址会滤掉磁盘上已不存在的工程根；`unity_targets` 的 `probe=true` 才是判活的那一步。
+- 指定后进入**严格选址**：只认 `projectPath` 完全一致的编辑器，连不上就失败，绝不降级到隔壁工程。
+- `--target` 与 `--project-root` 是同一件事，同时给会直接报错。
+- 不带 `--target` 且本工作区一个端点都连不上时，报错里会列出全局索引里的其它工程，
+  提示你加 `--target` —— 别再把"别的工程开着"误读成"Unity 没开"。
 
 ### 端点定位（最重要的一件事）
 
@@ -115,50 +146,120 @@ stdio 桥把发现逻辑关在桥进程内部（复用 `send.py` 的 `.http-info
 
 ### 启用
 
-配置写在 `~/.workbuddy/mcp.json`：
+配置写在 `~/.workbuddy/mcp.json`，**一条 server 管所有工程**：
 
 ```json
 {
   "mcpServers": {
     "unity-cmd": {
       "command": "<python 绝对路径>",
-      "args": ["<工作空间>/.workbuddy/skills/unity-cmd/scripts/unity_mcp_server.py"]
+      "args": [
+        "<任一工程>/.workbuddy/skills/unity-cmd/scripts/unity_mcp_server.py",
+        "--tool-mode", "meta"
+      ]
     }
   }
 }
 ```
 
 写完后**必须到连接器管理页点「信任」**，MCP 才会真正启动。
-桥是**一工程一份**：它从脚本位置向上找 `.workbuddy` 推出工作区，接另一个 Unity 工程就复制一份
-脚本并单独注册。
 
 > 如果本项目是通过 **UnityPackage** 引入指令系统的，以上步骤可以跳过：
 > 菜单 `Tools / 指令系统 / MCP / ① 安装桥到本工程` 会自动复制脚本并合并 mcp.json
-> （保留文件里其它 MCP 服务、写前自动备份）。装完仍需要手动点一次「信任」。
+> （保留文件里其它 MCP 服务、写前自动备份、**顺手清掉上一代按工程派生的 `unity-cmd-*` 条目**）。
+> 装完仍需要手动点一次「信任」。
 
-### 工具集
+**为什么不再需要每工程一条**：桥会读全局索引
+（`%LOCALAPPDATA%\Aketsuki\UnityMcp\targets\*.json`，由 Unity 侧 `GlobalTargetRegistry` 写入）
+发现本机所有开着的工程。只开一个时自动选中；开多个时用 `target` 参数指定。
+上一代每种工程一条 server 的做法，会让上下文成本 ×N，已废弃。
 
-固定 5 个元工具：
+### 工具模式（`--tool-mode`）
+
+| 模式 | 工具数 | 体积 | 适用 |
+| --- | --- | --- | --- |
+| `meta`（默认） | 6 | ~3.3k 字符 | 常态。模型按需用 `unity_list_commands` 查指令名 |
+| `group` | ~21 | ~11k 字符 | 不想多一轮查询、又嫌全量太贵。按域折叠成 `unity_<域>`，`action` 用 enum 列全 |
+| `full` | 全部（70+） | ~30k 字符 | 只在需要"一条指令一个细粒度 schema"时用。上一代的默认行为 |
+
+也可以用环境变量 `UNITY_MCP_TOOL_MODE` 指定，优先级低于命令行参数。
+
+### 工具集（`meta` 模式）
 
 | 工具 | 用途 |
 | --- | --- |
 | `unity_status` | 编辑器状态 + 当前执行中的指令与耗时 |
+| `unity_targets` | 列出本机开着的 Unity 工程（`probe=true` 时逐个探活） |
 | `unity_execute` | 一次下发多条指令（服务端串行执行），支持 `dryRun` / `requestId` |
-| `unity_list_commands` | 指令清单与参数说明 |
+| `unity_list_commands` | 指令清单（`prefix` 收窄、`verbose` 看参数、`refresh` 强制重取） |
 | `unity_cancel` | 协作式取消当前批次 |
 | `unity_compile_and_wait` | 触发重编译并等到编辑器重新空闲（跨域重载自动重连） |
 
-外加**动态生成**的 typed 工具：`unity_asset_compile`、`unity_file_write`、`unity_ui_button`……
-命名规则是「指令 ID 的点换成下划线」，参数 schema 由服务端 `/v1/commands` 的 `usage` 实时解析
-（单一来源，不在桥里手写，避免与 `CommandAttribute` 漂移）。
-**新增一条 `[Command]` 指令就自动多一个 MCP 工具**，桥不需要改。
+**除 `unity_targets` 外，所有工具都接受 `target` 参数**，三种写法等价：
+工程名（`MyUnityProject`）、工程根绝对路径、`.http-info.<hash>` 绝对路径。
+省略时的行为：唯一活工程 → 自动用；多个并存 → 报错并列候选；显式指定过一次 → 之后沿用。
 
-Unity 没启动时 `tools/list` 仍会在半秒内返回那 5 个元工具，调用会得到清晰的中文提示，
-不会卡住、也不会崩。
-**此时看不到 `unity_scene_open` 这类 typed 工具是正常的**（它们靠服务端 `/v1/commands` 生成，
-编辑器不在就没有来源），不是包丢了、也不是桥坏了——先把编辑器打开，工具就会自己回来（缓存 60 秒）。
+`group` 模式下额外有 `unity_gameobject` / `unity_prefab` / `unity_scene` / `unity_ui` /
+`unity_component` / `unity_asset` / `unity_editor` / `unity_runtime` / `unity_adb` /
+`unity_file` / `unity_addressables` / `unity_consent` / `unity_var` / `unity_capture` /
+`unity_misc`，调用形如 `{ "action": "find", "params": {...} }`。
+
+`full` 模式下才有 typed 工具：`unity_asset_compile`、`unity_file_write`……
+命名规则是「指令 ID 的点换成下划线」，schema 由服务端 `/v1/commands` 的 `usage` 实时解析
+（单一来源，不在桥里手写，避免与 `CommandAttribute` 漂移）。
+
+Unity 没启动时 `tools/list` 仍会在半秒内返回元工具，调用会得到清晰的中文提示，
+不会卡住、也不会崩。`group` / `full` 模式下此时还会**退化成只有元工具**——
+它们依赖服务端 `/v1/commands` 生成，编辑器不在就没有来源。这不是包丢了。
 这条曾经真的坏过：`tools/list` 整个抛 `-32603`、客户端里一条工具都没有（BUG-011）。
-现在桥有兜底：typed 工具生成失败一律退化成"只有元工具"，`unity_status` 永远调得到。
+现在桥有兜底，`unity_status` 永远调得到。
+
+## 指令速查（`meta` 模式下先看这里，能省一次 `unity_list_commands`）
+
+> **第一选择是读本地清单，不是这张表。** 服务端每次启动 / 域重载都会把当前指令集写成
+> `<工作空间>/.workbuddy/UnityEditCommand/commands.<projectHash>.json`（与 `.http-info` 同目录）。
+> `send.py catalog` 直接读它、**不发 HTTP**；MCP 的 `unity_list_commands` 在连不上编辑器时
+> 也会自动退回它，并在输出里标注"这是快照"。
+>
+> 清单一律是**快照**：包升级、模块增删（`ProjectB` 不装 `adb.*`）都会让它过期。
+> 真正下发前以服务端为准；刚部署完新指令时用 `unity_list_commands {refresh: true}`。
+
+**清单里有什么**：每条指令的 `id` / `description` / `usage` / `editorOnly` /
+`runtime` / `playState` / `requiresConsent`，与 `/v1/commands` 同一份字段（服务端同一段代码生成，
+不会漂移）。清单顶层还有 `generatedUtc`、`protocolVersion`、`identity`（工程名与路径）。
+
+下面是本仓库（`com.aketsuki.unity-mcp`）的完整指令集，供肉眼扫。目标工程可能没装某个模块
+（如 `ProjectB` 不装 `adb.*`），也可能带着**未合入分支**的指令（`capture.*` 目前在
+`develop_screen_viewer` 上），以清单或 `unity_list_commands` 的实际返回为准。
+
+**GameObject**（`gameobject.*`）：`create` 建节点、`instantiate` 实例化 Prefab（保连接）、
+`find` 按名/类型/路径找、`rename`、`setActive`、`setParent`、`setProperty`（layer/tag/isStatic）、
+`duplicate`、`destroy`
+
+**场景**（`scene.*`）：`list` / `hierarchy` / `inspect` / `state` / `open`※ / `reload`※ /
+`save` / `create` / `delete`（※ 敏感操作，会弹确认框）
+
+**Prefab**（`prefab.*`）：`tree` 看结构、`addNode` / `removeNode` / `delete` / `renameNode` /
+`duplicateNode` 改结构、`instantiatePrefab` 放场景、`replaceWithInstanceOf` 换成实例
+
+**UI**（`ui.*`）：`canvas` / `uiRoot` / `node` / `button` / `image` / `text` / `tmpText` /
+`savePrefab`
+
+**组件**（`component.*`）：`add` / `remove` / `get` / `setField` / `setFields`（多字段原子写）
+
+**资源**（`asset.*`）：`refresh` / `save` / `compile` / `compileReport` / `importSprite`
+
+**编辑器**（`editor.*`）：`state` 只读、`play`※ / `stop`※ 进出 Play（敏感操作）
+
+**运行时**（`runtime.*`，默认关闭，需在控制台开「启用运行时指令」）：
+`play` / `stop` / `hierarchy` / `click` / `scroll` / `input`
+
+**ADB**（`adb.*`，仅装了 adb 模块的工程）：`devices` / `logcat.start` / `logcat.read` /
+`logcat.status` / `logcat.stop`
+
+**其它**：`file.read` / `file.write` / `file.run`、`var.dump` / `var.set`、
+`console.read`、`log`、`batch`、`commands.list`、`command.cleanup`、
+`consent.list` / `consent.fetch`、`addressables.addEntry` / `addressables.removeEntry`
 
 ### 协议实现要点（改桥时别踩）
 
@@ -166,8 +267,10 @@ Unity 没启动时 `tools/list` 仍会在半秒内返回那 5 个元工具，调
   消息内不得含换行；所有日志走 stderr。Windows 上还必须 `reconfigure(encoding="utf-8", newline="\n")`，
   否则默认 cp936 / `\r\n` 会让客户端解析失败。
 - **每请求独立线程**：慢的 `execute` 不能挡住 `cancel` / `status` 这类需要穿透的调用。
-- **端点缓存**：优先读本工程信息文件（快路径 ~0.5s）；失败才退回 `send.discover` 的端口扫描
-  （最坏要串行探测 10 个端口 × 3s，会让首次 `tools/list` 卡十几秒）。
+- **端点缓存**：显式目标（`project_root` / `info_path` / 全局索引）走
+  `send.target_from_project_root`，只读该工程的信息文件，**不碰 `send` 的模块级全局状态**——
+  这是能同时服务多个工程的前提。只有完全没有目标线索时才退回 `send.discover` 的端口扫描。
+- **`target` 绝不能混进指令 params**：它是桥自己的寻址参数，混进去服务端会当成未知参数报错。
 
 ## 编辑-编译-纠错闭环（改 .cs 必须走这条）
 
@@ -265,6 +368,61 @@ Unity 没启动时 `tools/list` 仍会在半秒内返回那 5 个元工具，调
    `- waiting for device -`（`adb.logcat.status` 的 `notice` 能看到），此时一条日志都不会来。
 
 参数语义、堆栈合并规则、两条节流与已知边界，全在 `Assets/Editor/AdbDebugger/README.md`。
+
+## 截图：先看见，再判断（`capture.scene` / `capture.game` / `capture.prefab`）
+
+### 什么时候必须用
+
+**只要有"看起来对不对"的问题，就先截图，别靠文本推。**
+
+| 症状 | 文本为什么看不出来 |
+| --- | --- |
+| 棋子 / 模型摆位歪了 | 坐标数字全对，但父节点缩放、锚点、Canvas Scaler 都不体现在数字上 |
+| UI 重叠 / 字被裁 | `RectTransform` 的尺寸是"设计值"，实际渲染还取决于 Canvas 与 Scaler |
+| 材质丢引用 / 过曝 / 后处理异常 | 字段值合法，渲染结果不对 |
+| Prefab 里某部件被挡住 | 层级顺序正确，视觉上是错的 |
+
+典型用法：
+
+```bash
+# 1) 先看一眼当前场景（默认覆盖写 <指令目录>/screenshots/scene-latest.png）
+send.py capture.scene
+
+# 2) 只看画面、不要工具栏：crop=window 是整窗，frame 是相机视口
+send.py capture.scene crop=frame
+
+# 3) Play 中截游戏画面（含 Screen Space-Overlay 的 UI）
+send.py capture.game
+
+# 4) 截一个没打开的 Prefab（会切换编辑器当前编辑对象，有副作用）
+send.py capture.prefab prefab=Assets/GameRes/.../ShopView.prefab openPrefab=true
+```
+
+MCP 通道下**不需要自己去读那个 PNG**：结果里带 `path` + `mimeType` 的，桥会自动把图片内联成
+image content（单张上限 2 MB，超了只回路径）。
+
+### 读返回：`warnings` 先看，`width/height` 别当请求值
+
+- `source: "printwindow"` = 窗口截屏（所见即所得）；`"camera-render"` = 降级路径，**一定少了东西**。
+- `width` / `height` 是**实际像素**。截图分辨率由窗口大小决定，想让图更大就把窗口拉大或传 `scale`。
+- `cropped` 是相对窗口的物理像素矩形，配合 `dpiScale` 可复算位置。
+
+### 纪律（这几条踩过）
+
+1. **`select` 拍不到选中高亮**。一条指令只跑一帧，指令内改的 `Selection` 来不及画进窗口表面。
+   想要"带高亮圈的图"这条路不通，别反复试。
+2. **编辑模式的 `capture.game` 一定没有 Overlay UI**。GameView 在编辑模式不渲染，只能相机渲染，
+   而 Overlay Canvas 不走相机。**别拿这张图判断 UI 有没有显示**——要看 UI 就进 Play 再截。
+   另外：如果场景里的相机全是 `clearFlags = Depth only` 的叠加相机（纯 UI 场景常见），
+   相机渲染根本铺不出底色，指令会**明确失败**并列出每个候选的 `clearFlags/depth`——
+   这是如实报告，不是坏了，出路同上（进 Play，或者用 `capture.scene` 看场景）。
+3. **`crop=frame` 的上沿可能带一条工具栏**（GUI 叠加层剥不掉）。图里出现 `Center` / `Local` / `2D`
+   这类按钮时，别把它当场景内容。
+4. **窗口最小化 / 非 Windows 会直接失败**，这是设计，不是 bug；别试图"重试一次看看"。
+5. **截图不能代替 `scene.inspect`**。截图告诉你"不对"，`scene.hierarchy` / `component.get` 才告诉你
+   "哪个字段不对"。先截图定位，再用文本查值，比盲调字段快得多。
+6. **`openPrefab:true` 会把编辑器当前编辑对象切走**，而且场景有未保存改动时本指令会拒绝执行
+   （避免弹保存框把主线程卡住）。切完记得自己提醒用户回到原场景。
 
 ## 运行时指令（Play 模式干预，默认关闭）
 
@@ -548,7 +706,7 @@ HTTP 状态码只表示"请求是否被处理"，**业务结果看 body 里的 `
 | 503 `compiling` / `updating` | Unity 正在编译或刷新资源 | **等**，见下方纪律 |
 | 连接失败 | 服务没启动 | 让用户去菜单开启，不要重试轰炸 |
 
-`records` 里每条含 `index` / `id` / `status` / `message` / `data`。
+`records` 里每条含 `index` / `id` / `status` / `message` / `data`（有警告时多一个 `warnings` 数组）。
 `status` 取值：`Success` / `Failed` / `Skipped` / `UnknownCommand`。
 `UnknownCommand` 说明指令 ID 拼错或未注册，用 `commands` 子命令核对。
 
@@ -557,6 +715,14 @@ HTTP 状态码只表示"请求是否被处理"，**业务结果看 body 里的 `
 > `failures` 是只含失败项的精简数组（`index` / `id` / `status` / `message`，不含 `data`）。
 > 两者都排在 `records` 之前，就是为了让"有东西失败了"这件事不可能被忽略——
 > 别跳过它们直接翻 `records`，records 可能有几十条。
+
+> **`ok:true` 也可能带 `warnings`（IMPR-013，2026-11-05）。** 典型是参数名写错：
+> `scene.hierarchy` 的参数叫 `target` / `maxDepth`，写成 `root` / `depth`（那是 `runtime.hierarchy` 的叫法）
+> 时两个都被静默丢弃，指令按默认语义回了整个场景（实测 2.9 MB），调用方只看到成功的 `[OK]`。
+> 现在这种情形会在响应顶层 `warnings[]` 里给一条
+> `未知参数：root, depth（本指令可用：target, maxDepth）`，结论行也会变成
+> `"1 条指令全部成功；另有 1 条警告（见 warnings）"`。
+> **结论行出现"另有 N 条警告"时，先去看 warnings，别当成没问题。**
 
 ## 自愈流程（本 Skill 的核心价值）
 
@@ -634,8 +800,9 @@ HTTP 状态码只表示"请求是否被处理"，**业务结果看 body 里的 `
 | 内容 | 路径 |
 | --- | --- |
 | 服务信息（端口 + 令牌） | `<工作空间>/.workbuddy/UnityEditCommand/.http-info.<projectHash>` |
+| 指令清单（离线副本） | `<工作空间>/.workbuddy/UnityEditCommand/commands.<projectHash>.json` |
 | 指令文件 | `<工作空间>/.workbuddy/UnityEditCommand/*.json` |
 | 本 Skill | `<工作空间>/.workbuddy/skills/unity-cmd/` |
-| 服务端源码 | `CivilizationRevival/Assets/Editor/ExternalCommandSystem/CommandHttpServer.cs` |
-| 协议层源码 | `CivilizationRevival/Assets/Editor/ExternalCommandSystem/Core/HttpProtocol.cs` |
-| 路径策略源码 | `CivilizationRevival/Assets/Editor/ExternalCommandSystem/Core/CommandPathUtil.cs` |
+| 服务端源码 | `Packages/com.aketsuki.unity-mcp/Editor/CommandHttpServer.cs` |
+| 协议层源码 | `Packages/com.aketsuki.unity-mcp/Editor/Core/HttpProtocol.cs` |
+| 路径策略源码 | `Packages/com.aketsuki.unity-mcp/Editor/Core/CommandPathUtil.cs` |

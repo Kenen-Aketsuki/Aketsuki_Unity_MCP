@@ -26,14 +26,21 @@ namespace Aketsuki.UnityMcp.Editor
         private const string MenuOpenFolder = MenuRoot + "打开指令目录";
 
         /// <summary>
-        /// 临时统计：已执行指令文件的收集目录（写死，不做任何设置 UI）。
+        /// 临时统计：已执行指令文件的收集目录（不做任何设置 UI）。
         /// <para>
         /// 隔离设计：目录不存在即功能关闭（<see cref="CollectForAnalysis"/> 静默跳过），
         /// 删除该目录可一键关停；部署到其它工程时该路径本就不存在，天然零副作用。
-        /// 这是有时效的临时能力，移除统计 = 删掉 <see cref="CollectForAnalysis"/> 与这条常量即可。
+        /// 这是有时效的临时能力，移除统计 = 删掉 <see cref="CollectForAnalysis"/> 与这条字段即可。
+        /// </para>
+        /// <para>
+        /// 位置由工程根推导（<c>Application.dataPath</c> 的上一级 + <c>.workbuddy/CommandAnal</c>），
+        /// 与原先写死的那条路径指向同一个目录，但不带盘符和用户名：包装到别的工程时，
+        /// 指的是那个工程自己的 <c>.workbuddy/CommandAnal</c>，而不是开发机的绝对路径。
         /// </para>
         /// </summary>
-        private const string CommandAnalyticsDir = @"D:/Work/Aketsuki_Unity_MCP/.workbuddy/CommandAnal";
+        private static readonly string CommandAnalyticsDir = Path.Combine(
+            Path.GetDirectoryName(UnityEngine.Application.dataPath) ?? ".",
+            ".workbuddy", "CommandAnal");
 
         static CommandAutoRunner()
         {
@@ -236,7 +243,7 @@ namespace Aketsuki.UnityMcp.Editor
         /// <item>同名碰撞追加时间戳后缀，保留每次执行样本，不覆盖历史；</item>
         /// <item>任何异常都只告警，绝不影响正常执行流程。</item>
         /// </list>
-        /// 本方法是统计能力的唯一入口，移除统计 = 删本方法 + 删 <see cref="ExecuteFile"/> 里的调用 + 删 <see cref="CommandAnalyticsDir"/> 常量。
+        /// 本方法是统计能力的唯一入口，移除统计 = 删本方法 + 删 <see cref="ExecuteFile"/> 里的调用 + 删 <see cref="CommandAnalyticsDir"/> 字段。
         /// </summary>
         private static void CollectForAnalysis(string path)
         {

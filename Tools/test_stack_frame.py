@@ -4,8 +4,8 @@
 
 干什么
 ------
-``Assets/Editor/AdbDebugger/AdbLogcatService.cs`` 里那条 ``UnityStackFrame`` 正则决定了
-"设备端一条 Debug.Log 在控制台里占一行，还是被拆成正文 + N 条栈帧"。
+``Packages/com.aketsuki.adb-debugger/Editor/AdbLogcatService.cs`` 里那条 ``UnityStackFrame``
+正则决定了"设备端一条 Debug.Log 在控制台里占一行，还是被拆成正文 + N 条栈帧"。
 它有两个特点让它特别容易改坏：
 
 * **放宽一点点就吞正文**（把普通日志并进上一条的栈里）；
@@ -44,7 +44,16 @@ PATTERN = (
     r"(?:\.c?ctor|[A-Za-z_<][A-Za-z0-9_<>`.|]*)\s*\([^()]*\)$"
 )
 
-CS_RELATIVE_PATH = os.path.join("Assets", "Editor", "AdbDebugger", "AdbLogcatService.cs")
+# C# 源文件的候选路径（按顺序找第一个存在的）。
+#
+# ADB 调试台从"工程内资产"搬成了独立包（`com.aketsuki.adb-debugger`），老路径
+# `Assets/Editor/AdbDebugger/…` 在 2026-11 之后就不存在了。**只留老路径的后果不是报错，
+# 而是"文件找不到 → 打印一行警告 → 跳过副本一致性校验 → 依旧全绿"**：
+# 正则改了、副本没改，测试照样通过（2026-11-07 实际发现，这是一条假绿）。
+CS_CANDIDATE_PATHS = (
+    os.path.join("Packages", "com.aketsuki.adb-debugger", "Editor", "AdbLogcatService.cs"),
+    os.path.join("Assets", "Editor", "AdbDebugger", "AdbLogcatService.cs"),  # 老资产形态，仅兼容
+)
 
 # ---------------------------------------------------------------- 用例
 
@@ -111,26 +120,42 @@ def find_pattern_in_source(text):
     return "".join(part.replace('""', '"') for part in parts)
 
 
+def locate_source(repo_root):
+    """按候选路径找 C# 源文件，返回 (绝对路径, 相对描述) 或 (None, None)。"""
+    for relative in CS_CANDIDATE_PATHS:
+        candidate = os.path.join(repo_root, relative)
+        if os.path.isfile(candidate):
+            return candidate, relative
+    return None, None
+
+
 def main():
     here = os.path.dirname(os.path.abspath(__file__))
     repo_root = os.path.dirname(here)
-    cs_path = os.path.join(repo_root, CS_RELATIVE_PATH)
+    cs_path, cs_relative = locate_source(repo_root)
 
-    if os.path.isfile(cs_path):
-        with io.open(cs_path, "r", encoding="utf-8-sig") as handle:
-            source = handle.read()
-        actual = find_pattern_in_source(source)
-        if actual is None:
-            print("[失败] 在 %s 里没找到 UnityStackFrame 的正则，脚本需要更新" % CS_RELATIVE_PATH)
-            return 2
-        if actual != PATTERN:
-            print("[失败] C# 里的正则与本脚本的副本不一致，两边要同步改：")
-            print("  C#  : %s" % actual)
-            print("  副本: %s" % PATTERN)
-            return 2
-        print("正则副本与 %s 一致" % CS_RELATIVE_PATH)
-    else:
-        print("[警告] 没找到 %s，跳过副本一致性校验" % CS_RELATIVE_PATH)
+    if cs_path is None:
+        # 这里**必须**失败退出（docstring 承诺的退出码 2）。
+        # 曾经的写法是"打印警告、跳过校验、继续跑用例"——那等于把这条回归网悄悄拆了：
+        # 源文件挪走之后，正则改了副本没改，测试依旧全绿。
+        print("[失败] 找不到 AdbLogcatService.cs，副本一致性校验没法做。找过这些位置：")
+        for relative in CS_CANDIDATE_PATHS:
+            print("  %s" % relative)
+        print("  路径变了就更新本脚本的 CS_CANDIDATE_PATHS——不要让它静默跳过校验。")
+        return 2
+
+    with io.open(cs_path, "r", encoding="utf-8-sig") as handle:
+        source = handle.read()
+    actual = find_pattern_in_source(source)
+    if actual is None:
+        print("[失败] 在 %s 里没找到 UnityStackFrame 的正则，脚本需要更新" % cs_relative)
+        return 2
+    if actual != PATTERN:
+        print("[失败] C# 里的正则与本脚本的副本不一致，两边要同步改：")
+        print("  C#  : %s" % actual)
+        print("  副本: %s" % PATTERN)
+        return 2
+    print("正则副本与 %s 一致" % cs_relative)
 
     regex = re.compile(PATTERN)
     failed = []

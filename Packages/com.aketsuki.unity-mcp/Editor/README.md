@@ -149,6 +149,16 @@ new CommandRunner().RunSingle("log", JsonValue.Parse("{\"message\":\"hello\"}"))
 `<工作空间>/.workbuddy/UnityEditCommand/.http-info`——**客户端从那里读端口和令牌，不要硬编码**，
 端口被占用时服务端会自动向后避让。
 
+同一个目录里还会落一份**指令清单** `commands.<projectHash>.json`（与 `/v1/commands` 同一段代码生成，
+`count` / `generatedUtc` / `protocolVersion` / `identity` / `commands` 五块），供客户端**不联网**列出
+可用指令；服务停止时与 `.http-info` 一起删掉。写它的时机是"每次写 `.http-info`"，因此跟编辑器状态自愈。
+
+> **启动顺序陷阱（2026-11-04 实测，已修）**：`CommandHttpServerBoot` 与 `CommandAutoRunner`
+> 都是 `[InitializeOnLoad]`，Unity 不保证谁先跑。服务先起来时注册表还是空的，
+> 旧代码"空就不写"于是清单**永远不出现**（客户端只能退回联网）。现在改成空则排队一次
+> `delayCall` 重试（那时注册已完成），最多 3 次；连续失败才记一条告警。
+> 排障：清单不存在但服务在跑 → 先看 Console 有没有「指令集仍为空」。
+
 > 旧的「文件状态监听」（FileSystemWatcher + 去抖 + 去重）已被移除，下发指令改走 HTTP 通路，
 > 不再有"保存即自动执行"；需要批量执行目录里的文件时，用控制台窗口的 **扫描目录**。
 
@@ -218,7 +228,14 @@ python scripts/send.py status                  # 探活 + 编辑器状态
 python scripts/send.py commands                # 列出可用指令
 python scripts/send.py send ui_round_menu.json # 下发并等执行报告
 python scripts/send.py send ui_round_menu.json --dry-run   # 只校验
+python scripts/send.py status --target <工程名|路径>        # 跨工程：连另一个工程的编辑器
 ```
+
+`--target` 是「我不在这个工程目录里，但我要连它」的唯一正解。`.http-info` 按工作区分散，
+不带 `--target` 时脚本只看自己所在工作区——报「Unity 编辑器可能没开着」是假阴性。
+它走 Unity 侧写的全局索引（`GlobalTargetRegistry`），三种写法等价：工程名 / 工程根路径 /
+`.http-info` 文件路径；名字有歧义时报错列候选，指定后进入严格选址（只认 `projectPath`
+完全一致的编辑器，绝不降级到隔壁工程）。
 
 ---
 
@@ -278,7 +295,7 @@ JSON 里可以写 `//` 与 `/* */` 注释，也允许结尾多一个逗号。
 | `Assets/Cfgs/a.json` | 项目根/Assets/Cfgs/a.json |
 | `Cfgs/a.json` | 依次尝试 **引用它的指令文件所在目录 → 默认指令目录 → Assets 目录**，取第一个命中的 |
 
-**默认指令目录 = `<工作空间根>/.workbuddy/UnityEditCommand`**（本工程即 `Demo/.workbuddy/UnityEditCommand`，
+**默认指令目录 = `<工作空间根>/.workbuddy/UnityEditCommand`**（如 `<工程>/.workbuddy/UnityEditCommand`，
 位于 Unity 项目之外，既不参与资源导入、也不会生成 .meta，且与编辑器工作空间放在一起管理）。
 
 判定规则：项目根的上一级若存在 `.workbuddy` 子目录，则它为工作空间根；否则退化为项目根，
@@ -410,11 +427,16 @@ CommandRegistry.Default.RegisterInstance("my.cmd", new MyCommand(dependency));
 | `ui.tmpText` | TextMeshPro 文本节点（中文等复杂字形首选）；**父节点下已有同名子节点时改为"改属性"** | `name`, `parent`, `text`, `fontSize`, `color`, `align`, `bold`, `wrap`, `font` + 布局 |
 | `ui.button` | Button 节点（Image+Button+子标签，不绑事件）；布局参数与 `ui.image` 通用，因此能锚到任意角落 | `name`, `parent`, `label`, `size`, `color`, `textColor`, `fontSize`, `tmp`, `tmpFont` |
 | `ui.savePrefab` | 把场景节点（含子树）保存为 Prefab（保留 Prefab 连接，可选删除场景实例）；缺省落到 `Assets/GameAssets/UI/` | `target`(必填), `path`, `overwrite`(默认 false), `removeSceneInstance`, `select` |
-| `command.cleanup` | 清理指令目录下"用过"的文件，防膨胀。作用域严格限制在指令目录与其 `_done` 子目录内（删前二次校验，绝不越界）。`target`：`done`(默认，只清 `_done`)/`files`(只清根下未归档 `.json`)/`all`；`olderThanMinutes` 按修改时间过滤；`dryRun` 只统计不删 | `target`, `olderThanMinutes`, `dryRun` |
+| `command.cleanup` | 清理指令目录下"用过"的文件与缓存截图，防膨胀。作用域严格限制在指令目录（含任意层子目录）内，删前二次校验，绝不越界。`target`：`done`(默认，只清 `_done`)/`files`(只清根下未归档 `.json`)/`screenshots`(只清子目录里的 `*.png/jpg`)/`all`(三者都清)；`olderThanMinutes` 按修改时间过滤（**截图默认 60**，按时间差豁免、不看自然日）；`dryRun` 只统计不删 | `target`, `olderThanMinutes`, `dryRun` |
 | `consent.list` | 列出敏感操作确认记录（pending / allowed / rejected / expired / failed），新的在前 | `limit`(默认 10，上限 50) |
 | `consent.fetch` | 查询某次确认的结果；返回成功只代表"查到了记录"，结论看 `data.state` | `id`(必填，即上一条指令返回的 `consentId`) |
+| `capture.scene` | 截 SceneView 当前画面（**含 Gizmos / 网格 / Overlay**），存 PNG；结果里带 `path` + `mimeType`，MCP 桥会自动把图片内联回给 AI | `path`, `crop`, `view`, `select`, `scale` |
+| `capture.game` | 截 GameView：Play 中走窗口截屏（所见即所得）；**编辑模式下降级为相机渲染，不含 Overlay UI**（`warnings` 会明说） | `path`, `crop`, `select`, `scale` |
+| `capture.prefab` | 截 Prefab 编辑模式的画面（复用 SceneView 截屏，含 Gizmos）；未打开时 `openPrefab:true` 可自动进入编辑模式（**有副作用**） | `path`, `crop`, `view`, `select`, `scale`, `prefab`, `openPrefab` |
 
 > **指令文件生命周期（防膨胀）**：`command.cleanup` 用于事后批量清理已攒下的指令文件；控制台窗口另有「执行后删除文件」(`DeleteAfterRun`) 开关——开启后 `CommandAutoRunner` 在指令文件执行成功后**直接删除该文件**，且**优先于**「归档到 `_done`」。`DeleteAfterRun` 是全局偏好（默认关），与 `ArchiveAfterRun` 同处控制台；HTTP 下发路径本就不落盘文件，无需清理。
+>
+> **清理不会碰服务端自有的文件**（2026-11-05）：指令目录里除了指令 json，还躺着 `commands.<hash>.json`（指令清单快照，FEAT-020）和 `consent-results.json`（确认结果落盘，IMPR-010）——它们删掉会打断运行期功能，所以 `target=files|all` 一律跳过。截图只清**子目录**里的图片（`screenshots/`、`Temp/` 等），根目录的 png 不动。
 
 > **歧义与消歧规则（重要，2026-10-22 修复）**：场景里**同名 / 同类型节点很常见**（旧模块留着不删 + 新模块先建后切），所以查找一律遵循：
 > - 名字 / 层级路径匹配**始终含未激活节点**（全树遍历，不会"有时找得到有时找不到"）。
@@ -528,6 +550,18 @@ CommandRegistry.Default.RegisterInstance("my.cmd", new MyCommand(dependency));
 
 三种都可以：`"#RRGGBB"`、`"#RRGGBBAA"`、`[r,g,b,a]`（0~1，写 0~255 也会自动换算）。
 
+### 建出来的节点落在哪一层（`layer`）
+
+`ui.*` 建出的节点**继承父级的 layer**；新建的画布根（`ui.canvas` / `ui.uiRoot`）落在内置 `UI` 层。
+
+> 这条是 2026-11-05 修的（BUG-014，真机实测）：`new GameObject()` 恒为 `Default(0)`，
+> 而 `SetParent` 不会跟着改 layer，于是整条 `ui.*` 链路建出来的 UI 全在 0 层。
+> Overlay Canvas 不看 layer，所以**肉眼与截图都正常**，只有 `gameobject.find` 才会露出 `"layer": 0`；
+> 一旦工程用了相机 `cullingMask` 或按层过滤的 Raycaster，新建的 UI 就会不显示/点不到，
+> 而且几乎不可能怀疑到"建出来那一刻就错了"。以前得靠补一条 `gameobject.setProperty layer=5` 兜住。
+>
+> 想显式指定就照旧用 `gameobject.setProperty`（`includeChildren:true` 可整棵子树一起改）。
+
 ### 示例文件
 
 | 文件 | 内容 |
@@ -567,12 +601,12 @@ Modal_Confirm              (铺满全屏)
 
 ```json
 { "id": "asset.importSprite", "params": {
-    "source": "D:/Work/ProjectC-art/UI/Z-主界面/WT主界面-切图资源/轮盘菜单",
+    "source": "<工程外美术资源目录>/UI/主界面-切图资源/轮盘菜单",
     "destination": "Assets/GameAssets/UI/RoundMenu",
     "pattern": "*.png", "pixelsPerUnit": 100, "filterMode": "Point", "overwrite": true } }
 
 { "id": "asset.importSprite", "params": {
-    "source": "D:/Work/ProjectC-art/UI/Z-主界面/WT主界面-切图资源/轮盘菜单/RM_info_keyBG.png",
+    "source": "<工程外美术资源目录>/UI/主界面-切图资源/轮盘菜单/RM_info_keyBG.png",
     "destination": "Assets/GameAssets/UI/RoundMenu", "border": [44, 44, 44, 44] } }
 ```
 
@@ -605,10 +639,115 @@ Modal_Confirm              (铺满全屏)
 
 ---
 
-## 5.3 UI 根节点 MainUIRoot（与运行期代码对应）
+## 5.2 截图（`capture.scene` / `capture.game` / `capture.prefab`）
 
-游戏运行时的 UI 根节点由 `Demo.UI.UIManager.EnsureUIRoot()` 确保（序列化引用缺失时自动查找/创建
-MainUIRoot 并赋值，见工程内 `Demo.UI.MainUIRootBuilder`）：
+### 为什么需要它
+
+`scene.hierarchy` / `scene.inspect` / `prefab.tree` 给的是 **YAML 级真相，不是画面**。
+摆位歪了（父节点缩放、锚点、Canvas Scaler 都不体现在数字上）、UI 遮挡、字被裁、
+材质丢引用、光照过曝——文本里一个字段都不报错，截图一眼就能看出来。
+
+### 实现：窗口截屏，不是离屏渲染
+
+三条指令都用 Win32 `PrintWindow(PW_RENDERFULLCONTENT)` 抓**整个编辑器窗口**，再按目标视图的
+矩形裁出来。原因（2026-10-28 实测，详见 `Feedback/已实现/FEAT-019-三视图截图能力.md`）：
+
+| 路径 | 能拿到 | 拿不到 |
+| --- | --- | --- |
+| `camera.Render()` → RenderTexture | 场景几何、材质、光照、后处理 | **没有 Gizmos、没有网格**、没有 Overlay |
+| `Handles.DrawGizmos`（在 `onPostRender` 里） | 3D 图标 + 选中高亮 | 线框类不保证；**只能叠加**，不能替代场景渲染 |
+| **`PrintWindow` + 按窗口矩形裁剪** | **所见即所得**：Gizmos、网格、Overlay、Play 中的 GameView | Windows 专用；窗口不能最小化；分辨率受窗口尺寸限制 |
+
+底层工具类 `Core/WindowCapture.cs`：`user32 !PrintWindow` + `gdi32 !CreateDIBSection` 拿 BGRA 像素，
+**不依赖 `System.Drawing`**——Unity 2021/2022 的 .NET Standard profile 里那份 `System.Drawing.dll`
+只是十几 KB 的类型转发壳，真去 `new Bitmap()` 是运行期崩。
+
+### 参数
+
+| 参数 | 适用 | 说明 |
+| --- | --- | --- |
+| `path` | 全部 | 输出 PNG。默认 `<指令目录>/screenshots/<view>-latest.png`，**覆盖写**，不堆积历史图 |
+| `crop` | 全部 | `frame`(默认，相机视口) / `window`(整个 EditorWindow) / `full`(整个 Unity 窗口) |
+| `view` | scene / prefab | `SceneView` 索引；缺省取 `lastActiveSceneView`。没有打开任何 SceneView 时**直接失败**，不替你开窗 |
+| `select` | 全部 | 截图前临时选中某节点，截完还原。**注意下面这条限制** |
+| `scale` | 全部 | 后置缩放（0.1–4，默认 1）。CPU 双线性，不走 `Graphics.Blit`（线性色彩空间下 Blit 会改颜色） |
+| `prefab` | prefab | Prefab 资产路径或名字；不给则要求当前已在 Prefab 编辑模式 |
+| `openPrefab` | prefab | `true` 时自动 `PrefabStageUtility.OpenPrefab` 进入编辑模式（**有副作用**，默认 false） |
+
+**不提供 `width` / `height`**：窗口截屏的分辨率由窗口决定，声称能设尺寸只会骗人。
+要固定尺寸就用 `scale` 后置缩放，或者看返回里的实际像素。
+
+### 返回
+
+```jsonc
+{
+  "path": "D:/…/screenshots/scene-latest.png",
+  "mimeType": "image/png",              // 有这个字段的，MCP 桥会自动内联图片
+  "view": "scene",
+  "width": 1070, "height": 509,         // 实际像素，不是请求值
+  "bytes": 40677,
+  "source": "printwindow",              // printwindow | camera-render（降级时说明）
+  "cropped": { "x": 352, "y": 132, "w": 1070, "h": 509 },  // 相对窗口（物理像素，左上原点）
+  "dpiScale": 1,
+  "warnings": []
+}
+```
+
+`warnings` 不是装饰：**没说清"少了什么 / 多了什么"的截图比没有截图更危险**。
+
+### 五条必须知道的限制（都是实测出来的）
+
+1. **`select` 拍不到 selected gizmo**。选中高亮是渲染结果，而一条指令只跑一帧；
+   指令内改的 `Selection` 还来不及画进窗口表面。别指望用 `select` 拍高亮圈，
+   它只适合"顺便把选中改成某个对象，方便后续指令接手"。
+2. **`crop=frame` 的上沿/左沿可能压着工具栏与 Overlay**。矩形取自相机 `pixelRect`，
+   而 SceneView 工具栏、左侧 Overlay、GameView 顶部工具条都是**画在视口之上的 GUI 叠加层**，
+   窗口截屏没法把它们剥掉（实测 Unity 2022.3 上沿会带进约 19px 工具栏）。
+3. **编辑模式下的 `capture.game` 拿不到 Screen Space-Overlay 的 UI**：GameView 不渲染，
+   只能退到相机渲染，而 Overlay Canvas 不走相机。返回的 `warnings` 会明写这一条。
+4. **编辑模式的 `capture.game` 还要求场景里有一个"会清屏的相机"**。
+   `clearFlags = Depth only` 的叠加相机单独 `Render()` 到一张空 RT，没有任何人清颜色缓冲，
+   输出就是黑的——**而且不报错**。2026-11-04 实测踩到：某场景两个相机都是 Depth only，
+   指令返回 1920×1080 纯黑图还报成功，这比失败更危险（调用方会以为"场景里就是黑的"）。
+   现在的做法是：候选相机按「会清屏的优先、同组内 depth 小的优先」排序，**逐个渲染并做全黑检测**
+   （`WindowCapture.IsNearlyBlack`，0.1% 亮像素阈值），见黑图换下一个；
+   全都黑就**明确失败**并列出每个候选的 `名称(clearFlags, depth)`，不再交出黑图。
+   纯 UI 场景（画面全在 Overlay Canvas 里）属于这一类，只能进 Play 再截。
+5. **窗口最小化时直接报错**，不产出黑图；`crop=frame` 的矩形算空时同样报错并给出窗口尺寸。
+6. **Windows 专用**：`PrintWindow` / `CreateDIBSection` 是 Win32 API。非 Windows 编辑器直接返回明确失败。
+
+### 裁剪矩形的算法（改之前先读）
+
+`EditorWindow.position` 是**逻辑像素（GUI 点）**，`GetWindowRect` 是**物理像素**，125% / 150% 缩放下不等：
+
+```csharp
+var scale = EditorGUIUtility.pixelsPerPoint;
+int left = Mathf.RoundToInt(view.position.x * scale) - windowRect.x;   // 先把 GUI 点换成物理像素，再减窗口原点
+```
+
+**别写成 `(view.position.x - windowRect.x) * scale`**：`windowRect.x` 是物理像素，先减再乘等于多减了
+`windowRect.x * (scale - 1)`，高 DPI 下整幅图会偏移。
+
+`crop=frame` 用相机 `pixelRect` 定位。它的参照系**跨版本不一致**（2022.3 实测是"相对视口"，
+2021.3 的记录像"屏幕坐标"），所以 `CaptureSupport.TryGetFrameRect` 会按
+**相对视口(物理) → 相对视口(GUI 点) → 屏幕坐标(GUI 点)** 顺序试三个候选，取第一个能完整落进视口矩形的；
+三个都不成立就退回整窗裁剪并给 warning，**不硬算一张偏移的图**。
+
+### 行序（最容易踩的一个坑）
+
+两个翻转是**两个独立问题**，混在一起调会反复颠倒：
+
+1. GDI 写进 DIB 的是**自下而上**（第 0 行 = 图像底行）。`WindowCapture.TryGrabWindow` 把它翻成
+   `Frame` 约定的**自上而下**，这样裁剪矩形里的 `y` 才能照"向下增长"直读。
+2. Unity 的 `Texture2D.LoadRawTextureData` 又是**自下而上**（第 0 行 = 图像底行）。
+   `WindowCapture.ToTexture` 送进去之前要再翻一次。
+
+少翻/多翻任意一次，PNG 就是整幅上下颠倒。PNG 是自上而下的，所以最终给到文件的一定是"第 0 行 = 顶部"。
+
+
+
+游戏运行时的 UI 根节点由工程自己的 `UIManager.EnsureUIRoot()` 确保（序列化引用缺失时自动查找/创建
+MainUIRoot 并赋值，见工程内 `MainUIRootBuilder`）：
 
 ```
 MainUIRoot                      DontDestroyOnLoad
@@ -657,8 +796,8 @@ public static class MainUIRootBuilder
 - 找不到（如导入到没有此类的工程）→ 使用本节的内置默认结构，行为与过去完全一致；
 - 发现范围只扫工程程序集（跳过 Unity/System 等前缀），结果按进程缓存。
 
-> 沿用这一约定的是 GameProject 的 `Demo.UI.MainUIRootBuilder`（`UIManager.EnsureUIRoot`
-> 运行期也调它）。island_back 等其它工程没有该类，走内置默认，互不影响。
+> 沿用这一约定的是有的工程自定义的 `MainUIRootBuilder`（`UIManager.EnsureUIRoot`
+> 运行期也调它）。没定义该接口的工程走内置默认，互不影响。
 
 ### 5.3.2 工程客制化内容（`Project/` 目录）：允许存在，但绝不进包
 
@@ -941,6 +1080,7 @@ HTTP 早已返回 `pending`，客户端不依赖编辑器同步响应）。
 | `StopOnError`（默认 true） | 失败后中止后续指令，剩余指令标记为"因前序指令失败而中止" |
 | `DryRun` | 只记录将要执行的指令，不产生副作用 |
 | 嵌套 | `batch` / `file.run` 最多 8 层，且 `file.run` 有循环引用检测 |
+| 未知参数 | **不改行为、只警告**：参数传了但指令没读、`usage` 里也没声明时，回一条"未知参数：root, depth（本指令可用：target, maxDepth）"。落在响应顶层 `warnings[]` 与 `records[].warnings`，结论行也会带"另有 N 条警告"。刻意不抛异常——多塞 `note` 这类上下文字段的老调用方不该因此失败 |
 | 报告 | `CommandRunReport` 提供 成功/失败/跳过 计数、逐条记录与耗时 |
 
 ---
@@ -1044,8 +1184,7 @@ Assets/Editor/ExternalCommandSystem/
       "command": "<Python 解释器绝对路径>",
       "args": [
         "<工程根>/.workbuddy/skills/unity-cmd/scripts/unity_mcp_server.py",
-        "--project-root",
-        "<工程根>"
+        "--tool-mode", "meta"
       ],
       "env": { "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1" }
     }
@@ -1053,18 +1192,52 @@ Assets/Editor/ExternalCommandSystem/
 }
 ```
 
+**注意这里没有 `--project-root`**，这是刻意的：桥能跨工程发现，一条 server 管本机所有工程。
+写入时还会顺手清掉上一代按工程派生的 `unity-cmd-<工程名>` 条目——它们各自拉起一个进程、
+各自把几十个工具铺进客户端上下文，留着只会让成本翻倍。
+
 Python 解释器按以下顺序选取：`EditorPrefs` 里的 `CivilRev.CommandSystem.McpPython` →
 WorkBuddy 托管的 `~/.workbuddy/binaries/python/versions/*/python.exe` → PATH 上的 `python`。
 想换解释器就设那个 `EditorPrefs` 键。
 
-### 9.4 工具集
+### 9.4 工具集与折叠模式
 
-固定 5 个元工具：`unity_status` / `unity_execute` / `unity_list_commands` /
-`unity_cancel` / `unity_compile_and_wait`。
+`--tool-mode` 三档（也可用环境变量 `UNITY_MCP_TOOL_MODE`，命令行优先）：
 
-此外，桥会在 `tools/list` 时拉取 `/v1/commands`，把**每条指令动态映射成一个工具**
-（`asset.compile` → `unity_asset_compile`，参数 schema 由指令的 `usage` 解析生成）。
+| 模式 | 工具数 | `tools/list` 体积 | 说明 |
+| --- | --- | --- | --- |
+| `meta`（默认） | 6 | ~3.3k 字符 ≈ 1.7k token | 元工具 only，靠 `unity_list_commands` 按需查 |
+| `group` | ~21 | ~11k 字符 | 按指令 ID 前缀折叠成 `unity_<域>`，`action` 用 enum |
+| `full` | 全部（70+） | ~30k 字符 | 一条指令一个工具，旧行为 |
+
+为什么默认改成 `meta`：75 条指令全量铺开是 29k 字符 ≈ 1 万 token，**每个工程各一条 server 时
+这份成本还要乘 N**。上一代 5 条 server 的实测常驻成本接近 5 万 token，且工具选择准确率随数量下降。
+折叠后固定成本降到 ~1.7k token，代价只是首次用某个域时多一次 `unity_list_commands`。
+
+元工具：`unity_status` / `unity_targets` / `unity_execute` / `unity_list_commands` /
+`unity_cancel` / `unity_compile_and_wait`。除 `unity_targets` 外都接受 `target` 参数
+（工程名 / 工程根 / `.http-info` 绝对路径），省略时自动选唯一活工程，多工程并存则要求指明。
+
+`full` 模式下 `tools/list` 时会拉 `/v1/commands`，把**每条指令动态映射成一个工具**
+（`asset.compile` → `unity_asset_compile`，schema 由 `usage` 解析生成）。
 所以**新增一条 `[Command]` 指令，MCP 就自动多一个工具，桥不用改**。
+
+### 9.4.1 跨工程发现（全局目标索引）
+
+`.http-info` 是按工作区分散存放的，桥只能看自己那个工作区——这正是"必须每工程配一条 server"
+的根因。现在 Unity 侧会把同一份信息额外写一份到固定目录：
+
+```
+Windows  %LOCALAPPDATA%\Aketsuki\UnityMcp\targets\<projectHash>.json
+macOS    ~/Library/Application Support/Aketsuki/UnityMcp/targets/
+Linux    $XDG_DATA_HOME/Aketsuki/UnityMcp/targets/（默认 ~/.local/share）
+```
+
+C# 在 `GlobalTargetRegistry.DirectoryPath`，Python 在 `send.py:global_targets_dir()`
+——**两端口径必须一致**，改一端要同时改另一端。
+
+条目内容与 `.http-info` 同构。桥启动时扫这个目录，`probe` 判活（连不上就当它不存在），
+所以残留条目不会造成误连。服务停止时 `DeleteInfoFile` 会撤掉自己的条目。
 
 ### 9.5 打包（维护者用）
 

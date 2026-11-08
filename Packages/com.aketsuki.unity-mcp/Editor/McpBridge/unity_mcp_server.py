@@ -15,11 +15,16 @@
 3. **为什么不做 Unity 原生 MCP HTTP 服务**：MCP HTTP 传输要求配置里写死一个 URL，
    而本系统的核心价值是"端口避让 + 多工程共存"，写死端口就退化成抢端口。
    stdio 桥天然绕开这个矛盾——发现逻辑在桥里跑，宿主只看到 stdio。
-4. **typed 工具由服务端单一来源生成**：从 `/v1/commands` 的 `usage` 解析出 JSON Schema，
-   不在这里手写 24 份描述，避免与 `CommandAttribute` 漂移。
+4. **一条 server 服务所有工程**：桥读全局目标索引（`%LOCALAPPDATA%/Aketsuki/UnityMcp/targets`）
+   发现本机全部 Unity，按 target 参数切换；不再需要"每个工程配一条 server"。
+5. **工具默认折叠**：`--tool-mode meta` 只注册 6 个元工具（~1.7k token），
+   指令靠 `unity_list_commands` 按需查；`group` 按域折叠，`full` 是旧的全量展开。
+   全量 75 条指令 = 29k 字符 ≈ 1 万 token，且每个工程一条 server 时还要乘 N。
 
 用法（由 MCP 客户端拉起，一般不手动执行）：
-    python unity_mcp_server.py
+    python unity_mcp_server.py                       # 自动发现唯一活工程
+    python unity_mcp_server.py --tool-mode group     # 按域折叠
+    python unity_mcp_server.py --default-target 工程名或路径
 
 手动自检：
     echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"probe","version":"1"}}}' | python unity_mcp_server.py
@@ -41,7 +46,7 @@ if _HERE not in sys.path:
 import send  # noqa: E402  （必须在 sys.path 调整之后）
 
 SERVER_NAME = "unity-cmd"
-SERVER_VERSION = "1.0.0"
+SERVER_VERSION = "2.0.0"
 
 # 支持的协议版本（新 → 旧）；协商时优先回客户端给的那个
 SUPPORTED_PROTOCOLS = ("2025-06-18", "2025-03-26", "2024-11-05")
@@ -59,12 +64,15 @@ TARGET_FAIL_TTL = 3.0
 COMMANDS_TTL = 60.0
 
 INSTRUCTIONS = (
-    "这是 Unity 编辑器（CivilizationRevival 工程）的指令通道。"
-    "调用任何工具前不需要手动启动服务，编辑器启动时会自动拉起 HTTP 桥；"
+    "这是 Unity 编辑器的指令通道：一条连接即可操作本机所有工程。"
+    "调用前不需要手动启动服务，编辑器启动时会自动拉起 HTTP 桥；"
     "若返回『连不上 Unity』，说明编辑器没开、正在重编译，或服务被手动关了。"
-    "unity_status 可查看编辑器状态与当前执行中的指令；"
-    "unity_execute 可一次下发多条指令（会按顺序串行执行，比逐条调用更可靠）；"
-    "unity_list_commands 可查看全部指令参数说明。"
+    "unity_targets 列出当前开着的工程；"
+    "多数工具都接受 target 参数（工程名 / 工程根 / .http-info 绝对路径）指定操作哪个工程，"
+    "只开着一个工程时可以省略，显式指定过一次后也会沿用。"
+    "unity_status 查看编辑器状态与执行中的指令；"
+    "unity_execute 一次下发多条指令（串行执行，比逐条调用可靠）；"
+    "unity_list_commands 查指令 ID（可加 prefix 收窄、加 verbose 看参数）。"
 )
 
 
@@ -102,9 +110,19 @@ class _DiscoverArgs(object):
 
 
 class Bridge(object):
-    """封装"找到编辑器 + 发请求 + 缓存"三件事。"""
+    """封装"找到编辑器 + 发请求 + 缓存"三件事。
 
-    def __init__(self):
+    两种选址方式，必须共存：
+
+    * **显式**（<paramref>project_root</paramref> / <paramref>info_path</paramref> 非空）：
+      每次失效都重读该工程自己的信息文件，全程不碰 <c>send</c> 的模块级全局状态。
+      正因为不碰全局，同一个进程里可以并存多个 Bridge，各自指向不同工程——
+      这是"一条 MCP server 服务所有工程"的地基。
+    * **传统**（两者都空）：走 <c>send</c> 的全局发现（主信息文件 + 端口扫描），
+      兼容没有全局索引的旧服务端，也兼容只配一个 <c>--project-root</c> 的老配置文件。
+    """
+
+    def __init__(self, project_root=None, info_path=None, label=None):
         self._lock = threading.Lock()
         self._target = None
         self._target_at = 0.0
@@ -113,7 +131,28 @@ class Bridge(object):
         self._commands = None
         self._commands_at = 0.0
 
+        self.project_root = os.path.normpath(os.path.abspath(project_root)) if project_root else None
+        self.info_path = os.path.abspath(info_path) if info_path else None
+        if label:
+            self.label = label
+        elif self.project_root:
+            self.label = os.path.basename(self.project_root.rstrip("\\/")) or self.project_root
+        elif self.info_path:
+            self.label = os.path.basename(self.info_path)
+        else:
+            self.label = "默认"
+
     # ---- 端点
+
+    def _unreachable(self, detail):
+        """把"连不上"翻译成可执行的修复建议——错误信息是模型唯一的线索来源。"""
+        lines = ["连不上 Unity（目标：%s）" % self.label]
+        if detail:
+            lines.append(str(detail))
+        lines.append(
+            "请确认：编辑器已打开、Tools / 指令系统 / HTTP 指令服务 处于开启状态、"
+            "且当前不在重编译过程中。若开着多个工程，用 target 参数指明具体工程。")
+        return "\n".join(lines)
 
     def _fast_discover(self):
         """快路径：直接读本工程的信息文件并做一次身份校验。
@@ -142,7 +181,7 @@ class Bridge(object):
             return None
         return target
 
-    def _discover(self):
+    def _discover_legacy(self):
         fast = self._fast_discover()
         if fast is not None:
             return fast
@@ -162,6 +201,21 @@ class Bridge(object):
             )
             raise BridgeError("\n".join(lines))
         return target
+
+    def _discover(self):
+        if self.info_path:
+            target, _, error = send.target_from_info_path(self.info_path, timeout=2.0)
+            if target is None:
+                raise BridgeError(self._unreachable(error))
+            return target
+
+        if self.project_root:
+            target, _, error = send.target_from_project_root(self.project_root, timeout=2.0)
+            if target is None:
+                raise BridgeError(self._unreachable(error))
+            return target
+
+        return self._discover_legacy()
 
     def target(self, refresh=False):
         """取一个可用的端点；带缓存，避免每次调用都全量探测。"""
@@ -281,7 +335,237 @@ def _describe_http_error(status, payload, raw):
     return "HTTP %s%s%s" % (status, ("：" + message) if message else "", ("\n" + hint) if hint else "")
 
 
-BRIDGE = Bridge()
+# ---------------------------------------------------------------- 目标选择（一条 server 服务所有工程）
+
+
+class SelectorError(Exception):
+    """选不中目标。这类错误不需要先连上 Unity 就能判定，直接回给模型看。"""
+
+
+def parse_selector(text):
+    """把用户给的 target 归一成 (kind, value)，kind ∈ {root, info, name, invalid}。
+
+    接受三种写法，都来自真实使用习惯：
+      * `<工程>/.workbuddy/UnityEditCommand/.http-info.<hash>` —— 令牌文件绝对路径（最直观）
+      * `<工程根>`（含 ProjectSettings/ProjectVersion.txt 的那层）
+      * 工程名（如 `MyUnityProject`），从全局索引里解析
+
+    **带路径分隔符但解析失败的，一律判 invalid，不再退化成"工程名"**：
+    否则传工程的上一层（多是工作区根，不是工程根）会得到"找不到叫这个名字的工程"，
+    与真实原因（那是目录不是工程）完全不搭，排查要多绕一圈。
+    """
+    raw = (text or "").strip().strip('"').strip("'")
+    if not raw:
+        return None, None
+
+    candidate = os.path.expanduser(raw)
+    is_path_like = os.path.isabs(candidate) or ("/" in raw) or ("\\" in raw)
+
+    if os.path.isfile(candidate):
+        base = os.path.basename(candidate)
+        if base.startswith(send.INFO_PREFIX):
+            return "info", os.path.abspath(candidate)
+        return "invalid", os.path.abspath(candidate)
+
+    if os.path.isdir(candidate):
+        if os.path.isfile(os.path.join(candidate, "ProjectSettings", "ProjectVersion.txt")):
+            return "root", os.path.abspath(candidate)
+        return "invalid", os.path.abspath(candidate)
+
+    if is_path_like:
+        return "invalid", candidate
+
+    return "name", raw
+
+
+class TargetPool(object):
+    """target 选择符 → Bridge 实例池。
+
+    同一个工程复用同一个 Bridge，端点缓存与指令缓存也就跟着复用；
+    不同工程各持一份，互不影响（Bridge 内部刻意不碰 send 的模块级全局状态）。
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._bridges = {}          # key -> Bridge
+        self._default = None        # 启动参数的默认目标（kind, value）
+        self._sticky = None         # 最近一次显式选中的目标（省略 target 时优先用它）
+        self._live = None           # 全局索引探活结果缓存
+        self._live_at = 0.0
+
+    # ---- 内部
+
+    def _get_root(self, root):
+        key = ("root", os.path.normcase(os.path.normpath(os.path.abspath(root))))
+        with self._lock:
+            bridge = self._bridges.get(key)
+            if bridge is None:
+                bridge = Bridge(project_root=root)
+                self._bridges[key] = bridge
+            return bridge
+
+    def _get_info(self, path):
+        key = ("info", os.path.normcase(os.path.abspath(path)))
+        with self._lock:
+            bridge = self._bridges.get(key)
+            if bridge is None:
+                bridge = Bridge(info_path=path)
+                self._bridges[key] = bridge
+            return bridge
+
+    def _get_legacy(self):
+        """没有任何显式目标时，退到传统单工程发现（兼容不写全局索引的旧服务端）。"""
+        key = ("legacy", "")
+        with self._lock:
+            bridge = self._bridges.get(key)
+            if bridge is None:
+                bridge = Bridge()
+                self._bridges[key] = bridge
+            return bridge
+
+    def _live_targets(self):
+        """全局索引里当前真的连得上的工程（带缓存，避免每次都等死条目超时）。"""
+        now = time.time()
+        with self._lock:
+            if self._live is not None and now - self._live_at < TARGET_TTL:
+                return self._live
+
+        items = send.list_global_targets()
+        # 最近更新的排前面：正常退出/启动的条目基本都是活的，第一个就命中
+        items.sort(key=lambda item: item.get("updatedUtc") or "", reverse=True)
+
+        live = []
+        for item in items:
+            identity = item.get(send.IDENTITY_KEY) or {}
+            path = (identity.get("projectPath") or "").strip()
+            if not path:
+                continue
+            try:
+                bridge = self._get_root(path)
+                bridge.target()
+            except (BridgeError, SelectorError) as error:
+                log("跳过不可用目标 %s：%s" % (path, str(error).splitlines()[0]))
+                continue
+            live.append((path, bridge))
+
+        with self._lock:
+            self._live = live
+            self._live_at = time.time()
+        return live
+
+    def _resolve_default(self):
+        # 1) 启动参数显式指定的默认目标
+        if self._default is not None:
+            kind, value = self._default
+            return self._dispatch(kind, value)
+
+        # 2) 粘性：上次显式选过的工程还活着就继续用它，免得每轮调用都要重述 target
+        with self._lock:
+            sticky = self._sticky
+        if sticky is not None:
+            try:
+                bridge = self._dispatch(sticky[0], sticky[1])
+                bridge.target()
+                return bridge
+            except (BridgeError, SelectorError):
+                with self._lock:
+                    if self._sticky == sticky:
+                        self._sticky = None
+
+        # 3) 全局索引：唯一活实例就自动用它
+        live = self._live_targets()
+        if len(live) == 1:
+            return live[0][1]
+        if len(live) > 1:
+            raise SelectorError(self._ambiguous_message(live))
+
+        # 4) 一个都没有：退回传统单工程发现
+        return self._get_legacy()
+
+    def _ambiguous_message(self, live):
+        lines = ["同时开着 %d 个 Unity 工程，无法确定要操作哪个。请用 target 参数指定其一："
+                 % len(live)]
+        for path, _ in live:
+            lines.append("  " + path)
+        lines.append("（也可以调用 unity_targets 查看完整列表；选中一次后后续会沿用。）")
+        return "\n".join(lines)
+
+    def _resolve_name(self, value):
+        """工程名 → 工程根。重名/查不到都直接报错，绝不猜一个。"""
+        root, hits = send.find_project_root_by_name(value)
+        if root is not None:
+            return root
+        if hits:
+            raise SelectorError(
+                "工程名「%s」匹配到多个工程，请改用完整路径：\n%s"
+                % (value, "\n".join("  " + h for h in hits)))
+        raise SelectorError(
+            "找不到工程名匹配「%s」的 Unity。可调用 unity_targets 查看当前开着的工程。"
+            % value)
+
+    def _dispatch(self, kind, value):
+        if kind == "root":
+            return self._get_root(value)
+        if kind == "info":
+            return self._get_info(value)
+        if kind == "legacy":
+            return self._get_legacy()
+        if kind == "invalid":
+            raise SelectorError(
+                "target 指向的路径不是可用的 Unity 工程：%s\n"
+                "  需要「含 ProjectSettings/ProjectVersion.txt 的工程根」或「.http-info 文件」，"
+                "不是工作区根、也不是 Assets 之类的子目录。" % value)
+
+        return self._get_root(self._resolve_name(value))
+
+    # ---- 对外
+
+    def set_default(self, kind, value):
+        self._default = (kind, value)
+
+    def sticky_value(self):
+        with self._lock:
+            return self._sticky
+
+    def get(self, selector=None):
+        """取目标 Bridge。显式 selector 会被记为粘性默认。
+
+        名字在这里就先解析成工程根再记下来：否则粘性里存的是"名字"，
+        下次省略 target 时要重新扫一遍全局索引，遇到重名还会突然失败——
+        用户明明刚选过，不该有任何歧义。
+        """
+        kind, value = parse_selector(selector)
+        if kind is None:
+            return self._resolve_default()
+
+        if kind == "name":
+            kind, value = "root", self._resolve_name(value)
+
+        bridge = self._dispatch(kind, value)
+        with self._lock:
+            self._sticky = (kind, value)
+        return bridge
+
+    def invalidate_all(self):
+        with self._lock:
+            bridges = list(self._bridges.values())
+            self._live = None
+            self._live_at = 0.0
+        for bridge in bridges:
+            bridge.invalidate()
+
+
+POOL = TargetPool()
+
+
+def bridge_for(arguments):
+    """从工具参数里取 target 并解析成 Bridge。
+
+    所有元工具都走这里：`target` 是桥自己的寻址参数，**绝不能**混进指令 params
+    一起发给 Unity（那边会当成未知参数报错）。
+    """
+    selector = arguments.get("target") if isinstance(arguments, dict) else None
+    return POOL.get(selector)
 
 
 # ---------------------------------------------------------------- usage → JSON Schema
@@ -424,6 +708,18 @@ def _json_text(value):
     return json.dumps(value, ensure_ascii=False, indent=2)
 
 
+# 所有元工具共用的寻址参数。描述要写清"三种写法 + 省略时的行为"，
+# 因为模型只能靠这段话决定该不该带 target。
+TARGET_PARAM = {
+    "type": "string",
+    "description": "操作哪个 Unity 工程，三种写法任选：工程名（如 MyUnityProject）、"
+                   "工程根绝对路径（含 ProjectSettings/ 的那层）、"
+                   "或 .workbuddy/UnityEditCommand/.http-info.<hash> 的绝对路径。"
+                   "省略时：只开着一个工程就自动用它；多个并存会报错并列出候选；"
+                   "显式指定过一次后，后续省略会沿用上一次的选择。",
+}
+
+
 def _summarize_execute(payload):
     """把执行报告压成"摘要 + 完整 JSON"两段，模型先读摘要就够判断成败。"""
     ok = payload.get("ok")
@@ -459,6 +755,16 @@ def _summarize_execute(payload):
                     item.get("index"), item.get("id"), item.get("status"), item.get("message", "")))
         lines.append("")
 
+    # IMPR-013：参数名写错不会让指令失败，但结论必须显眼——否则"全部成功"会被当成参数真的生效了
+    warnings = payload.get("warnings") or []
+    if warnings:
+        lines.append("")
+        lines.append("**警告（指令执行了，但这次调用有问题）：**")
+        for item in warnings:
+            lines.append("  ! #%s %s %s" % (
+                item.get("index"), item.get("id"), item.get("warning", "")))
+        lines.append("")
+
     for record in payload.get("records") or []:
         status = record.get("status")
         mark = "OK" if status == "Success" else ("SKIP" if status == "Skipped" else "FAIL")
@@ -471,10 +777,15 @@ def _summarize_execute(payload):
 
 
 def tool_status(arguments):
-    payload = BRIDGE.status()
+    try:
+        bridge = bridge_for(arguments)
+        payload = bridge.status()
+    except (BridgeError, SelectorError) as error:
+        return _text_result(str(error), is_error=True)
+
     lines = [
-        "端口 %s｜编译中 %s｜刷新中 %s｜队列 %s｜忙碌 %s"
-        % (payload.get("port"), payload.get("compiling"), payload.get("updating"),
+        "工程 %s｜端口 %s｜编译中 %s｜刷新中 %s｜队列 %s｜忙碌 %s"
+        % (bridge.label, payload.get("port"), payload.get("compiling"), payload.get("updating"),
            payload.get("queue"), payload.get("busy")),
     ]
     current = payload.get("currentCommandId") or ""
@@ -503,22 +814,180 @@ def tool_status(arguments):
     return _text_result("\n".join(lines))
 
 
-def tool_list_commands(arguments):
+def tool_targets(arguments):
+    """列出可操作的 Unity 工程。
+
+    索引为空是一个**有诊断价值**的状态：说明服务端还是旧版本（没有 GlobalTargetRegistry），
+    或者所有编辑器都关着。这两种情况的处理方式完全不同，所以输出要分开说。
+    """
+    want_probe = bool(arguments.get("probe"))
+    directory = send.global_targets_dir()
+    items = send.list_global_targets()
+    items.sort(key=lambda item: item.get("updatedUtc") or "", reverse=True)
+
+    lines = []
+    if not items:
+        lines.append("全局索引为空：%s" % directory)
+        lines.append("")
+        lines.append("两种可能：")
+        lines.append("  1) 当前工程装的是旧版服务端（没有 GlobalTargetRegistry），只能单工程模式运作；")
+        lines.append("  2) 所有 Unity 编辑器都没开。")
+        lines.append("")
+        lines.append("无论哪种，都可以直接调用 unity_status 试试默认目标通不通。")
+        return _text_result("\n".join(lines))
+
+    sticky = POOL.sticky_value()
+    sticky_path = None
+    if sticky and sticky[0] in ("root", "info"):
+        sticky_path = os.path.normcase(os.path.normpath(sticky[1]))
+
+    lines.append("发现 %d 个工程（索引目录 %s）：" % (len(items), directory))
+    for item in items:
+        identity = item.get(send.IDENTITY_KEY) or {}
+        path = (identity.get("projectPath") or "").strip()
+        name = identity.get("projectName") or (os.path.basename(path) if path else "?")
+        stamp = (item.get("updatedUtc") or "")[:19].replace("T", " ")
+
+        marks = []
+        if want_probe:
+            if not path:
+                marks.append("索引里没有工程路径")
+            else:
+                try:
+                    POOL._get_root(path).target()
+                    marks.append("可达")
+                except (BridgeError, SelectorError):
+                    marks.append("**不可达**")
+        if sticky_path and path and os.path.normcase(os.path.normpath(path)) == sticky_path:
+            marks.append("当前目标")
+
+        lines.append("  %-24s %s" % (name, path or "?"))
+        tail = "      端口 %s ｜ 更新 %s" % (item.get("url") or item.get("port") or "?", stamp)
+        if marks:
+            tail += " ｜ " + "，".join(marks)
+        lines.append(tail)
+
+    lines.append("")
+    lines.append("用法：给任意工具加 target 参数（工程名 / 工程根 / .http-info 绝对路径均可）。")
+    lines.append("省略 target 时：只有一个活工程就自动用它；多个并存会要求指明。")
+    return _text_result("\n".join(lines))
+
+
+def _catalog_directory(bridge):
+    """该 Bridge 对应的指令目录（清单与 .http-info 同目录）。"""
+    if bridge.info_path:
+        return os.path.dirname(bridge.info_path)
+    if bridge.project_root:
+        return os.path.join(send.workspace_root_for(bridge.project_root),
+                            ".workbuddy", "UnityEditCommand")
+    return send.COMMAND_DIR
+
+
+def commands_from_catalog(bridge):
+    """读服务端落盘的指令清单。
+
+    返回 (commands, path, generated_utc)，读不到返回 (None, None, None)。
+    清单是编辑器上次运行时写的**快照**：它让"编辑器没开"不再等于"不知道有哪些指令"，
+    但指令集会随包升级/模块增删变化，所以调用方必须把"这是快照"告诉模型。
+    """
+    directory = _catalog_directory(bridge)
     try:
-        commands = BRIDGE.commands(refresh=True)
-    except BridgeError as error:
+        names = [name for name in os.listdir(directory)
+                 if name.startswith("commands.") and name.endswith(".json")]
+    except OSError:
+        return None, None, None
+    if not names:
+        return None, None, None
+
+    want = os.path.normcase(bridge.project_root) if bridge.project_root else None
+    fallback = None
+    for name in names:
+        path = os.path.join(directory, name)
+        try:
+            with open(path, "r", encoding="utf-8-sig") as handle:
+                data = json.load(handle)
+        except Exception:
+            continue
+        if not isinstance(data, dict) or not isinstance(data.get("commands"), list):
+            continue
+        identity = data.get(send.IDENTITY_KEY) or {}
+        owner = identity.get("projectPath")
+        if want and owner and os.path.normcase(os.path.normpath(owner)) == want:
+            return data["commands"], path, data.get("generatedUtc")
+        if fallback is None:
+            fallback = (data["commands"], path, data.get("generatedUtc"))
+    return fallback or (None, None, None)
+
+
+def tool_list_commands(arguments):
+    """列指令。
+
+    默认只输出「id + 一句描述」，参数说明要显式要（verbose）。原因很实在：
+    75 条指令带上参数说明是 ~2 万字符，而模型多数时候只需要知道"有这么条指令"，
+    真正关心参数时它已经能按 prefix 把范围缩到十来条了。
+
+    取数顺序：进程内缓存 → 服务端 `/v1/commands` → 本地清单快照。
+    最后一档是"编辑器没开也能列"的兜底，输出里会明确标注它是快照。
+    """
+    try:
+        bridge = bridge_for(arguments)
+    except (BridgeError, SelectorError) as error:
         return _text_result(str(error), is_error=True)
 
-    lines = ["已注册 %d 条指令：" % len(commands)]
+    source_note = ""
+    try:
+        commands = bridge.commands(refresh=bool(arguments.get("refresh")))
+    except BridgeError as error:
+        cached, path, generated = commands_from_catalog(bridge)
+        if cached is None:
+            return _text_result(str(error), is_error=True)
+        commands = cached
+        source_note = ("※ 服务端连不上，以下来自本地清单快照（生成于 %s，%s）。\n"
+                       "  快照可能已过期：真正下发前以服务端校验为准，\n"
+                       "  Unity 编辑器启动后重试本工具即可拿到权威列表。\n"
+                       % (generated or "?", os.path.basename(path)))
+
+    prefix = (arguments.get("prefix") or "").strip().lower()
+    keyword = (arguments.get("keyword") or "").strip().lower()
+    verbose = bool(arguments.get("verbose"))
+
+    total = len(commands)
+    if prefix:
+        commands = [c for c in commands if (c.get("id") or "").lower().startswith(prefix)]
+    if keyword:
+        commands = [c for c in commands
+                    if keyword in (c.get("id") or "").lower()
+                    or keyword in (c.get("description") or "").lower()]
+
+    if not commands:
+        return _text_result(
+            "工程 %s 里没有匹配的指令（prefix=%r keyword=%r）。去掉过滤条件再试。"
+            % (bridge.label, prefix, keyword))
+
+    filters = []
+    if prefix:
+        filters.append("prefix=" + prefix)
+    if keyword:
+        filters.append("keyword=" + keyword)
+    head = "工程 %s：%d 条指令" % (bridge.label, total)
+    if filters:
+        head += "（过滤 %s → %d 条）" % (" ".join(filters), len(commands))
+
+    lines = ([source_note] if source_note else []) + [head + "："]
     width = max([len(item.get("id", "")) for item in commands] or [0])
     for item in commands:
         flag = "  [编辑器]" if item.get("editorOnly") else ""
-        lines.append("  %-*s  %s%s" % (width, item.get("id", "?"), item.get("description", ""), flag))
-        usage = item.get("usage") or ""
-        if usage:
-            lines.append("      %s参数: %s" % (" " * width, usage))
-    lines.append("")
-    lines.append(_json_text(commands))
+        lines.append("  %-*s  %s%s"
+                     % (width, item.get("id", "?"), item.get("description", ""), flag))
+        if verbose:
+            usage = item.get("usage") or ""
+            if usage:
+                lines.append("      %s参数: %s" % (" " * width, usage))
+
+    if not verbose:
+        lines.append("")
+        lines.append("需要参数说明时加 verbose=true（并建议先用 prefix 收窄范围）。")
+
     return _text_result("\n".join(lines))
 
 
@@ -544,12 +1013,13 @@ def tool_execute(arguments):
             is_error=True)
 
     try:
-        payload = BRIDGE.execute(
+        bridge = bridge_for(arguments)
+        payload = bridge.execute(
             body,
             dry_run=bool(arguments.get("dryRun")),
             request_id=arguments.get("requestId") or None,
         )
-    except BridgeError as error:
+    except (BridgeError, SelectorError) as error:
         return _text_result(str(error), is_error=True)
 
     return _text_result(_summarize_execute(payload), is_error=not payload.get("ok"))
@@ -557,13 +1027,14 @@ def tool_execute(arguments):
 
 def tool_cancel(arguments):
     try:
-        payload = BRIDGE.cancel()
-    except BridgeError as error:
+        bridge = bridge_for(arguments)
+        payload = bridge.cancel()
+    except (BridgeError, SelectorError) as error:
         return _text_result(str(error), is_error=True)
     return _text_result(payload.get("message") or "已发送取消请求")
 
 
-def _fetch_compile_report(limit=50):
+def _fetch_compile_report(bridge, limit=50):
     """读取服务端的编译报告；旧版服务端或正在编译时返回 None。"""
     body = json.dumps({
         "commands": [{
@@ -573,7 +1044,7 @@ def _fetch_compile_report(limit=50):
     }, ensure_ascii=False)
 
     try:
-        payload = BRIDGE.execute(body)
+        payload = bridge.execute(body)
     except BridgeError as error:
         # 编译期间服务端会回 503：这是辅助查询，不该因此中断主流程
         if "503" in str(error):
@@ -593,7 +1064,7 @@ def _fetch_compile_report(limit=50):
     return data if isinstance(data, dict) else None
 
 
-def _execute_with_busy_retry(body, max_wait=90.0):
+def _execute_with_busy_retry(body, bridge, max_wait=90.0):
     """发 execute；若撞上「正在编译/刷新」(503)，等一会儿再试。
 
     这个竞态很常见：AI 写完 .cs，Unity 的 Auto Refresh 已经开始编译，
@@ -602,16 +1073,16 @@ def _execute_with_busy_retry(body, max_wait=90.0):
     deadline = time.time() + max_wait
     while True:
         try:
-            return BRIDGE.execute(body)
+            return bridge.execute(body)
         except BridgeError as error:
             if "503" not in str(error) or time.time() > deadline:
                 raise
             time.sleep(0.6)
 
 
-def _is_busy():
+def _is_busy(bridge):
     try:
-        status = BRIDGE.status()
+        status = bridge.status()
     except BridgeError:
         return False
     return bool(status.get("compiling") or status.get("updating"))
@@ -649,8 +1120,13 @@ def tool_compile_and_wait(arguments):
 
     clean = bool(arguments.get("clean"))
 
+    try:
+        bridge = bridge_for(arguments)
+    except SelectorError as error:
+        return _text_result(str(error), is_error=True)
+
     before_finished = None
-    already_compiling = _is_busy()
+    already_compiling = _is_busy(bridge)
 
     if already_compiling:
         # 刚写完 .cs 时 Unity 的 Auto Refresh 可能已经在编了：
@@ -659,7 +1135,7 @@ def tool_compile_and_wait(arguments):
     else:
         # 编译前先记下"上一次编译完成的时刻"，用于判断这次是否真的触发了新编译
         try:
-            before = _fetch_compile_report(limit=0)
+            before = _fetch_compile_report(bridge, limit=0)
         except BridgeError as error:
             return _text_result(str(error), is_error=True)
         before_finished = (before or {}).get("finishedUtc")
@@ -667,7 +1143,7 @@ def tool_compile_and_wait(arguments):
         body = json.dumps({"commands": [{"id": "asset.compile", "params": {"clean": clean}}]},
                           ensure_ascii=False)
         try:
-            payload = _execute_with_busy_retry(body)
+            payload = _execute_with_busy_retry(body, bridge)
             if not payload.get("ok"):
                 return _text_result(_summarize_execute(payload), is_error=True)
         except BridgeError as error:
@@ -680,10 +1156,10 @@ def tool_compile_and_wait(arguments):
     seen_compiling = False
     while time.time() < deadline:
         try:
-            status = BRIDGE.status()
+            status = bridge.status()
         except BridgeError:
             # 域重载期间服务会短暂断开，这是正常现象，重建端点继续等
-            BRIDGE.invalidate()
+            bridge.invalidate()
             seen_compiling = True
             time.sleep(0.5)
             continue
@@ -702,7 +1178,7 @@ def tool_compile_and_wait(arguments):
 
     # 读回结果
     try:
-        report = _fetch_compile_report(limit=50)
+        report = _fetch_compile_report(bridge, limit=50)
     except BridgeError as error:
         return _text_result("编译结束，但读取编译报告失败：%s" % error, is_error=True)
 
@@ -741,13 +1217,45 @@ META_TOOLS = [
         "description": "查看 Unity 编辑器状态：是否在编译/刷新、队列长度、当前正在执行的指令与已耗时、"
                        "上次编译成功与否、以及连的是哪个工程。"
                        "排查『连不上』『指令没反应』『改完代码没生效』时先调它。",
-        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+        "inputSchema": {
+            "type": "object",
+            "properties": {"target": TARGET_PARAM},
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "unity_targets",
+        "description": "列出当前开着（以及最近开过）的 Unity 工程，含工程名、路径、端口与更新时间。"
+                       "同时开着多个工程、或想确认默认会操作哪个时先调它。"
+                       "加 probe=true 会逐个探活（慢一些，但能筛掉已经关掉的残留条目）。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "probe": {"type": "boolean", "description": "是否逐个探测可达性（默认 false，只读索引）。"},
+            },
+            "additionalProperties": False,
+        },
     },
     {
         "name": "unity_list_commands",
-        "description": "列出 Unity 侧全部已注册指令及其参数说明。"
-                       "不确定某条指令叫什么、要什么参数时先调它。",
-        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+        "description": "列出该 Unity 工程已注册的指令 ID 与一句话说明。"
+                       "不确定指令叫什么时先调它；加 prefix 可只列某个域（如 gameobject / prefab / scene）。"
+                       "需要参数说明时加 verbose=true。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target": TARGET_PARAM,
+                "prefix": {"type": "string",
+                           "description": "只列指令 ID 以此开头的（如 \"prefab.\" 或 \"gameobject\"）。"},
+                "keyword": {"type": "string",
+                            "description": "在指令 ID 与描述里按子串过滤（中文也可）。"},
+                "verbose": {"type": "boolean",
+                            "description": "是否附上每条指令的参数说明（默认 false，输出会长很多）。"},
+                "refresh": {"type": "boolean",
+                            "description": "强制向编辑器重新取（默认用 60 秒缓存；刚部署完新指令才需要）。"},
+            },
+            "additionalProperties": False,
+        },
     },
     {
         "name": "unity_execute",
@@ -757,6 +1265,7 @@ META_TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
+                "target": TARGET_PARAM,
                 "commands": {
                     "type": "array",
                     "description": "指令数组，每项形如 {\"id\": \"gameobject.create\", \"params\": {...}}。"
@@ -783,7 +1292,11 @@ META_TOOLS = [
         "name": "unity_cancel",
         "description": "请求取消当前批次。协作式：正在执行的单条指令无法被打断，"
                        "会在下一条指令前退出。真卡死只能重启编辑器。",
-        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+        "inputSchema": {
+            "type": "object",
+            "properties": {"target": TARGET_PARAM},
+            "additionalProperties": False,
+        },
     },
     {
         "name": "unity_compile_and_wait",
@@ -794,6 +1307,7 @@ META_TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
+                "target": TARGET_PARAM,
                 "clean": {"type": "boolean", "description": "是否清空编译缓存做干净重建（默认 false）。"},
                 "timeout": {"type": "integer", "description": "最长等待秒数（默认 180，上限 600）。"},
             },
@@ -804,6 +1318,7 @@ META_TOOLS = [
 
 META_HANDLERS = {
     "unity_status": tool_status,
+    "unity_targets": tool_targets,
     "unity_list_commands": tool_list_commands,
     "unity_execute": tool_execute,
     "unity_cancel": tool_cancel,
@@ -811,23 +1326,153 @@ META_HANDLERS = {
 }
 
 
-# ---------------------------------------------------------------- 工具注册表（含动态 typed）
+def _call_domain(tool_name, actions, arguments):
+    """group 模式的域工具调用：把 action 映射回具体指令，再走同一条 execute 通道。"""
+    action = (arguments.get("action") or "").strip()
+    command_id = actions.get(action)
+    if command_id is None:
+        return _text_result(
+            "未知 action：%r。%s 可用的 action：%s"
+            % (action, tool_name, "、".join(sorted(actions))), is_error=True)
+
+    params = arguments.get("params")
+    if params is None:
+        params = {}
+    if not isinstance(params, dict):
+        return _text_result("params 必须是 JSON 对象（该指令的参数），当前是 %s。"
+                            % type(params).__name__, is_error=True)
+
+    body = json.dumps({"commands": [{"id": command_id, "params": params}]}, ensure_ascii=False)
+    try:
+        bridge = bridge_for(arguments)
+        payload = bridge.execute(body, dry_run=bool(arguments.get("dryRun")))
+    except (BridgeError, SelectorError) as error:
+        return _text_result(str(error), is_error=True)
+
+    return _text_result(_summarize_execute(payload), is_error=not payload.get("ok"))
+
+
+# ---------------------------------------------------------------- 工具注册表（三种折叠模式）
+#
+# 为什么要折叠：75 条指令全量铺成 typed 工具是 29k 字符 ≈ 1 万 token，
+# 而且每个工程各一条 server 时这份成本要乘 N——客户端上下文直接被吃光，
+# 工具选择的准确率也随之下降。三档模式对应三种取舍：
+#
+#   meta  （默认）6 个元工具，~1.9k 字符。模型靠 unity_list_commands 按需查指令名。
+#   group         元工具 + 按域合并的 15 个工具，action 用 enum 列全。不用查也能选。
+#   full          老行为，一条指令一个工具。留给"就是要细粒度 schema"的场景。
+#
+# 默认 meta 是算过账的选择：省下 90%+ 的常驻成本，代价只是首次用某个域时多查一次。
+
+TOOL_MODES = ("meta", "group", "full")
+DEFAULT_TOOL_MODE = "meta"
+
+# 域工具合并阈值：指令数 >= 2 的域单独成工具，不足的并入 misc
+MIN_DOMAIN_SIZE = 2
+
+
+def build_domains(commands):
+    """把指令按 ID 前缀分域；只有一条指令的域合并进 misc。
+
+    返回 OrderedDict：domain -> [(action, command_id, command_dict)]，
+    misc 的 action 直接用完整指令 ID（因为它下面没有共同前缀）。
+    """
+    groups = {}
+    order = []
+    for command in commands:
+        command_id = (command.get("id") or "").strip()
+        if not command_id:
+            continue
+        head = command_id.split(".")[0]
+        if head not in groups:
+            groups[head] = []
+            order.append(head)
+        groups[head].append((command_id, command))
+
+    domains = {}
+    misc = []
+    for head in order:
+        items = groups[head]
+        if len(items) >= MIN_DOMAIN_SIZE:
+            actions = []
+            for command_id, command in items:
+                if command_id.startswith(head + "."):
+                    action = command_id[len(head) + 1:]
+                else:
+                    action = command_id
+                actions.append((action, command_id, command))
+            domains[head] = actions
+        else:
+            misc.extend(items)
+
+    if misc:
+        domains["misc"] = [(command_id, command_id, command) for command_id, command in misc]
+
+    return domains
+
+
+# 域工具用的短版寻址参数：15 个工具各带一份，长描述会白白吃掉几千字符。
+TARGET_PARAM_SHORT = {
+    "type": "string",
+    "description": "目标工程（工程名 / 工程根 / .http-info 路径），省略时用默认工程。",
+}
+
+
+def domain_to_tool(domain, actions):
+    """把一个域折叠成单个 MCP 工具：{action, params, target}。
+
+    描述里**不再重复列举** action：inputSchema 的 enum 已经把它们全列出来了，
+    再写一遍等于每个域工具白白多出一两百字符。
+    """
+    names = [action for action, _, _ in actions]
+    if domain == "misc":
+        description = ("零散指令（各自域里只有一条的那些）。action 直接写完整指令 ID，"
+                       "params 为该指令的参数对象。")
+    else:
+        description = ("%s 域指令。params 是对应指令的参数对象；"
+                       "要参数说明用 unity_list_commands(prefix=\"%s.\", verbose=true)。"
+                       % (domain, domain))
+
+    return {
+        "name": "unity_" + domain,
+        "description": description,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": names,
+                    "description": "要执行的指令。",
+                },
+                "params": {
+                    "type": "object",
+                    "description": "该 action 对应指令的参数；不需要参数时省略。",
+                },
+                "target": TARGET_PARAM_SHORT,
+            },
+            "required": ["action"],
+            "additionalProperties": False,
+        },
+    }
 
 
 class ToolRegistry(object):
-    """元工具恒在；typed 工具从服务端 usage 动态生成（单一来源，不手写漂移）。"""
+    """元工具恒在；typed / 域工具从服务端 usage 动态生成（单一来源，不手写漂移）。"""
 
-    def __init__(self):
+    def __init__(self, mode=DEFAULT_TOOL_MODE):
+        self.mode = mode if mode in TOOL_MODES else DEFAULT_TOOL_MODE
         self._lock = threading.Lock()
-        self._typed = []                 # [(tool_def, command_id)]
-        self._typed_map = {}             # tool_name -> command_id
+        self._typed = []                 # [(tool_def, command_id)]          full 模式
+        self._typed_map = {}             # tool_name -> command_id           full 模式
+        self._domains = []               # [tool_def]                        group 模式
+        self._domain_map = {}            # tool_name -> {action: command_id} group 模式
         self._built_at = 0.0
         self._build_error = None
 
     def _degrade(self, reason):
-        """把 typed 工具清空、只留元工具，并记下原因（下次刷新会自动重试）。
+        """把折叠工具清空、只留元工具，并记下原因（下次刷新会自动重试）。
 
-        **为什么要有这条退路（BUG-011）**：端点发现一失败，`BRIDGE.commands()` 就抛异常；
+        **为什么要有这条退路（BUG-011）**：端点发现一失败，`commands()` 就抛异常；
         早先只捕获 `BridgeError`，于是任何**非预期**异常（实测是 `_DiscoverArgs` 少一个字段的
         `AttributeError`）都会一路冒到 JSON-RPC 层，变成 `-32603 内部错误`，
         客户端侧表现是「这个工程的 MCP 整个没了」——连 `unity_status` 都调不到，
@@ -836,48 +1481,87 @@ class ToolRegistry(object):
         self._build_error = reason
         self._typed = []
         self._typed_map = {}
+        self._domains = []
+        self._domain_map = {}
         self._built_at = time.time()
+
+    def _fetch_commands(self):
+        bridge = POOL.get(None)
+        return bridge.commands()
 
     def _rebuild(self):
         try:
-            commands = BRIDGE.commands()
-        except BridgeError as error:
+            commands = self._fetch_commands()
+        except (BridgeError, SelectorError) as error:
             self._degrade(str(error))
             return
         except Exception as error:  # noqa: BLE001 —— 任何异常都不许让 tools/list 整体失败
-            self._degrade("生成 typed 工具时出现非预期异常：%r（本次只提供元工具）" % (error,))
+            self._degrade("生成工具时出现非预期异常：%r（本次只提供元工具）" % (error,))
             log("tools/list 退化为仅元工具：%r" % (error,))
             return
 
         typed = []
         mapping = {}
-        for command in commands:
-            command_id = (command.get("id") or "").strip()
-            if not command_id:
-                continue
-            tool, cid = command_to_tool(command)
-            name = tool["name"]
-            if name in META_HANDLERS or name in mapping:
-                # 命名撞车（极不可能）：跳过，通用 execute 仍可调用该指令
-                log("跳过重复的工具名：%s（指令 %s）" % (name, cid))
-                continue
-            typed.append((tool, cid))
-            mapping[name] = cid
+        domains = []
+        domain_map = {}
+
+        if self.mode == "full":
+            for command in commands:
+                command_id = (command.get("id") or "").strip()
+                if not command_id:
+                    continue
+                tool, cid = command_to_tool(command)
+                name = tool["name"]
+                if name in META_HANDLERS or name in mapping:
+                    # 命名撞车（极不可能）：跳过，通用 execute 仍可调用该指令
+                    log("跳过重复的工具名：%s（指令 %s）" % (name, cid))
+                    continue
+                typed.append((tool, cid))
+                mapping[name] = cid
+        elif self.mode == "group":
+            for domain, actions in build_domains(commands).items():
+                tool = domain_to_tool(domain, actions)
+                name = tool["name"]
+                if name in META_HANDLERS or name in domain_map:
+                    log("跳过重复的域工具名：%s" % name)
+                    continue
+                domains.append(tool)
+                domain_map[name] = {action: cid for action, cid, _ in actions}
 
         self._typed = typed
         self._typed_map = mapping
+        self._domains = domains
+        self._domain_map = domain_map
         self._build_error = None
         self._built_at = time.time()
 
     def tools(self, force=False):
+        # meta 模式不需要连 Unity、也不需要指令表：tools/list 必须永远秒回，
+        # 客户端刚启动时编辑器可能正关着，这时让列表失败是最糟的体验。
+        if self.mode == "meta":
+            return list(META_TOOLS)
+
         with self._lock:
             stale = force or (time.time() - self._built_at > COMMANDS_TTL)
             if stale:
                 self._rebuild()
-            # 元工具优先，typed 其次（让模型先看到通用入口）
-            return list(META_TOOLS) + [tool for tool, _ in self._typed]
+            # 元工具优先，折叠工具其次（让模型先看到通用入口）
+            return list(META_TOOLS) + [tool for tool, _ in self._typed] + list(self._domains)
+
+    def domain_actions(self, tool_name):
+        """group 模式：取某个域工具的 action → command_id 映射。"""
+        if self.mode != "group":
+            return None
+        with self._lock:
+            if tool_name in self._domain_map:
+                return self._domain_map[tool_name]
+        with self._lock:
+            self._rebuild()
+            return self._domain_map.get(tool_name)
 
     def command_id_for(self, tool_name):
+        if self.mode != "full":
+            return None
         with self._lock:
             if tool_name in self._typed_map:
                 return self._typed_map[tool_name]
@@ -948,14 +1632,19 @@ def handle_request(message):
                 log("工具 %s 异常：%r" % (name, error))
                 return _result(msg_id, _text_result("工具执行异常：%s" % error, is_error=True))
 
-        # 动态生成的 typed 工具
+        # group 模式的域工具：{action, params} → 一条具体指令
+        actions = REGISTRY.domain_actions(name)
+        if actions is not None:
+            return _result(msg_id, _call_domain(name, actions, arguments))
+
+        # 动态生成的 typed 工具（仅 full 模式）
         command_id = REGISTRY.command_id_for(name)
         if not command_id:
-            return _error(
-                msg_id,
-                -32602,
-                "未知工具：%s。可调用 unity_list_commands 查看可用指令。" % name,
-            )
+            hint = "可调用 unity_list_commands 查看可用指令。"
+            if REGISTRY.mode != "full":
+                hint += ("当前工具模式是 %s，单条指令请用 unity_execute 下发，"
+                         "或用对应的 unity_<域> 工具。" % REGISTRY.mode)
+            return _error(msg_id, -32602, "未知工具：%s。%s" % (name, hint))
 
         body = json.dumps({"commands": [{"id": command_id, "params": arguments}]},
                           ensure_ascii=False)
@@ -979,8 +1668,8 @@ def handle_notification(message):
         # 客户端取消某次请求：本桥的请求是同步执行的，直接作用于 Unity 侧最接近的语义
         log("收到取消通知：%s" % json.dumps(message.get("params") or {}, ensure_ascii=False))
         try:
-            BRIDGE.cancel()
-        except BridgeError as error:
+            POOL.get(None).cancel()
+        except (BridgeError, SelectorError) as error:
             log("转发取消失败：%s" % error)
     elif method:
         log("收到未处理的通知：%s" % method)
@@ -1044,53 +1733,93 @@ def _setup_io():
         pass
 
 
+_ARG_NAMES = {
+    "--project-root": "project_root",
+    "--info": "info_path",
+    "--tool-mode": "tool_mode",
+    "--default-target": "default_target",
+}
+
+
 def _parse_bridge_args(argv):
-    """极简参数解析：只认 --project-root / --info。
+    """极简参数解析：--project-root / --info / --tool-mode / --default-target。
 
     刻意不用 argparse：本文件由 MCP 客户端拉起，参数极少，且 argparse 的
     报错会写 stderr 后 exit(2)，在 stdio 场景下表现为"服务启动即退出"，排查困难。
     未知参数一律忽略，保证向前兼容（以后加参数不会让旧配置失效）。
     """
-    project_root = None
-    info_path = None
+    options = {name: None for name in _ARG_NAMES.values()}
     i = 0
     while i < len(argv):
         arg = argv[i]
-        if arg == "--project-root" and i + 1 < len(argv):
-            project_root = argv[i + 1]
-            i += 2
-            continue
-        if arg.startswith("--project-root="):
-            project_root = arg.split("=", 1)[1]
+        key = None
+        value = None
+        if "=" in arg:
+            head, tail = arg.split("=", 1)
+            if head in _ARG_NAMES:
+                key = _ARG_NAMES[head]
+                value = tail
+        elif arg in _ARG_NAMES and i + 1 < len(argv):
+            key = _ARG_NAMES[arg]
+            value = argv[i + 1]
+
+        if key is None:
             i += 1
             continue
-        if arg == "--info" and i + 1 < len(argv):
-            info_path = argv[i + 1]
-            i += 2
-            continue
-        if arg.startswith("--info="):
-            info_path = arg.split("=", 1)[1]
-            i += 1
-            continue
-        i += 1
-    return project_root, info_path
+
+        options[key] = value
+        i += 1 if "=" in arg else 2
+
+    return options
 
 
 def main():
+    global REGISTRY
+
     _setup_io()
 
-    # 包化安装后脚本可能不在 .workbuddy 下，此时必须靠 --project-root 显式指明工程根
-    project_root, info_path = _parse_bridge_args(sys.argv[1:])
-    if project_root:
-        send.configure(project_root)
-        log("使用显式工程根：%s" % os.path.abspath(project_root))
+    options = _parse_bridge_args(sys.argv[1:])
+    project_root = options["project_root"]
+    info_path = options["info_path"]
+    default_target = options["default_target"]
+
+    tool_mode = (options["tool_mode"] or os.environ.get("UNITY_MCP_TOOL_MODE")
+                 or DEFAULT_TOOL_MODE).strip().lower()
+    if tool_mode not in TOOL_MODES:
+        log("未知 tool-mode：%r，回退到 %s（可选：%s）"
+            % (tool_mode, DEFAULT_TOOL_MODE, " / ".join(TOOL_MODES)))
+        tool_mode = DEFAULT_TOOL_MODE
+
+    # send 的全局状态总要初始化一次：传统发现路径（没装全局索引的旧服务端）依赖它，
+    # 不初始化会让 COMMAND_DIR 停在 None，一调发现就 TypeError。
+    # 包化安装后脚本可能不在 .workbuddy 下，此时 --project-root 就是唯一线索。
+    send.configure(project_root)
     if info_path:
         send.DEFAULT_INFO = info_path
-        log("使用显式信息文件：%s" % info_path)
 
-    log("启动 %s v%s（Python %s）" % (SERVER_NAME, SERVER_VERSION,
-                                     sys.version.split()[0]))
+    # 默认目标优先级：--default-target > --project-root > --info
+    # （前两个都是显式声明，default-target 语义更专一，故排最前）
+    if default_target:
+        kind, value = parse_selector(default_target)
+        if kind:
+            POOL.set_default(kind, value)
+            log("默认目标：%s %s" % (kind, value))
+        else:
+            log("--default-target 为空，忽略")
+    elif project_root:
+        POOL.set_default("root", os.path.abspath(project_root))
+        log("默认目标工程根：%s" % os.path.abspath(project_root))
+    elif info_path:
+        POOL.set_default("info", os.path.abspath(info_path))
+        log("默认目标信息文件：%s" % os.path.abspath(info_path))
+
+    if tool_mode != REGISTRY.mode:
+        REGISTRY = ToolRegistry(tool_mode)
+
+    log("启动 %s v%s（Python %s，tool-mode=%s）"
+        % (SERVER_NAME, SERVER_VERSION, sys.version.split()[0], tool_mode))
     log("命令目录：%s" % send.COMMAND_DIR)
+    log("全局目标目录：%s" % send.global_targets_dir())
 
     write_lock = threading.Lock()
     # 每个请求独立线程：慢的 execute 不能挡住 cancel / status 这类需要"穿透"的调用

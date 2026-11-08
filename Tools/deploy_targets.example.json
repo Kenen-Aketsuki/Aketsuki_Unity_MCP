@@ -1,0 +1,20 @@
+{
+  "$comment": "Tools/deploy.py 的部署目标模板。用法：复制成 Tools/deploy_targets.json（同目录、不带 .example），再把 root 换成本机实际路径。deploy_targets.json 是本机配置，已被 .gitignore 排除，不要提交。root 是 Unity 工程根（含 Assets/ 与 ProjectSettings/ 的那一层），不是工作区根（.workbuddy 可能在其下一层）。targets[].excludeModules 可按模块排除某个工程（如某工程不装 adb）；排除后 deploy.py 会打印『跳过』而不是静默略过。",
+  "targets": [
+    {
+      "name": "my_unity_project",
+      "root": "<本机工程根绝对路径，例如 D:/Work/my_unity_project>",
+      "unity": "<打开该工程的 Unity 版本，例如 2022.3.62f2c1，可省略>",
+      "note": "工作区根与工程根同一层时写这句；否则改。skill_root 只在工作区根比工程根高一层时才需要单列"
+    },
+    {
+      "name": "project_only_mcp",
+      "root": "<另一个工程根绝对路径>",
+      "unity": "<Unity 版本，可省略>",
+      "excludeModules": [
+        "adb"
+      ],
+      "excludeNote": "这个工程只装指令系统，运行 --module adb 时会被跳过而不是装进去"
+    }
+  ]
+}

@@ -98,6 +98,12 @@ namespace Aketsuki.UnityMcp
         /// <summary>输出数据</summary>
         public object Data { get; set; }
 
+        /// <summary>
+        /// 这条指令执行时产生的警告（通常来自 <see cref="CommandResult.Warnings"/>）。
+        /// <para>不进 <see cref="Message"/>：警告不是结果的一部分，但必须在响应里看得见。</para>
+        /// </summary>
+        public List<string> Warnings { get; } = new List<string>();
+
         public override string ToString()
         {
             var indent = Depth > 0 ? new string(' ', Depth * 2) : string.Empty;
