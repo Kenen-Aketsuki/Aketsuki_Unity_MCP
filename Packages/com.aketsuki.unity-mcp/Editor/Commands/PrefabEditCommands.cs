@@ -53,29 +53,85 @@ namespace Aketsuki.UnityMcp.Editor
         }
 
         /// <summary>
-        /// 统一生命周期：LoadPrefabContents → edit 回调 → SaveAsPrefabAsset → UnloadPrefabContents。
-        /// 回调抛异常时同样 Unload，不落盘。
+        /// 统一生命周期：<b>批次内共用一份</b> Prefab 内容 → edit 回调 → 提交（SaveAsPrefabAsset）。
+        /// <para>
+        /// 与旧版的差别（BUG-018）：不再每条指令 Load/Unload 一次，而是走
+        /// <see cref="PrefabEditSession"/> —— 同一批次里对同一个 Prefab 连发多条写指令时，
+        /// 大家改的是同一份内存副本，每条成功后提交一次，批次结束才卸载。
+        /// 这样"后一条的 Load 读到前一条还没保存的状态"这类覆盖窗口就不存在了，
+        /// 60 条指令也从 60 次加载降到 1 次。
+        /// </para>
+        /// <para>
+        /// 回调抛异常 / 返回 Failed 时会话被丢弃（<b>不落盘</b>），磁盘上留下的是最后一条成功指令的状态。
+        /// </para>
         /// </summary>
         public static CommandResult EditPrefab(CommandContext context, string prefabPath,
             Func<GameObject, CommandResult> edit)
         {
-            var root = PrefabUtility.LoadPrefabContents(prefabPath);
-            if (root == null)
-            {
-                throw new CommandArgumentException(context.CommandId, "prefab",
-                    $"打不开 Prefab '{prefabPath}'（确认路径存在且有 .prefab 后缀）");
-            }
+            var root = PrefabEditSession.Acquire(context, prefabPath);
 
+            CommandResult result;
             try
             {
-                var result = edit(root);
-                PrefabUtility.SaveAsPrefabAsset(root, prefabPath);
+                result = edit(root);
+            }
+            catch
+            {
+                // 失败即回滚：连带这条指令改到一半的节点一起丢掉，别让它跟着下一次提交落盘
+                PrefabEditSession.Discard(prefabPath);
+                throw;
+            }
+
+            if (result != null && result.Status == CommandStatus.Failed)
+            {
+                PrefabEditSession.Discard(prefabPath);
                 return result;
             }
-            finally
+
+            PrefabEditSession.Commit(prefabPath, root);
+
+            // 场景 2（BUG-018 的另一条线）：这个 Prefab 正开在 Prefab 编辑模式里。
+            // Stage 里是它自己的一份副本，关掉 / 切走 Stage 时 Unity 的 Auto Save 会用那份旧副本
+            // 整体覆盖资产——刚写进去的新节点会静默消失。这里只能提醒，不能替用户关窗。
+            var stageWarning = DescribeOpenPrefabStage(prefabPath);
+            if (stageWarning != null && result != null)
             {
-                PrefabUtility.UnloadPrefabContents(root);
+                result.AddWarning(stageWarning);
             }
+
+            return result;
+        }
+
+        /// <summary>
+        /// 这个 Prefab 是否正被 PrefabStage 打开着（是则返回一句警告，否则 null）。
+        /// <para>
+        /// <c>PrefabStage.prefabAssetPath</c> 在 2022.2 之后改名 <c>assetPath</c>，本包要同时装在
+        /// 2021.3 与 2022.3，只能按版本宏取值（与 <c>CapturePrefabCommand</c> 同一套写法）。
+        /// </para>
+        /// </summary>
+        public static string DescribeOpenPrefabStage(string prefabPath)
+        {
+            var stage = UnityEditor.SceneManagement.PrefabStageUtility.GetCurrentPrefabStage();
+            if (stage == null)
+            {
+                return null;
+            }
+
+#if UNITY_2022_2_OR_NEWER
+            var openPath = stage.assetPath;
+#else
+            var openPath = stage.prefabAssetPath;
+#endif
+            if (string.IsNullOrEmpty(openPath)
+                || !string.Equals(openPath.Replace('\\', '/'), prefabPath.Replace('\\', '/'),
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return null;
+            }
+
+            return "该 Prefab 正开在 Prefab 编辑模式里：Stage 内是独立的一份副本，关闭 / 切走 Stage 时" +
+                   "Unity 的 Auto Save 可能用它覆盖刚写入的资产（本次的新节点会消失）。" +
+                   "落地前请先关掉 Prefab 模式，或重新打开该 Prefab 让 Stage 重载。";
         }
 
         /// <summary>
@@ -88,6 +144,63 @@ namespace Aketsuki.UnityMcp.Editor
                 : new GameObject(name);
             go.transform.SetParent(parent, false);
             return go;
+        }
+
+        /// <summary>
+        /// 开关 Prefab 资产内某个节点的激活态（IMPR-017）。
+        /// <para>
+        /// <c>prefab.setActive</c> 直接调用；<c>gameobject.setActive</c> 带 <c>prefab</c> 参数时也走这里
+        /// ——两条入口共用一套语义，避免"同一个动作在两个域里行为不一样"。
+        /// </para>
+        /// <para>
+        /// <c>includeChildren</c> 与 <c>gameobject.setActive</c> 一致：只切一级子节点（不是整棵子树）。
+        /// 这个口径容易误会，所以结果里回显 <c>changedCount</c>，让人一眼看出到底改了几个。
+        /// </para>
+        /// </summary>
+        public static CommandResult SetActiveOnAsset(CommandContext context, string prefabPath,
+            string targetSpec, bool active, bool includeChildren)
+        {
+            return EditPrefab(context, prefabPath, root =>
+            {
+                var node = SetComponentFieldCommand.ResolvePrefabTarget(root, targetSpec, context);
+
+                var changed = 0;
+                if (node.gameObject.activeSelf != active)
+                {
+                    node.gameObject.SetActive(active);
+                    changed++;
+                }
+
+                var children = includeChildren ? node.childCount : 0;
+                if (includeChildren)
+                {
+                    for (var i = 0; i < node.childCount; i++)
+                    {
+                        var child = node.GetChild(i);
+                        if (child.gameObject.activeSelf != active)
+                        {
+                            child.gameObject.SetActive(active);
+                            changed++;
+                        }
+                    }
+                }
+
+                var path = PrefabEditCommandsUtil.BuildNodePath(node);
+                var data = JsonValue.NewObject();
+                data.Set("prefab", JsonValue.Of(prefabPath));
+                data.Set("path", JsonValue.Of(path));
+                data.Set("active", JsonValue.Of(active));
+                data.Set("includeChildren", JsonValue.Of(includeChildren));
+                data.Set("childCount", JsonValue.Of(children));
+                data.Set("changedCount", JsonValue.Of(changed));
+                data.Set("activeSelf", JsonValue.Of(node.gameObject.activeSelf));
+
+                return CommandResult.Ok(
+                    $"已把 {prefabPath} 里的 {path} 设为 {(active ? "active" : "inactive")}"
+                    + (includeChildren ? $"（含 {children} 个直接子节点，实际改动 {changed} 个）" : string.Empty)
+                    + (changed == 0 ? "（本来就已是该状态，未改动）" : string.Empty),
+                    data);
+            });
         }
 
         /// <summary>
@@ -209,10 +322,15 @@ namespace Aketsuki.UnityMcp.Editor
 
         /// <summary>
         /// copyFrom 的源节点。跨 Prefab 时持有临时加载的 Prefab 内容，Dispose 时卸载（IMPR-003）。
+        /// <para>
+        /// 源 Prefab 在本批次里已有会话（<see cref="PrefabEditSession"/>）时**借用**那份内存态，
+        /// 此时不持有、Dispose 也不卸载它——卸载会把别的指令正在改的东西一起毁掉。
+        /// </para>
         /// </summary>
         public sealed class CopySource : IDisposable
         {
             private GameObject _loadedContents;
+            private readonly bool _crossPrefab;
 
             /// <summary>源节点（当前 Prefab 内，或临时加载的另一个 Prefab 内）</summary>
             public Transform Node { get; private set; }
@@ -225,15 +343,17 @@ namespace Aketsuki.UnityMcp.Editor
 
             public bool IsCrossPrefab
             {
-                get { return _loadedContents != null; }
+                get { return _crossPrefab; }
             }
 
-            internal CopySource(Transform node, string prefabPath, string spec, GameObject loadedContents)
+            internal CopySource(Transform node, string prefabPath, string spec, GameObject loadedContents,
+                bool crossPrefab = false)
             {
                 Node = node;
                 PrefabPath = prefabPath;
                 Spec = spec;
                 _loadedContents = loadedContents;
+                _crossPrefab = crossPrefab || loadedContents != null;
             }
 
             public void Dispose()
@@ -271,6 +391,21 @@ namespace Aketsuki.UnityMcp.Editor
                 assetPath = NormalizeAssetPath(context, assetPath);
                 if (!string.Equals(assetPath, currentPrefabPath, StringComparison.OrdinalIgnoreCase))
                 {
+                    // 本批次里已经打开过这个源 Prefab（前面几条指令写过它）时直接用内存态：
+                    // 磁盘上可能还没有最新改动，也不能为了读一次就把别人的会话卸掉
+                    GameObject openRoot;
+                    if (PrefabEditSession.TryGetOpen(assetPath, out openRoot))
+                    {
+                        var opened = SetComponentFieldCommand.FindInPrefab(openRoot, nodeSpec);
+                        if (opened == null)
+                        {
+                            throw new CommandArgumentException(context.CommandId, "copyFrom",
+                                $"源 Prefab '{assetPath}' 里找不到节点 '{nodeSpec}'（空串表示该 Prefab 根节点）");
+                        }
+
+                        return new CopySource(opened, assetPath, text, null, true);
+                    }
+
                     var contents = PrefabUtility.LoadPrefabContents(assetPath);
                     if (contents == null)
                     {
@@ -1032,6 +1167,37 @@ namespace Aketsuki.UnityMcp.Editor
     }
 
     /// <summary>
+    /// 开关 Prefab 资产内某个节点的激活态（IMPR-017）。
+    /// <para>
+    /// 为什么必须有这条：<c>gameobject.setActive</c> 只在<b>当前已加载场景</b>里找节点，
+    /// 传 <c>prefab</c> 参数会被静默忽略、然后按节点路径命中场景里的同名实例 ——
+    /// 实测踩过：想关 prefab 里的模板节点，结果改的是打开着的场景（<c>Global.unity</c>）里的实例，
+    /// 返回里还带着 <c>sceneName: Global</c>，不看就发现不了。
+    /// </para>
+    /// <para>参数：prefab（必填）、target（必填，节点路径，空串 = 根）、active（默认 true）、
+    /// includeChildren（默认 false，只切一级子节点，与 gameobject.setActive 同口径）</para>
+    /// </summary>
+    [Command("prefab.setActive", Description = "开关 Prefab 资产内节点的激活态（prefab 域的 gameobject.setActive）",
+        Usage = "prefab: string, target: string, active: bool, includeChildren: bool",
+        EditorOnly = true)]
+    public sealed class PrefabSetActiveCommand : ICommand
+    {
+        public CommandResult Execute(CommandContext context)
+        {
+#if UNITY_EDITOR
+            var prefabPath = PrefabEditUtil.NormalizePrefabPath(context, context.Args.RequireString("prefab"));
+            var targetSpec = context.Args.RequireString("target");
+            var active = context.Args.GetBool("active", true);
+            var includeChildren = context.Args.GetBool("includeChildren", false);
+
+            return PrefabEditUtil.SetActiveOnAsset(context, prefabPath, targetSpec, active, includeChildren);
+#else
+            throw new CommandException($"指令 '{context.CommandId}' 只能在编辑器内执行");
+#endif
+        }
+    }
+
+    /// <summary>
     /// 列出 Prefab 资产的节点树（路径 / 组件类型 / 激活状态）——B4。
     /// <para>
     /// 只读：LoadPrefabContents 后走与 <c>scene.hierarchy</c> 同一套节点序列化，不做保存。
@@ -1050,7 +1216,11 @@ namespace Aketsuki.UnityMcp.Editor
             var prefabPath = PrefabEditUtil.NormalizePrefabPath(context, context.Args.RequireString("prefab"));
             var maxDepth = context.Args.GetInt("maxDepth", -1);
 
-            var root = PrefabUtility.LoadPrefabContents(prefabPath);
+            // 批次内前面几条指令可能刚改过这个 Prefab：优先读会话里的内存态，
+            // 否则读到的是磁盘上"最后一次提交"的样子，会把已经改好的节点看成不存在
+            GameObject sessionRoot;
+            var borrowed = PrefabEditSession.TryGetOpen(prefabPath, out sessionRoot);
+            var root = borrowed ? sessionRoot : PrefabUtility.LoadPrefabContents(prefabPath);
             if (root == null)
             {
                 throw new CommandArgumentException(context.CommandId, "prefab",
@@ -1075,7 +1245,11 @@ namespace Aketsuki.UnityMcp.Editor
             }
             finally
             {
-                PrefabUtility.UnloadPrefabContents(root);
+                // 借来的会话副本由 PrefabEditSession 负责卸载
+                if (!borrowed)
+                {
+                    PrefabUtility.UnloadPrefabContents(root);
+                }
             }
 #else
             throw new CommandException($"指令 '{context.CommandId}' 只能在编辑器内执行");

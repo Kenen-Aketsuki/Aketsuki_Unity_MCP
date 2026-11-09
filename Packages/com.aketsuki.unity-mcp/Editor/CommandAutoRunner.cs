@@ -153,6 +153,16 @@ namespace Aketsuki.UnityMcp.Editor
             }
             finally
             {
+                // 与 HTTP 路径一致：Prefab 编辑会话在文件跑完后统一卸载（BUG-018）
+                try
+                {
+                    PrefabEditSession.Close();
+                }
+                catch (Exception e)
+                {
+                    CommandLog.Warning("批次结束关闭 Prefab 编辑会话失败：" + e.Message);
+                }
+
                 // 与 HTTP 路径一致：整个文件（含 batch）只刷新一次
                 if (runner.AssetsDirty)
                 {

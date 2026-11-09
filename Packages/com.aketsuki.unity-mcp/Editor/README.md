@@ -68,7 +68,9 @@ Assets/Script/ExternalCommandSystem/
     │   ├── AssetImportCommand.cs  asset.importSprite（项目外图片导入为 Sprite，支持九宫格）
     │   ├── DiagnosticsCommands.cs  asset.compileReport / console.read（编译反馈闭环）
     │   ├── PrefabCommands.cs     ui.savePrefab（场景节点保存为 Prefab）
-    │   ├── PrefabEditCommands.cs  prefab.addNode / duplicateNode / instantiatePrefab / replaceWithInstanceOf / renameNode / tree / removeNode / component.add（Prefab 资产编辑）
+    │   ├── PrefabEditCommands.cs  prefab.addNode / duplicateNode / instantiatePrefab / replaceWithInstanceOf / renameNode / setActive / tree / removeNode / component.add（Prefab 资产编辑）
+    │   ├── PrefabEditSession.cs  批次内的 Prefab 编辑会话（同 prefab 只 Load 一次、逐条提交、失败丢弃）
+    │   ├── LayoutDriveProbe.cs   布局驱动字段写入提示（m_SizeDelta / m_AnchoredPosition 会被布局重建打回）
     │   ├── EditorStateCommands.cs  editor.play / editor.stop / editor.state（Play 模式受控进出与状态查询）
     │   ├── ComponentGetCommands.cs  component.get / scene.inspect（字段读取，SerializedObject 全量快照）
 │   ├── CleanupCommand.cs        command.cleanup（清理指令目录下已执行/归档的文件）
@@ -376,7 +378,7 @@ CommandRegistry.Default.RegisterInstance("my.cmd", new MyCommand(dependency));
 | `file.read` | 读文本文件 | `path`(必填), `variable`, `log` |
 | `gameobject.create` | 创建 GameObject | `name`, `position`, `primitive`, `parent`, `tag` |
 | `gameobject.destroy` | 删除 GameObject | `target`(必填) |
-| `gameobject.setActive` | 设置节点激活状态（"老模块留着不删只隐藏"的常态需求）；`includeChildren` 可连同子树 | `target`(必填), `active`(默认 true), `includeChildren`(默认 false) |
+| `gameobject.setActive` | 设置节点激活状态（"老模块留着不删只隐藏"的常态需求）；`includeChildren` 可连同下一级子节点。带 `prefab` 参数时转投 Prefab 资产（与 `component.setField` 同口径）——**没这个参数时它会去找场景**，prefab 编辑模式下极易误改场景实例（IMPR-017），现在命中场景实例会给 warning | `target`(必填), `active`(默认 true), `includeChildren`(默认 false), `prefab`(可选) |
 | `gameobject.rename` | 重命名节点 | `target`(必填), `name`(必填) |
 | `gameobject.setProperty` | 设置 **GameObject 自身**属性（`layer` / `tag` / `isStatic`）——这些不在任何组件上，`component.setField` 够不着。`layer` 可传数字 0-31 或层名（`"UI"`），`includeChildren` 可连同整棵子树一起刷；返回受影响节点数 | `target`(必填), `layer`, `tag`, `isStatic`, `includeChildren`(默认 false) |
 | `gameobject.setParent` | 改变节点父级（RectTransform 用 `worldPositionStays` 语义） | `target`(必填), `parent`(必填), `keepWorldPosition`(默认 true) |
@@ -396,6 +398,7 @@ CommandRegistry.Default.RegisterInstance("my.cmd", new MyCommand(dependency));
 | `prefab.instantiatePrefab` | 在 Prefab 资产内嵌一个**真正的嵌套 Prefab 实例**（`PrefabUtility.InstantiatePrefab`，结果 `instanceStatus=Connected`，源资产改了它跟着变）。`prefab.duplicateNode` 复制嵌套实例得到的是**展开的普通节点树**（断链），要保连接就用这条 | `prefab`(必填), `asset`(必填), `parent`(默认根), `name`, `index` |
 | `prefab.replaceWithInstanceOf` | 把已有的**展开节点**（断链平铺树）一步替换成 Prefab 实例：原地实例化 → 复用旧节点布局 → 删旧节点，省掉「建新的 + 手工搬布局 + 删旧的」三步。`layout` 默认 `rect`（RectTransform 时搬 anchors/pivot/sizeDelta/anchoredPosition，另外 localPosition/Rotation/Scale 一律搬），`transform` 只搬 TRS，`none` 不动。`keepChildren:true` 把旧子节点搬到新实例下；旧节点已是 `Connected` 实例时默认拒绝（会丢 override），`force:true` 放行。不支持替换根节点 | `prefab`(必填), `target`(必填), `asset`(必填), `name`(默认沿用旧名), `layout`(默认 rect), `keepChildren`(默认 false), `force`(默认 false) |
 | `prefab.renameNode` | 给 Prefab 资产内的节点改名（`gameobject.rename` 只认当前场景，prefab 域要用这条）。返回 `oldName`/`oldPath`，并提示按名字 `Find` 的代码会失效 | `prefab`(必填), `target`(必填), `name`(必填) |
+| `prefab.setActive` | 开关 Prefab 资产内节点的激活态（`prefab` 域的 `gameobject.setActive`，IMPR-017）。`includeChildren` 与场景版同口径（只切一级子节点），结果回显 `changedCount` | `prefab`(必填), `target`(必填), `active`(默认 true), `includeChildren`(默认 false) |
 | `prefab.tree` | 列出 Prefab 资产的节点树（路径/组件/激活态，只读）。嵌套实例节点带 `isPrefabInstance`/`isPrefabInstanceRoot`/`instanceStatus`/`sourceAsset`，顶层另有 `instanceCount`（**只数实例根**） | `prefab`(必填), `maxDepth` |
 | `prefab.removeNode` | 删除 Prefab 资产内节点（含子树）；`keepChildren:true` 把子节点上移到父再删自身；禁止删根节点 | `prefab`(必填), `target`(必填), `keepChildren`(默认 false) |
 | `prefab.delete` | 删除 Prefab 资产文件（`AssetDatabase.DeleteAsset`，路径过白名单） | `prefab`(必填) |
@@ -432,7 +435,7 @@ CommandRegistry.Default.RegisterInstance("my.cmd", new MyCommand(dependency));
 | `consent.fetch` | 查询某次确认的结果；返回成功只代表"查到了记录"，结论看 `data.state` | `id`(必填，即上一条指令返回的 `consentId`) |
 | `capture.scene` | 截 SceneView 当前画面（**含 Gizmos / 网格 / Overlay**），存 PNG；结果里带 `path` + `mimeType`，MCP 桥会自动把图片内联回给 AI | `path`, `crop`, `view`, `select`, `scale` |
 | `capture.game` | 截 GameView：Play 中走窗口截屏（所见即所得）；**编辑模式下降级为相机渲染，不含 Overlay UI**（`warnings` 会明说） | `path`, `crop`, `select`, `scale` |
-| `capture.prefab` | 截 Prefab 编辑模式的画面（复用 SceneView 截屏，含 Gizmos）；未打开时 `openPrefab:true` 可自动进入编辑模式（**有副作用**） | `path`, `crop`, `view`, `select`, `scale`, `prefab`, `openPrefab` |
+| `capture.prefab` | 截 Prefab 编辑模式的画面（复用 SceneView 截屏，含 Gizmos）；未打开时 `openPrefab:true` 可自动进入编辑模式（**有副作用**）。`frame` 默认 **true**：截图前直接把 SceneView 相机框到 Prefab 内容（或 `frameTarget` 指的那个节点）上，不再依赖人手按 `F`——prefab 写操作会把 Stage 相机重置成空白 / 吊远，写后立刻截图必踩（IMPR-024） | `path`, `crop`, `view`, `select`, `scale`, `prefab`, `openPrefab`, `frame`(默认 true), `frameTarget` |
 
 > **指令文件生命周期（防膨胀）**：`command.cleanup` 用于事后批量清理已攒下的指令文件；控制台窗口另有「执行后删除文件」(`DeleteAfterRun`) 开关——开启后 `CommandAutoRunner` 在指令文件执行成功后**直接删除该文件**，且**优先于**「归档到 `_done`」。`DeleteAfterRun` 是全局偏好（默认关），与 `ArchiveAfterRun` 同处控制台；HTTP 下发路径本就不落盘文件，无需清理。
 >
@@ -1081,6 +1084,7 @@ HTTP 早已返回 `pending`，客户端不依赖编辑器同步响应）。
 | `DryRun` | 只记录将要执行的指令，不产生副作用 |
 | 嵌套 | `batch` / `file.run` 最多 8 层，且 `file.run` 有循环引用检测 |
 | 未知参数 | **不改行为、只警告**：参数传了但指令没读、`usage` 里也没声明时，回一条"未知参数：root, depth（本指令可用：target, maxDepth）"。落在响应顶层 `warnings[]` 与 `records[].warnings`，结论行也会带"另有 N 条警告"。刻意不抛异常——多塞 `note` 这类上下文字段的老调用方不该因此失败 |
+| Prefab 写指令的批次会话 | 同一批次（一次请求 / 一个 `batch`）内对**同一个 Prefab** 的多条写指令共用一份 `LoadPrefabContents` 结果：每条成功后提交一次（`SaveAsPrefabAsset`），批次结束统一 `Unload`（`PrefabEditSession`，BUG-018）。指令失败即丢弃会话——该条指令改到一半的节点不会跟着落盘，磁盘停在上一条成功指令的状态。收益：① 不会再出现"后一条重新从磁盘加载 → 整文件写回时把前一条的新节点写没"（返回全是 `ok:true`，只有 `git diff` 看得出来）；② 60 条同 prefab 指令从 60 次加载降到 1 次。`prefab.tree` / `component.get` 在批次内读的是会话里的内存态，不是磁盘旧值。若该 Prefab 正开在 Prefab 编辑模式，写指令结果里会带 warning（Stage 的 Auto Save 会用旧副本覆盖资产） |
 | 报告 | `CommandRunReport` 提供 成功/失败/跳过 计数、逐条记录与耗时 |
 
 ---

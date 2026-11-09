@@ -26,11 +26,17 @@ namespace Aketsuki.UnityMcp.Editor
     /// <para>
     /// 参数：prefab（Prefab 资产路径或名字；不给则要求当前已在 Prefab 编辑模式）、
     /// openPrefab（默认 false，true 时自动进入编辑模式）、
+    /// frame（默认 <b>true</b>，截图前把相机框到 Prefab 内容上）、
+    /// frameTarget（可选，只框某个节点；给了它 frame 自动为 true）、
     /// path / crop / view / select / scale 同 <c>capture.scene</c>。
+    /// <para>
+    /// IMPR-024：<c>frame</c> 默认开，是因为 prefab 写操作会把 Stage 相机重置成"空白蓝底 / 镜头拉很远"，
+    /// 而那正是"写完立刻截图复核"的必踩组合。想保留自己调好的取景就显式传 <c>frame: false</c>。
+    /// </para>
     /// </para>
     /// </summary>
     [Command("capture.prefab", Description = "截取 Prefab 编辑模式的画面（含 Gizmos）；未打开时可 openPrefab 进入后再截",
-        Usage = "path: string, crop: frame|window|full, view: int, select: any, scale: number, prefab: string, openPrefab: bool",
+        Usage = "path: string, crop: frame|window|full, view: int, select: any, scale: number, prefab: string, openPrefab: bool, frame: bool, frameTarget: string",
         EditorOnly = true)]
     public sealed class CapturePrefabCommand : ICommand
     {
@@ -44,11 +50,16 @@ namespace Aketsuki.UnityMcp.Editor
             var crop = CaptureSupport.ParseCrop(context);
             var requested = context.Args.GetString("prefab", null);
             var openPrefab = context.Args.GetBool("openPrefab", false);
+            var frameTarget = context.Args.GetString("frameTarget", null);
+            // frame 默认 true：见类注释（IMPR-024）。frameTarget 一旦给了就必须 framing
+            var frame = context.Args.GetBool("frame", true) || !string.IsNullOrEmpty(frameTarget);
 
             if (context.DryRun)
             {
                 return CommandResult.Skip(
-                    $"dry-run：将截取 Prefab（crop={crop}，openPrefab={openPrefab}）到 {CaptureSupport.DefaultOutputPath("prefab")}");
+                    $"dry-run：将截取 Prefab（crop={crop}，openPrefab={openPrefab}，frame={frame}"
+                    + (string.IsNullOrEmpty(frameTarget) ? string.Empty : $"，frameTarget={frameTarget}")
+                    + $"）到 {CaptureSupport.DefaultOutputPath("prefab")}");
             }
 
             var warnings = new List<string>();
@@ -121,6 +132,13 @@ namespace Aketsuki.UnityMcp.Editor
                 return CommandResult.Fail(viewError);
             }
 
+            // 先 framing 再截图：写操作刚把相机弄丢时，这一句才是"能拍到东西"的关键
+            JsonValue frameInfo = null;
+            if (frame && !CaptureSupport.TryFramePrefabStage(context, stage, view, frameTarget, warnings, out frameInfo))
+            {
+                frameInfo = null;
+            }
+
             string selectError;
             using (var scope = CaptureSupport.SelectionScope.Apply(context, out selectError))
             {
@@ -139,6 +157,15 @@ namespace Aketsuki.UnityMcp.Editor
                 if (result.Success && result.Data is JsonValue data)
                 {
                     data.Set("prefabPath", JsonValue.Of(GetStageAssetPath(stage) ?? string.Empty));
+                    if (frameInfo != null)
+                    {
+                        data.Set("frame", frameInfo);
+                    }
+                    else if (frame)
+                    {
+                        // frame 被请求了但没做成：明确说一句，别让人以为图是"框好的"
+                        data.Set("frame", JsonValue.Of(false));
+                    }
                 }
 
                 return result;

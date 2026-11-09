@@ -651,6 +651,17 @@ namespace Aketsuki.UnityMcp.Editor
                     // 一次请求消费掉取消标记，避免影响后续请求
                     _cancelRequested = false;
 
+                    // Prefab 编辑会话（BUG-018）：同一个请求里对同一个 prefab 只加载一次，
+                    // 收尾时统一卸载。必须在刷新 AssetDatabase 之前关，卸载本身不写盘。
+                    try
+                    {
+                        PrefabEditSession.Close();
+                    }
+                    catch (Exception e)
+                    {
+                        CommandLog.Warning("批次结束关闭 Prefab 编辑会话失败：" + e.Message);
+                    }
+
                     // Refresh 收敛：整个请求（含 batch 内所有指令）只刷新一次
                     if (runner != null && runner.AssetsDirty)
                     {

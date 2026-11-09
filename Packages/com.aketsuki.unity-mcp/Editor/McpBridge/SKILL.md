@@ -240,7 +240,18 @@ Unity 没启动时 `tools/list` 仍会在半秒内返回元工具，调用会得
 `save` / `create` / `delete`（※ 敏感操作，会弹确认框）
 
 **Prefab**（`prefab.*`）：`tree` 看结构、`addNode` / `removeNode` / `delete` / `renameNode` /
-`duplicateNode` 改结构、`instantiatePrefab` 放场景、`replaceWithInstanceOf` 换成实例
+`duplicateNode` 改结构、`setActive` 开关节点、`instantiatePrefab` 放场景、`replaceWithInstanceOf` 换成实例
+
+> **同一个 prefab 的多条写指令可以放进同一个批次。** 以前每条都独立 `Load → Save → Unload`，
+> 中间任何东西拿到旧副本（PrefabStage 的 Auto Save、异步导入）就会把新节点整体写没，
+> 而返回全是 `ok:true`（BUG-018）。现在整批共用一份内存副本、逐条提交、批次结束统一卸载；
+> `prefab.tree` / `component.get` 在批次里读到的也是内存态，不是磁盘旧值。**别再为了"稳"把它拆成 seq。**
+> 反过来说：某条指令失败时，它改到一半的节点不会落盘（磁盘停在上一条成功指令的状态）。
+
+> **改 prefab 里的激活态请用 `prefab.setActive`，别用 `gameobject.setActive`。**
+> 后者只在当前已加载场景里找节点；在 prefab 编辑模式下同一个层级路径会命中**场景里的实例**，
+> 改了场景文件还返回成功（IMPR-017）。现在给 `gameobject.setActive` 带 `prefab` 参数也能改资产，
+> 且命中场景实例时会明确 warning。
 
 **UI**（`ui.*`）：`canvas` / `uiRoot` / `node` / `button` / `image` / `text` / `tmpText` /
 `savePrefab`
@@ -396,7 +407,16 @@ send.py capture.game
 
 # 4) 截一个没打开的 Prefab（会切换编辑器当前编辑对象，有副作用）
 send.py capture.prefab prefab=Assets/GameRes/.../ShopView.prefab openPrefab=true
+
+# 5) 只框某个节点（frame 默认就是 true，这里点名要框谁）
+send.py capture.prefab prefab=Assets/GameRes/.../ShopView.prefab frameTarget=Canvas/Panel/List
 ```
+
+**`capture.prefab` 默认 `frame: true`（IMPR-024）。** prefab 写操作后 PrefabStage 的相机常被重置，
+下一张图就是空白蓝底或"镜头吊到很远"；`select` 又救不回来（它不触发 FrameSelected）。
+所以指令内部直接按包围盒设 `pivot` / `size`（UI 还会转正 + 正交），不依赖任何人按 `F`。
+想保留自己调好的取景就显式传 `frame: false`；返回的 `data.frame` 会写清框了谁、用的什么投影。
+（副作用：相机位置会被这次 framing 改掉。）
 
 MCP 通道下**不需要自己去读那个 PNG**：结果里带 `path` + `mimeType` 的，桥会自动把图片内联成
 image content（单张上限 2 MB，超了只回路径）。

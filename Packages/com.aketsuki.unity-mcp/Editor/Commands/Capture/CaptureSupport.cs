@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
 using UnityEditor;
+using UnityEditor.SceneManagement;
 using UnityEngine;
 
 namespace Aketsuki.UnityMcp.Editor
@@ -199,6 +200,156 @@ namespace Aketsuki.UnityMcp.Editor
                 Mathf.RoundToInt(pixelRect.width), Mathf.RoundToInt(pixelRect.height),
                 windowPixels.width, windowPixels.height);
             return false;
+        }
+
+        /// <summary>
+        /// 把 SceneView 的相机框到 Prefab 内容（或其中某个节点）上（IMPR-024）。
+        /// <para>
+        /// <b>为什么必须在指令内部做：</b>prefab 写操作（SaveAsPrefabAsset）之后 PrefabStage 的相机经常被重置，
+        /// 下一次截图就是空白蓝底或"镜头被拉到很远"；而 <c>select</c> 只改选中、不触发 FrameSelected，
+        /// 救不回来。以前只能靠人在 Window 里点 SceneView 再按 F，跨工程时还容易点错窗口。
+        /// 这里直接算包围盒并设 <c>pivot</c> / <c>size</c>，不依赖任何按键。
+        /// </para>
+        /// <para>
+        /// <b>正面视角的选择：</b>目标是 UI（RectTransform 树）时把视角转正（identity 旋转 + 正交），
+        /// 因为 UI 的"长得对不对"只在正面看才有意义；目标是模型时保留用户原有的旋转与投影方式，
+        /// 只把镜头挪过去——替人决定 3D 视角属于越界。
+        /// </para>
+        /// </summary>
+        public static bool TryFramePrefabStage(CommandContext context, PrefabStage stage, SceneView view,
+            string frameTarget, List<string> warnings, out JsonValue info)
+        {
+            info = null;
+            if (stage == null || view == null)
+            {
+                warnings.Add("没有可用的 PrefabStage / SceneView，已跳过自动 framing");
+                return false;
+            }
+
+            var root = stage.prefabContentsRoot;
+            if (root == null)
+            {
+                warnings.Add("PrefabStage 还没有内容（可能正在加载），已跳过自动 framing");
+                return false;
+            }
+
+            var target = string.IsNullOrEmpty(frameTarget)
+                ? root.transform
+                : SetComponentFieldCommand.FindInPrefab(root, frameTarget);
+            if (target == null)
+            {
+                warnings.Add($"frameTarget 在 Prefab 里找不到：'{frameTarget}'，已跳过自动 framing");
+                return false;
+            }
+
+            bool isUi;
+            Bounds bounds;
+            if (!TryComputeBounds(target, out bounds, out isUi))
+            {
+                warnings.Add($"'{target.name}' 下没有可量尺寸的 Renderer / RectTransform，已跳过自动 framing");
+                return false;
+            }
+
+            if (bounds.size.x <= 0.0001f && bounds.size.y <= 0.0001f && bounds.size.z <= 0.0001f)
+            {
+                warnings.Add($"'{target.name}' 的包围盒是 0，已跳过自动 framing（保留当前相机）");
+                return false;
+            }
+
+            if (isUi)
+            {
+                // UI 只在正面看才有意义；正交投影下 size 是"半高"，不是距离
+                view.rotation = Quaternion.identity;
+                view.orthographic = true;
+            }
+
+            view.pivot = bounds.center;
+            view.size = FrameSize(bounds, isUi, view);
+            view.Repaint();
+
+            info = JsonValue.NewObject();
+            info.Set("framed", JsonValue.Of(true));
+            info.Set("frameTarget", JsonValue.Of(PrefabEditCommandsUtil.BuildNodePath(target)));
+            info.Set("projection", JsonValue.Of(isUi ? "orthographic" : "keep"));
+            var center = JsonValue.NewArray();
+            center.Add(JsonValue.Of(bounds.center.x));
+            center.Add(JsonValue.Of(bounds.center.y));
+            center.Add(JsonValue.Of(bounds.center.z));
+            info.Set("center", center);
+            info.Set("size", JsonValue.Of(Mathf.Round(view.size * 100f) / 100f));
+            return true;
+        }
+
+        /// <summary>
+        /// 算节点及其子树的包围盒。UI（有 RectTransform）按世界四角算，模型按 Renderer bounds 算。
+        /// <para>UI 用四角而不是 <c>Renderer.bounds</c>：UI 常没有 Renderer（空容器），
+        /// 只有 RectTransform，量它会漏掉大半个面板。</para>
+        /// </summary>
+        private static bool TryComputeBounds(Transform target, out Bounds bounds, out bool isUi)
+        {
+            bounds = new Bounds(target.position, Vector3.zero);
+            isUi = false;
+
+            var rects = target.GetComponentsInChildren<RectTransform>(true);
+            if (rects.Length > 0)
+            {
+                isUi = true;
+                var corners = new Vector3[4];
+                var initialized = false;
+                foreach (var rect in rects)
+                {
+                    rect.GetWorldCorners(corners);
+                    for (var i = 0; i < corners.Length; i++)
+                    {
+                        if (initialized)
+                        {
+                            bounds.Encapsulate(corners[i]);
+                        }
+                        else
+                        {
+                            bounds = new Bounds(corners[i], Vector3.zero);
+                            initialized = true;
+                        }
+                    }
+                }
+
+                if (initialized)
+                {
+                    return true;
+                }
+            }
+
+            var renderers = target.GetComponentsInChildren<Renderer>(true);
+            if (renderers.Length == 0)
+            {
+                return false;
+            }
+
+            isUi = false;
+            bounds = renderers[0].bounds;
+            for (var i = 1; i < renderers.Length; i++)
+            {
+                bounds.Encapsulate(renderers[i].bounds);
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// 包围盒 → <c>SceneView.size</c>。正交时 size 是半高（按宽高比兜住宽度），
+        /// 透视时 size 是相机到 pivot 的距离，用外接球半径留边距。
+        /// </summary>
+        private static float FrameSize(Bounds bounds, bool isUi, SceneView view)
+        {
+            if (!isUi)
+            {
+                return Mathf.Max(bounds.extents.magnitude * 1.6f, 1f);
+            }
+
+            var halfHeight = bounds.extents.y;
+            var aspect = view.position.width / Mathf.Max(1f, view.position.height);
+            var halfWidth = bounds.extents.x / Mathf.Max(0.0001f, aspect);
+            return Mathf.Max(Mathf.Max(halfHeight, halfWidth) * 1.1f, 0.01f);
         }
 
         /// <summary>矩形是否完整落在视口内（容 2 像素的取整/边框误差）</summary>

@@ -429,6 +429,11 @@ namespace Aketsuki.UnityMcp.Editor
                 record.ResultOk = false;
                 record.ResultMessage = error.Message;
             }
+            finally
+            {
+                // 单条敏感指令也可能写了 Prefab：执行完就把编辑会话关掉（BUG-018）
+                PrefabEditSession.Close();
+            }
 
             SaveResults();
             return record;

@@ -67,7 +67,11 @@ namespace Aketsuki.UnityMcp.Editor
             private CommandResult ExecuteOnPrefab(CommandContext context, string prefabPath,
                 string targetSpec, string typeName, string fieldName)
             {
-                var root = PrefabUtility.LoadPrefabContents(prefabPath);
+                // 批次内前面几条指令可能刚改过这个 Prefab：优先读会话里的内存态（BUG-018），
+                // 否则会读到"最后一次提交"之前的磁盘样子，把已经改好的值看成没写进去
+                GameObject sessionRoot;
+                var borrowed = PrefabEditSession.TryGetOpen(prefabPath, out sessionRoot);
+                var root = borrowed ? sessionRoot : PrefabUtility.LoadPrefabContents(prefabPath);
                 if (root == null)
                 {
                     throw new CommandArgumentException(context.CommandId, "prefab",
@@ -84,12 +88,15 @@ namespace Aketsuki.UnityMcp.Editor
                     }
 
                     var component = SetComponentFieldCommand.RequireComponent(target, typeName, context);
-                    // 只读：不走 SaveAsPrefabAsset，读完即卸载
+                    // 只读：不提交；借来的副本也不能在这里卸载（还归会话所有）
                     return Read(context, component, fieldName, describeTarget: prefabPath);
                 }
                 finally
                 {
-                    PrefabUtility.UnloadPrefabContents(root);
+                    if (!borrowed)
+                    {
+                        PrefabUtility.UnloadPrefabContents(root);
+                    }
                 }
             }
 

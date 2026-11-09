@@ -91,15 +91,39 @@ namespace Aketsuki.UnityMcp
 
     /// <summary>
     /// 设置节点激活状态（"老模块留着不删只隐藏"的常态需求）
-    /// <para>参数：target（必填）、active（bool，默认 true）、includeChildren（是否连同子树，默认 false）</para>
+    /// <para>
+    /// 参数：target（必填）、active（bool，默认 true）、includeChildren（是否连同下一级子节点，默认 false）、
+    /// prefab（可选，给了就改这个 <b>Prefab 资产</b>而不是场景，语义同 <c>component.setField</c>）
+    /// </para>
+    /// <para>
+    /// IMPR-017：早期版本没有 <c>prefab</c> 参数，调用方按 <c>component.setField</c> 的习惯带上它时，
+    /// 参数被静默丢掉，节点路径再命中"打开着的场景里的同名实例"，就会**改错地方**
+    /// （prefab 里的模板节点没动，场景文件被改了）。现在两种写法都支持；另外在 Prefab 编辑模式下
+    /// 命中场景实例时会明确警告。
+    /// </para>
     /// </summary>
-    [Command("gameobject.setActive", Description = "设置节点激活状态（含可选子树）",
-        Usage = "target: string, active: bool, includeChildren: bool", EditorOnly = true)]
+    [Command("gameobject.setActive", Description = "设置节点激活状态（含可选子树；可指定 prefab 改资产）",
+        Usage = "target: string, active: bool, includeChildren: bool, prefab: string", EditorOnly = true)]
     public sealed class SetActiveGameObjectCommand : ICommand
     {
         public CommandResult Execute(CommandContext context)
         {
             var targetSpec = context.Args.RequireString("target");
+
+            // prefab 参数：转投 prefab 域，绝不"忽略参数继续改场景"（IMPR-017 的根因）
+            var prefabParam = context.Args.GetString("prefab", null);
+            if (!string.IsNullOrEmpty(prefabParam))
+            {
+#if UNITY_EDITOR
+                var activeOnAsset = context.Args.GetBool("active", true);
+                var withChildren = context.Args.GetBool("includeChildren", false);
+                var normalized = PrefabEditUtil.NormalizePrefabPath(context, prefabParam);
+                return PrefabEditUtil.SetActiveOnAsset(context, normalized, targetSpec, activeOnAsset, withChildren);
+#else
+                throw new CommandException($"指令 '{context.CommandId}' 只能在编辑器内执行");
+#endif
+            }
+
             if (!SceneQuery.TryResolveUnique(targetSpec, out var target, out var resolveError))
             {
                 throw new CommandArgumentException(context.CommandId, "target", resolveError);
@@ -130,10 +154,48 @@ namespace Aketsuki.UnityMcp
             data.Set("active", JsonValue.Of(active));
             data.Set("includeChildren", JsonValue.Of(includeChildren));
             SceneQueryCommandsUtil.AttachScene(data);
-            return CommandResult.Ok(
+
+            var result = CommandResult.Ok(
                 $"已将 {SceneQuery.BuildPath(target)} 的 activeSelf 设为 {active}" + (includeChildren ? "（含子树）" : string.Empty),
                 data);
+
+#if UNITY_EDITOR
+            // 在 Prefab 编辑模式里改到了别的场景的对象：几乎一定是"想改 prefab 资产、结果改了场景实例"
+            var stageWarning = DescribeSceneHitWhileEditingPrefab(go, prefabParam);
+            if (stageWarning != null)
+            {
+                result.AddWarning(stageWarning);
+            }
+#endif
+            return result;
         }
+
+#if UNITY_EDITOR
+        /// <summary>
+        /// 当前正开着 PrefabStage，而命中的对象不在那个 Stage 里 → 返回一句警告。
+        /// <para>
+        /// 这个组合本身就是 IMPR-017 实际踩到的场景：Stage 打开时 <c>SceneQuery</c> 只搜已加载的场景
+        /// （Stage 是预览场景，搜不到），同一个层级路径就会命中场景里的实例，改动落进场景文件。
+        /// </para>
+        /// </summary>
+        private static string DescribeSceneHitWhileEditingPrefab(GameObject hit, string prefabParam)
+        {
+            var stage = UnityEditor.SceneManagement.PrefabStageUtility.GetCurrentPrefabStage();
+            if (stage == null || hit == null)
+            {
+                return null;
+            }
+
+            if (hit.scene == stage.scene)
+            {
+                return null;
+            }
+
+            return $"当前处于 Prefab 编辑模式（{stage.scene.name}），但命中的 {hit.name} 在场景 " +
+                   $"'{hit.scene.name}' 里——本次改的是那个场景实例，不是 Prefab 资产。" +
+                   "要改 Prefab 资产请用 prefab.setActive，或给本指令加 prefab 参数。";
+        }
+#endif
     }
 
     /// <summary>
