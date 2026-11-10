@@ -286,10 +286,15 @@ namespace Aketsuki.UnityMcp.Editor
                     }
                 }
 
-                // 错误排在前面，同类按文件/行排序，AI 读起来更有条理
+                // 错误排在前面，同类按文件/行排序，AI 读起来更有条理。
+                // 比较器参数顺序必须是 (a, b)：List.Sort 要求"a 该在 b 前面时返回负数"。
+                // 曾经写成 Compare(b.Type, a.Type)，方向整个反了——序变成 Warning → Information → Error，
+                // 于是 asset.compileReport 的 limit 截断、以及下面"失败时打印前 5 条"拿到的全是警告，
+                // 真正的报错被挤到列表末尾（BUG-019，2026-11-10 实测确认）。
                 messages.Sort((a, b) =>
                 {
-                    var byType = string.Compare(b.Type, a.Type, StringComparison.Ordinal); // Error < Warning
+                    // Ordinal 升序即 Error < Information < Warning，正好是"错误优先"
+                    var byType = string.Compare(a.Type, b.Type, StringComparison.Ordinal);
                     if (byType != 0)
                     {
                         return byType;

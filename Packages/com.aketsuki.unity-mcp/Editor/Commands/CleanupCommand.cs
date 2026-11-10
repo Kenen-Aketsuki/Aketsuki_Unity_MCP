@@ -74,13 +74,18 @@ namespace Aketsuki.UnityMcp.Editor
                 : null;
 
             DateTime? screenshotCutoff;
+            // 实际生效的截图豁免分钟数：报告里要用它，不能写死 60——显式传 olderThanMinutes 时
+            // 用户看到"跳过近 60 分钟内的截图"会以为自己的参数没生效。
+            var screenshotExemptMinutes = 0;
             if (!olderThanGiven)
             {
-                screenshotCutoff = DateTime.UtcNow - TimeSpan.FromMinutes(DefaultScreenshotExemptMinutes);
+                screenshotExemptMinutes = DefaultScreenshotExemptMinutes;
+                screenshotCutoff = DateTime.UtcNow - TimeSpan.FromMinutes(screenshotExemptMinutes);
             }
             else
             {
-                screenshotCutoff = olderThanMinutes > 0 ? jsonCutoff : null;
+                screenshotExemptMinutes = olderThanMinutes > 0 ? olderThanMinutes : 0;
+                screenshotCutoff = screenshotExemptMinutes > 0 ? jsonCutoff : null;
             }
 
             var doneDirectory = Path.Combine(directory, "_done");
@@ -155,7 +160,7 @@ namespace Aketsuki.UnityMcp.Editor
 
             var detail = DescribeKinds(deletedByKind)
                          + (skippedRecentShots > 0
-                             ? $"，跳过近 {DefaultScreenshotExemptMinutes} 分钟内的截图 {skippedRecentShots} 张"
+                             ? $"，跳过近 {screenshotExemptMinutes} 分钟内的截图 {skippedRecentShots} 张"
                              : string.Empty);
 
             if (dryRun)

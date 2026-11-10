@@ -59,6 +59,29 @@ IDENTITY_KEY = "identity"
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
+def _setup_stdout_encoding():
+    """把 stdout / stderr 固定成 UTF-8。
+
+    报告里有 `⚠`（U+26A0）、`✗`（U+2717）这类符号，GBK 编码表里没有它们。
+    Windows 上 stdout 被重定向到管道时 Python 用 locale 编码（常见 cp936），
+    于是"正要提示你选址有问题"的那几行会先抛 UnicodeEncodeError：
+    用户（或调用它的 AI）看到的不是警告，而是一整段 traceback + 非零退出码。
+    MCP 服务端早就这么做了（`_setup_io`），这里是同一个问题的另一条入口。
+
+    编码本身已经是 UTF-8 时什么都不做：reconfigure 会重置缓冲策略，没必要动。
+    """
+    for stream, kwargs in ((sys.stdout, {"newline": "\n"}), (sys.stderr, {})):
+        try:
+            if (stream.encoding or "").lower().replace("-", "") == "utf8":
+                continue
+            stream.reconfigure(encoding="utf-8", errors="replace", **kwargs)
+        except Exception:  # noqa: BLE001 —— 强化失败不该让客户端起不来
+            pass
+
+
+_setup_stdout_encoding()
+
+
 def find_workspace_root(start):
     """从脚本位置向上查找包含 .workbuddy 的目录，其上层即为工作区根。"""
     cur = os.path.abspath(start)

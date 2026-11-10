@@ -93,9 +93,20 @@ namespace Aketsuki.UnityMcp.Editor
         }
 
         /// <summary>提交点：把内存副本整体写回资产（每条指令成功后调用一次）。</summary>
+        /// <exception cref="CommandException">写盘失败（<c>SaveAsPrefabAsset</c> 返回 null）时抛出</exception>
         public static void Commit(string prefabPath, GameObject root)
         {
-            PrefabUtility.SaveAsPrefabAsset(root, prefabPath);
+            // SaveAsPrefabAsset 失败时**返回 null 而不抛异常**（Unity 文档原话："or null if the save failed"）。
+            // 不校验的话"改完了但没落盘"会一路报 ok:true —— 那正是 BUG-018 要消灭的静默丢改动，
+            // 只不过这次丢在最后一步。所以把它变成明确的失败，并把这份写不进去的内存副本一起丢弃，
+            // 免得下一条指令接着在这份脏副本上改。
+            var saved = PrefabUtility.SaveAsPrefabAsset(root, prefabPath);
+            if (saved == null)
+            {
+                Discard(prefabPath);
+                throw new CommandException(
+                    $"写回 Prefab 失败：{prefabPath}（SaveAsPrefabAsset 返回 null，本次改动未落盘）");
+            }
 
             Entry entry;
             if (Open.TryGetValue(prefabPath, out entry))
