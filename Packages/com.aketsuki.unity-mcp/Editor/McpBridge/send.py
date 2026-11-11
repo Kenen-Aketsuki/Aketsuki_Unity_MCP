@@ -53,6 +53,13 @@ MAX_BUSY_WAIT = 600
 # 探测候选端点用的短超时：连不上要快速放弃，别让一次 status 拖住整条命令
 PROBE_TIMEOUT = 3.0
 
+# compile 的等待节奏。asset.compile 是异步的：指令在编译真正开始前就返回了
+# （见 EditorCommands.AssetCompileCommand 的注释），所以刚下发时的"编辑器空闲"完全正常，
+# 不能据此判定编译结束 —— 必须等出"编译真的发生过"的证据（见 cmd_compile）。
+COMPILE_POLL_SECONDS = 0.4
+COMPILE_IDLE_HITS = 2
+COMPILE_START_GRACE = 5.0
+
 # /v1/status 响应里的身份块字段名（与服务端 HttpIdentityFields.Key 一致）
 IDENTITY_KEY = "identity"
 
@@ -975,6 +982,21 @@ def print_report(payload, as_json=False):
         print("  修完再重试；自愈流程见 SKILL.md")
         print()
 
+    # 顶层 warnings 是 IMPR-013 的「未知参数」提示，服务端摘要里写着"见 warnings"；
+    # 人类可读输出不打印它，这句提示就成了空头支票（IMPR-027）。位置和 failures 一样放前面，
+    # 免得被长长的 records 淹掉。
+    warnings = payload.get("warnings") or []
+    if warnings:
+        print()
+        print("⚠ %d 条警告（通常是参数名写错或不被支持，指令可能没按预期执行）：" % len(warnings))
+        for item in warnings:
+            print("  #%s %-24s %s" % (
+                item.get("index", "?"),
+                item.get("id", "?"),
+                item.get("warning", ""),
+            ))
+        print()
+
     records = payload.get("records") or []
     for record in records:
         status = record.get("status", "?")
@@ -1408,11 +1430,15 @@ def cmd_cancel(client, args):
     return 0
 
 
-def fetch_compile_report(client, limit=50):
-    """读取服务端的编译报告；旧版服务端没有该指令时返回 None。"""
+def fetch_compile_report(client, limit=50, with_messages=True):
+    """读取服务端的编译报告；旧版服务端没有该指令时返回 None。
+
+    with_messages=False 时只要元信息（finishedUtc / ok / 计数）。
+    "这次编译到底有没有发生"的探测只需要 finishedUtc，别把整份消息列表拖回来。
+    """
     body = json.dumps({"commands": [{
         "id": "asset.compileReport",
-        "params": {"includeMessages": True, "limit": limit},
+        "params": {"includeMessages": bool(with_messages), "limit": limit},
     }]}, ensure_ascii=False)
 
     status, payload, raw = client.call("v1/execute", method="POST", body=body)
@@ -1456,7 +1482,7 @@ def cmd_compile(client, args):
     wait = max(1, args.wait)
     if not args.json:
         print_target_notices()
-    before = fetch_compile_report(client, limit=0)
+    before = fetch_compile_report(client, limit=0, with_messages=False)
     before_finished = (before or {}).get("finishedUtc")
 
     body = json.dumps({"commands": [{"id": "asset.compile", "params": {"clean": args.clean}}]},
@@ -1470,20 +1496,38 @@ def cmd_compile(client, args):
         return 3
 
     sys.stderr.write("已请求编译，等待完成……\n")
-    deadline = time.time() + wait
+    requested_at = time.time()
+    deadline = requested_at + wait
+    # 判据必须是"看见了编译"，不能只看"编辑器空闲"：asset.compile 在编译开始前就返回，
+    # 紧接着的零点几秒里 status 依旧空闲，只数两次空闲就收工会把"还没开始编译"误读成
+    # "Unity 认为无需重编"（BUG-022，退出码 0 还会让调用方当成编译成功）。
+    # 可接受的证据有三种：status 报 compiling/updating、中途连不上（域重载）、
+    # 报告里的 finishedUtc 换了新的（编译快到两次轮询之间就跑完了）。
     seen_compiling = False
     idle_hits = 0
     while time.time() < deadline:
         st, snapshot, _ = client.call("v1/status")
-        if st == 200 and isinstance(snapshot, dict):
+        if st is None:
+            # 域重载会把服务摘掉几秒，这本身就是"刚编译过"的旁证
+            seen_compiling = True
+            idle_hits = 0
+        elif st == 200 and isinstance(snapshot, dict):
             if snapshot.get("compiling") or snapshot.get("updating"):
                 seen_compiling = True
                 idle_hits = 0
             else:
                 idle_hits += 1
-                if idle_hits >= 2:
-                    break
-        time.sleep(0.4)
+                if idle_hits >= COMPILE_IDLE_HITS:
+                    if seen_compiling:
+                        break
+                    probe = fetch_compile_report(client, limit=0, with_messages=False)
+                    if isinstance(probe, dict) and probe.get("finishedUtc") != before_finished:
+                        break  # 编译已经跑完，报告换新了
+                    if time.time() - requested_at >= COMPILE_START_GRACE:
+                        break  # 宽限期也过了，还没有任何证据：这次确实没触发编译
+                    # 宽限期内还没等到编译开始 —— 多半只是 Unity 晚一帧才响应，重新计数继续等
+                    idle_hits = 0
+        time.sleep(COMPILE_POLL_SECONDS)
     else:
         sys.stderr.write("等待编译超时（%d 秒）。编译可能仍在进行，可用 status 复查。\n" % wait)
         return 4
@@ -1499,7 +1543,8 @@ def cmd_compile(client, args):
 
     if before_finished and report.get("finishedUtc") == before_finished:
         # 已知边缘情形：源码 mtime 变了但 dll 内容哈希未变（或 ADB 缓存），
-        # Unity 认为无需重编。此时明确提示 --force，并尽量给出 mtime 佐证。
+        # Unity 认为无需重编。此时尽量给出 mtime 佐证，并指明真正能强制重建的开关。
+        # 别提示 --force：那是"发给非交互式端点"的开关，跟强制重编无关（BUG-022）。
         hint = ""
         # 工程根：显式 --project-root 优先，否则用 configure() 探明的 EXPECTED_PROJECT
         root = getattr(args, "project_root", None) or globals().get("EXPECTED_PROJECT")
@@ -1508,7 +1553,8 @@ def cmd_compile(client, args):
             if latest and time.time() - latest < 3600:
                 hint = "（检测到最近 1 小时内源码 mtime 有变化）"
         print("没有检测到新的编译：Unity 认为无需重编%s。" % hint)
-        print("确认刚改过代码时，用 --force 强制编译：send.py compile --force")
+        print("确认刚改过代码时，用 --clean 做干净重建（清编译缓存、全量重编，比较慢）：")
+        print("    send.py compile --clean")
         return 0
 
     if report.get("ok"):

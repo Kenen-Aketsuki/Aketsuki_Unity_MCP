@@ -63,6 +63,10 @@ TARGET_FAIL_TTL = 3.0
 # 指令列表缓存有效期（tools/list 会频繁调用）
 COMMANDS_TTL = 60.0
 
+# 编译等待的宽限期（秒）：asset.compile 异步返回，刚下发时"编辑器空闲"很正常，
+# 宽限期内没等到任何编译证据就继续等，超时才认定"这次没触发编译"（与 send.py 同口径）
+COMPILE_START_GRACE = 5.0
+
 INSTRUCTIONS = (
     "这是 Unity 编辑器的指令通道：一条连接即可操作本机所有工程。"
     "调用前不需要手动启动服务，编辑器启动时会自动拉起 HTTP 桥；"
@@ -1152,6 +1156,7 @@ def tool_compile_and_wait(arguments):
     deadline = time.time() + timeout
     # 编译请求是异步的：先给它一点时间进入 compiling，再判定"已结束"
     time.sleep(0.4)
+    started_at = time.time()
     idle_hits = 0
     seen_compiling = False
     while time.time() < deadline:
@@ -1170,7 +1175,19 @@ def tool_compile_and_wait(arguments):
         else:
             idle_hits += 1
             if idle_hits >= 2:
-                break
+                if seen_compiling:
+                    break
+                # 只看到空闲还不够：编译可能还没开始（asset.compile 异步返回，见
+                # AssetCompileCommand 注释）。报告时间戳换了、或宽限期过了才收工（BUG-022）。
+                try:
+                    probe = _fetch_compile_report(bridge, limit=0)
+                except BridgeError:
+                    probe = None
+                if isinstance(probe, dict) and probe.get("finishedUtc") != before_finished:
+                    break
+                if time.time() - started_at >= COMPILE_START_GRACE:
+                    break
+                idle_hits = 0
         time.sleep(0.4)
     else:
         return _text_result("等待编译超时（%.0f 秒）。编译可能仍在进行，可用 unity_status 复查。" % timeout,
