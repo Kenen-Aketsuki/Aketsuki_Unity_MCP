@@ -146,3 +146,7 @@ __pycache__/
 # 钩子的私有词表是"本机有哪些工程"的清单，由 Tools/install_hooks.py 生成，不入库。
 # 钩子本体会读它；没有这个文件时降级为只查通用模式（盘符路径、用户名、私钥块）。
 /.githooks/private-names.txt
+# 我为「编译等待判据」写的一次性假 Client 自检脚本（用户 2026-11-11 批注：调试工具不入库）。
+# 它靠伪造 /v1/status 时间线来复现 BUG-022，只有改了 cmd_compile 的等待循环才用得上，
+# 留在工作区方便回归；真正的回归测试是 Tools/test_targets.py。
+/Tools/test_send_compile.py
