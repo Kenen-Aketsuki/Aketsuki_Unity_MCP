@@ -1350,9 +1350,12 @@ namespace Aketsuki.UnityMcp.Editor
                 return PrefabEditUtil.EditPrefab(context, normalized, root =>
                 {
                     var node = SetComponentFieldCommand.ResolvePrefabTarget(root, targetSpec, context);
+                    // 先抓 GameObject：挂 Graphic 这类组件会把 Transform 换成 RectTransform，
+                    // 换完之后旧的 Transform 引用就"已被销毁"，再读 .name/.parent 直接抛异常（BUG-023）
+                    var nodeObject = node.gameObject;
                     var added = PrefabEditUtil.AddComponents(
-                        node.gameObject, new[] { typeName }, context, require, false);
-                    return BuildResult(node, typeName, added, normalized);
+                        nodeObject, new[] { typeName }, context, require, false);
+                    return BuildResult(nodeObject.transform, typeName, added, normalized);
                 });
             }
 
@@ -1365,9 +1368,11 @@ namespace Aketsuki.UnityMcp.Editor
                     $"找不到物体 '{targetSpec}'");
             }
 
+            // 同 Prefab 分支：先抓 GameObject，再挂组件（挂 UI 组件会换掉 Transform，见 BUG-023）
+            var targetObject = target.gameObject;
             var sceneAdded = PrefabEditUtil.AddComponents(
-                target.gameObject, new[] { typeName }, context, require, true);
-            return BuildResult(target, typeName, sceneAdded, null);
+                targetObject, new[] { typeName }, context, require, true);
+            return BuildResult(targetObject.transform, typeName, sceneAdded, null);
 #else
             throw new CommandException($"指令 '{context.CommandId}' 只能在编辑器内执行");
 #endif
