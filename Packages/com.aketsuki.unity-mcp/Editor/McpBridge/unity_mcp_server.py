@@ -495,14 +495,18 @@ class TargetPool(object):
         return "\n".join(lines)
 
     def _resolve_name(self, value):
-        """工程名 → 工程根。重名/查不到都直接报错，绝不猜一个。"""
-        root, hits = send.find_project_root_by_name(value)
+        """工程名 → 工程根。**必须全名**（2026-11-11 拍板）；重名/只对上一部分都直接报错。"""
+        root, hits, near = send.find_project_root_by_name(value)
         if root is not None:
             return root
         if hits:
             raise SelectorError(
                 "工程名「%s」匹配到多个工程，请改用完整路径：\n%s"
                 % (value, "\n".join("  " + h for h in hits)))
+        if near:
+            raise SelectorError(
+                "「%s」不是任何工程的全名（target 必须写完整工程名或工程根路径）。是不是要选：\n%s"
+                % (value, "\n".join("  " + os.path.basename(os.path.normpath(h)) for h in near)))
         raise SelectorError(
             "找不到工程名匹配「%s」的 Unity。可调用 unity_targets 查看当前开着的工程。"
             % value)

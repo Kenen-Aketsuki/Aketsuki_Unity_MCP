@@ -321,7 +321,7 @@ def load_primary_info(explicit_path=None):
 
 GLOBAL_TARGETS_SUBDIR = ("Aketsuki", "UnityMcp", "targets")
 
-# 选址过程中产生的、必须让人看见的提示（目前只有"名字只命中子串"一种）。
+# 选址过程中产生的、必须让人看见的提示（目前没有产生点，保留通道给以后）。
 # 攒起来由 print_report 打到 **stdout**：只走 stderr 的提示会被"只读 stdout"的脚本漏掉。
 TARGET_NOTICES = []
 
@@ -424,12 +424,16 @@ def target_from_info_path(info_path, timeout=PROBE_TIMEOUT):
 
 
 def find_project_root_by_name(name):
-    """在全局索引里按工程名（或名字的一部分）找工程根。
+    """在全局索引里按工程名**全名**找工程根（2026-11-11 拍板：必须全名）。
 
-    匹配优先级：**全名精确命中** > 子串唯一命中。
+    返回 (root, exact_hits, near_misses)：
 
-    唯一命中才算数：多个工程同名的常见情形（两个 clone）必须由调用方显式区分，
-    猜一个的代价是把指令发到别人工程里去。
+    - ``root``：唯一全名命中时的工程根；没有命中或有歧义时为 None
+    - ``exact_hits``：全名命中的工程根列表（两个同名 clone 时长度 > 1）
+    - ``near_misses``：**只是名字里含这段字**的工程根，仅供报错时提示"是不是要写它"
+
+    以前子串唯一命中也会被接受（`game` 命中 `game_client`），但那是把"我猜"当成"你要的"：
+    两个名字互为前缀时，指令会静默落进另一个工程——写错工程是事故级，所以现在一律要求全名。
 
     索引条目在工程被关掉 / 目录被挪走之后**不会自己消失**（编辑器退出不撤条目，域重载也刻意保留，
     见 CommandHttpServer.DeleteInfoFile）。所以这里要滤掉磁盘上已经不存在的工程根，
@@ -437,11 +441,11 @@ def find_project_root_by_name(name):
     """
     key = (name or "").strip()
     if not key:
-        return None, []
+        return None, [], []
 
     lowered = key.lower()
     exact = []
-    partial = []
+    near = []
     for item in list_global_targets():
         identity = item.get(IDENTITY_KEY) or {}
         project_name = (identity.get("projectName") or "").strip()
@@ -451,22 +455,25 @@ def find_project_root_by_name(name):
         if project_name.lower() == lowered:
             exact.append(project_path)
         elif lowered in project_name.lower():
-            partial.append(project_path)
+            near.append(project_path)
 
-    hits = exact or partial
     # 去重：同一工程可能有多个编辑器实例写了同一条
-    unique = []
-    seen = set()
-    for path in hits:
-        norm = os.path.normcase(os.path.normpath(path))
-        if norm in seen:
-            continue
-        seen.add(norm)
-        unique.append(path)
+    def unique(paths):
+        out = []
+        seen = set()
+        for path in paths:
+            norm = os.path.normcase(os.path.normpath(path))
+            if norm in seen:
+                continue
+            seen.add(norm)
+            out.append(path)
+        return out
 
-    if len(unique) == 1:
-        return unique[0], unique
-    return None, unique
+    exact = unique(exact)
+    near = unique(near)
+    if len(exact) == 1:
+        return exact[0], exact, near
+    return None, exact, near
 
 
 def _is_unity_project(path):
@@ -517,27 +524,21 @@ def resolve_target_selector(value):
         return None, None, ("--target 看起来是路径但不存在：%s\n"
                             "  要按工程名选，直接写名字（如 MyUnityProject）。" % expanded), []
 
-    root, hits = find_project_root_by_name(text)
+    root, hits, near = find_project_root_by_name(text)
     if root:
-        # 名字是**子串**匹配（`--target game` 也能命中 game_client）。
-        # 唯一命中就直接用，但必须明说实际连的是谁：`game` 与 `game_client`
-        # 互为前缀，静默近似会让人以为在操作 A，指令其实落进了 B（写错工程是事故级）。
-        actual = os.path.basename(os.path.normpath(root))
-        lowered = text.lower()
-        if actual.lower() != lowered:
-            notice = ("'%s' 按名字部分匹配到工程 %s（%s），不是精确命中。\n"
-                      "      要精确锁定请给完整工程名或工程根路径。" % (text, actual, root))
-            TARGET_NOTICES.append(notice)
-            # stderr 给人看；stdout 那份由 print_report 补上 ——
-            # 只写 stderr 的提示会被"只读 stdout"的脚本和 agent 漏掉（2026-11-07 实际漏过一次，
-            # 于是以为自己在操作 A，指令其实进了名字以 A 开头的 B）。
-            sys.stderr.write("提示：" + notice + "\n")
         return root, None, None, []
     if hits:
         return None, None, (
             "工程名 '%s' 命中 %d 个工程，无法确定连哪个：\n%s\n"
             "  把工程的绝对路径原样传给 --target 即可。"
             % (text, len(hits), "\n".join("    " + item for item in hits))), hits
+    if near:
+        # 只写子串命中过、全名对不上：一律拒绝，但把"你要写的那个"直接点出来
+        lines = ["'%s' 不是任何工程的全名（--target 必须写完整工程名或工程根路径）：" % text]
+        for path in near:
+            lines.append("    %-24s %s" % (os.path.basename(os.path.normpath(path)), path))
+        lines.append("  写法示例：--target %s" % os.path.basename(os.path.normpath(near[0])))
+        return None, None, "\n".join(lines), near
 
     live = list_global_targets()
     lines = ["找不到名叫 '%s' 的工程。" % text]
@@ -1575,6 +1576,52 @@ def cmd_compile(client, args):
     return 1
 
 
+def collect_stale_targets():
+    """全局索引里"工程根目录已经不存在"的条目路径列表（prune 用）。"""
+    stale = []
+    for item in list_global_targets():
+        identity = item.get(IDENTITY_KEY) or {}
+        path = (identity.get("projectPath") or "").strip()
+        info_path = item.get("_path")
+        if not info_path:
+            continue
+        # 目录没了 = 工程被删/挪走；这类条目永远活不过来，留着只会让选址报"端点不可达"
+        if path and not os.path.isdir(path):
+            stale.append((info_path, path))
+    return stale
+
+
+def cmd_prune(args):
+    """清掉全局索引里指向"已经不存在的工程目录"的条目。
+
+    只删"目录确实没了"的，不按时间删：刚搬到新路径的工程目录还在，条目该留着。
+    编辑器正在运行时不会撤自己的条目（域重载刻意保留，见 BUG-016），所以陈旧条目会长期堆积。
+    """
+    stale = collect_stale_targets()
+    if not stale:
+        print("全局索引很干净：没有指向不存在目录的条目（%s）" % global_targets_dir())
+        return 0
+
+    print("发现 %d 条陈旧条目（工程目录已不存在）：" % len(stale))
+    for info_path, project_path in stale:
+        print("  %s\n      → %s" % (os.path.basename(info_path), project_path or "(信息里没有 projectPath)"))
+
+    if args.dry_run:
+        print("dry-run：未删除。确认无误后去掉 --dry-run 再跑一次。")
+        return 0
+
+    removed = 0
+    for info_path, _ in stale:
+        try:
+            os.remove(info_path)
+            removed += 1
+        except OSError as error:
+            sys.stderr.write("删除失败 %s：%s\n" % (info_path, error))
+
+    print("已删除 %d 条。" % removed)
+    return 0
+
+
 def cmd_resolve(args):
     """只做定位诊断，不下发任何指令。"""
     chosen, candidates, error = discover(args)
@@ -1621,8 +1668,11 @@ def build_parser():
         prog="send.py",
         description="向 Unity 编辑器的指令系统下发 JSON 指令",
     )
-    parser.add_argument("command", choices=["ping", "status", "commands", "catalog", "send", "seq", "resolve", "cancel", "compile"],
+    parser.add_argument("command",
+                        choices=["ping", "status", "commands", "catalog", "send", "seq", "resolve",
+                                 "prune", "cancel", "compile"],
                         help="要执行的操作；catalog 读本地清单（不联网），resolve 只做端点定位诊断，"
+                             "prune 清全局索引里指向不存在目录的条目，"
                              "cancel 请求协作式取消，compile 触发编译并回传错误，"
                              "seq 顺序执行多步（步间客户端等待）")
     parser.add_argument("file", nargs="?",
@@ -1690,6 +1740,10 @@ def main(argv=None):
     # 于是"编辑器没开"也能列出上次运行时的指令集。
     if args.command == "catalog":
         return cmd_catalog(args)
+
+    # prune 只动全局索引文件，同样不需要连编辑器
+    if args.command == "prune":
+        return cmd_prune(args)
 
     chosen, candidates, error = discover(args)
     if error:

@@ -166,7 +166,7 @@ def test_name_resolution():
     print("按名字解析：")
     original = send.find_project_root_by_name
     try:
-        send.find_project_root_by_name = lambda name: (PROJECT_A, [])
+        send.find_project_root_by_name = lambda name: (PROJECT_A, [PROJECT_A], [])
         pool = new_pool([])
         pool.get("project_a")
         sticky = pool.sticky_value()
@@ -174,7 +174,7 @@ def test_name_resolution():
               sticky[0] == "root" and os.path.normpath(sticky[1]) == os.path.normpath(PROJECT_A),
               str(sticky))
 
-        send.find_project_root_by_name = lambda name: (None, [PROJECT_A, PROJECT_B])
+        send.find_project_root_by_name = lambda name: (None, [PROJECT_A, PROJECT_B], [])
         pool = new_pool([])
         try:
             pool.get("project")
@@ -183,7 +183,17 @@ def test_name_resolution():
             check("重名报错并列出候选",
                   "多个" in str(error) and PROJECT_B in str(error), str(error))
 
-        send.find_project_root_by_name = lambda name: (None, [])
+        # 2026-11-11 拍板：只对上一部分的子串一律拒绝，并点名"是不是要选它"
+        send.find_project_root_by_name = lambda name: (None, [], [PROJECT_A])
+        pool = new_pool([])
+        try:
+            pool.get("proj")
+            check("子串不自动选中", False, "竟然替人挑了一个")
+        except mcp.SelectorError as error:
+            check("子串报错并点名候选",
+                  "全名" in str(error) and "project_a" in str(error), str(error))
+
+        send.find_project_root_by_name = lambda name: (None, [], [])
         pool = new_pool([])
         try:
             pool.get("NotExist")
@@ -204,7 +214,7 @@ def test_cli_target_selector():
     original = send.find_project_root_by_name
     original_targets = send.list_global_targets
     try:
-        send.find_project_root_by_name = lambda name: (PROJECT_A, [])
+        send.find_project_root_by_name = lambda name: (PROJECT_A, [PROJECT_A], [])
         root, info, err, _ = send.resolve_target_selector("project_a")
         check("按工程名 → 工程根", err is None and os.path.normpath(root) == os.path.normpath(PROJECT_A), err or root)
 
@@ -212,12 +222,17 @@ def test_cli_target_selector():
         check("工程根路径 → 原样返回",
               err is None and os.path.normpath(root) == os.path.normpath(PROJECT_A), err or root)
 
-        send.find_project_root_by_name = lambda name: (None, [PROJECT_A, PROJECT_B])
+        send.find_project_root_by_name = lambda name: (None, [PROJECT_A, PROJECT_B], [])
         root, info, err, hits = send.resolve_target_selector("clone")
         check("重名 → 报错并列候选",
               root is None and err and PROJECT_A in err and PROJECT_B in err, err or "")
 
-        send.find_project_root_by_name = lambda name: (None, [])
+        send.find_project_root_by_name = lambda name: (None, [], [PROJECT_A])
+        root, info, err, hits = send.resolve_target_selector("proj")
+        check("子串 → 拒绝并点名完整工程名",
+              root is None and err and "全名" in err and "project_a" in err, err or "")
+
+        send.find_project_root_by_name = lambda name: (None, [], [])
         send.list_global_targets = lambda: [
             {"_path": "x", "identity": {"projectName": PROJECT_A, "projectPath": PROJECT_A}}]
         root, info, err, hits = send.resolve_target_selector("NotExist")
@@ -335,8 +350,9 @@ def test_name_match_real():
     """`find_project_root_by_name` 的真实匹配规则（不 stub 它，只换掉索引内容）。
 
     背景：`shop` 与 `shop_back` 这种前缀关系很常见（真实工程名多半长这样）。
-    全名必须精确命中；精确查不到时才会退到子串唯一命中；目录已经不存在的条目
-    （关掉 / 挪走的工程，索引条目不会自动消失）必须被滤掉，否则会稳定命中一个幽灵目录。
+    2026-11-11 拍板：**必须全名**——子串一律不自动选中，只在报错里点名候选。
+    目录已经不存在的条目（关掉 / 挪走的工程，索引条目不会自动消失）必须被滤掉，
+    否则会稳定命中一个幽灵目录。
     """
     print("按名字匹配（真实索引表）：")
     original_targets = send.list_global_targets
@@ -350,28 +366,30 @@ def test_name_match_real():
             {"_path": "c", "identity": {"projectName": "project_a", "projectPath": ghost}},
         ]
 
-        root, hits = send.find_project_root_by_name("project_a")
+        root, hits, near = send.find_project_root_by_name("project_a")
         check("全名精确命中不会被前缀更长的同名工程抢走",
               root is not None and os.path.normpath(root) == os.path.normpath(PROJECT_A), str(hits))
+        check("精确命中时 near 也照实给出", len(near) == 1, str(near))
 
-        root, hits = send.find_project_root_by_name("project_a_ba")
-        check("精确查不到 → 子串唯一命中", root is not None and
-              os.path.normpath(root) == os.path.normpath(project_a_back), str(hits))
+        root, hits, near = send.find_project_root_by_name("project_a_ba")
+        check("子串唯一命中也不再自动选中（必须全名）",
+              root is None and not hits and len(near) == 1, "root=%s near=%s" % (root, near))
 
         # 目录不存在的条目要被滤掉：否则 ghost 会与 PROJECT_A 一起命中 "project_a"
-        root, hits = send.find_project_root_by_name("ghost_project")
-        check("目录已不存在的条目被滤掉", root is None and not hits, str(hits))
+        root, hits, near = send.find_project_root_by_name("ghost_project")
+        check("目录已不存在的条目被滤掉", root is None and not hits and not near,
+              "hits=%s near=%s" % (hits, near))
 
-        # 部分匹配必须留下一条"不是精确命中"的提示，且要能打到 stdout
+        # 子串写法：拒绝，但要把"你要写的那个"直接点出来（含写法示例）
         del send.TARGET_NOTICES[:]
         root, info, err, _ = send.resolve_target_selector("project_a_ba")
-        check("部分匹配 → 仍可选中但记下提示",
-              err is None and len(send.TARGET_NOTICES) == 1 and "部分匹配" in send.TARGET_NOTICES[0],
-              str(send.TARGET_NOTICES))
+        check("子串 → 拒绝并给出完整工程名与示例",
+              root is None and err and "全名" in err and "project_a_back" in err, err or "")
 
         del send.TARGET_NOTICES[:]
-        send.resolve_target_selector("project_a")
-        check("精确命中 → 不产生提示", not send.TARGET_NOTICES, str(send.TARGET_NOTICES))
+        root, info, err, _ = send.resolve_target_selector("project_a")
+        check("全名 → 正常选中且不产生提示",
+              err is None and not send.TARGET_NOTICES, err or str(send.TARGET_NOTICES))
     finally:
         send.list_global_targets = original_targets
         del send.TARGET_NOTICES[:]
