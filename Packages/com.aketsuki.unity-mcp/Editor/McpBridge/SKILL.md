@@ -31,7 +31,8 @@ python scripts/send.py send <文件>.json --request-id <ID>  # 幂等下发（�
 python scripts/send.py cancel                 # 请求协作式取消当前批次
 python scripts/send.py compile                # 编译 + 等待 + 回传错误（改 .cs 后的闭环）
 python scripts/send.py seq <步骤>.json         # 顺序执行多步，步间由客户端等待（跨帧节奏）
-python scripts/send.py status --target <工程>   # 跨工程：按工程名/路径定位另一个工程的编辑器
+python scripts/send.py status --target <工程>   # 跨工程：按工程全名/路径定位另一个工程的编辑器
+python scripts/send.py prune [--dry-run]       # 清全局索引里指向已删工程的条目（不连编辑器）
 ```
 
 客户端从 `<工作空间>/.workbuddy/UnityEditCommand/.http-info.<projectHash>` 读取端口与令牌，
@@ -50,19 +51,21 @@ python scripts/send.py status --target <工程>   # 跨工程：按工程名/路
 暴露给 CLI，三种写法等价，都能落到同一个工程根：
 
 ```bash
-python scripts/send.py status --target MyUnityProject    # 工程名（也支持部分匹配）
+python scripts/send.py status --target MyUnityProject    # 工程名（**必须全名**，子串不认）
 python scripts/send.py status --target D:/Work/MyUnityProject # 工程根路径（盘符随本机）
 python scripts/send.py status --target ".../.http-info.df0c4d80"          # 信息文件
 ```
 
 - 名字有歧义（两个同名 clone）时**报错并列出全部候选**，绝不猜一个 —— 猜错等于把指令发进别人工程。
-- **全名精确命中优先，子串命中只是兜底**，且时**一定**会提示实际连的是谁。
-  2026-11-07 实际踩到：`--target A` 而 A 的索引条目当时不在（正在重编译），
-  于是回落到名字以 `A` 开头的 `A_back`，指令差点发进隔壁工程；提示只写了 stderr，
-  而调用方只读 stdout，等于没提示。现在这类提示会同时出现在**报告顶部**（`--json` 模式仍只走 stderr）。
-  **跨工程下发时请写完整工程名或工程根路径**，别指望前缀。
-- 全局索引条目在工程关掉、目录挪走之后**不会自己消失**（编辑器退出不撤条目，域重载也刻意保留）。
-  所以按名字选址会滤掉磁盘上已不存在的工程根；`unity_targets` 的 `probe=true` 才是判活的那一步。
+- **只认全名**（2026-11-11 拍板）。子串/前缀**一律拒绝**，报错里会把"名字含这段字"的工程名列出来，
+  让你照着改。
+  起因：2026-11-07 `--target A` 而 A 的索引条目当时不在（正在重编译），脚本回落到名字以 `A` 开头的
+  `A_back`，指令差点发进隔壁工程。当时只加了一句提示（还只写 stderr）——调用方照样会踩，
+  所以改成硬拒绝：**宁可让你多打几个字，也不许静默换工程**。
+- 全局索引条目**可能残留**：编辑器崩溃/被强杀时不撤条目。按名字选址会先滤掉磁盘上已不存在的工程根；
+  想清干净用 `send.py prune`（服务端每次发布索引时也会顺手清一遍，判据都是"`projectPath` 指向的目录没了"）。
+  注意 prune 只按"目录不存在"判死、**不按时间删**——"最近没打开但工程还在"的条目会保留。
+  `unity_targets` 的 `probe=true` 才是判活的那一步。
 - 指定后进入**严格选址**：只认 `projectPath` 完全一致的编辑器，连不上就失败，绝不降级到隔壁工程。
 - `--target` 与 `--project-root` 是同一件事，同时给会直接报错。
 - 不带 `--target` 且本工作区一个端点都连不上时，报错里会列出全局索引里的其它工程，
