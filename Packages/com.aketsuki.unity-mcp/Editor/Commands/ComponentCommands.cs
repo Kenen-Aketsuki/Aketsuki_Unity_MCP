@@ -307,18 +307,68 @@ namespace Aketsuki.UnityMcp
                     out var backChain, out var resolveError))
             {
                 var oldValue = GetMemberValue(leaf, leafContainer);
-                var converted = ConvertValue(raw, MemberType(leaf), context, fieldName, nodeResolver);
-                return new FieldOp
+
+                object converted = null;
+                CommandArgumentException convertFailure = null;
+                try
                 {
-                    componentHolder = component,
-                    fieldName = fieldName,
-                    leaf = leaf,
-                    leafContainer = leafContainer,
-                    backChain = backChain,
-                    converted = converted,
-                    oldValue = oldValue,
-                    applyOverride = null
-                };
+                    converted = ConvertValue(raw, MemberType(leaf), context, fieldName, nodeResolver);
+                }
+                catch (CommandArgumentException error)
+                {
+                    // 反射通道认得这个字段、却转不了值：典型是 List<可序列化 class>（IMPR-016）。
+                    // 只有"普通 class / 集合"才值得退到序列化通道；标量转不过去就原样报错，
+                    // 免得把"值写错了"说成"类型不支持"。
+                    if (!PrefersSerializedWrite(MemberType(leaf)))
+                    {
+                        throw;
+                    }
+
+                    convertFailure = error;
+                }
+
+                if (convertFailure == null)
+                {
+                    return new FieldOp
+                    {
+                        componentHolder = component,
+                        fieldName = fieldName,
+                        leaf = leaf,
+                        leafContainer = leafContainer,
+                        backChain = backChain,
+                        converted = converted,
+                        oldValue = oldValue,
+                        applyOverride = null
+                    };
+                }
+
+                // 退到序列化通道：写进去的是 Unity 自己的序列化器，与 component.get 读侧同口径
+                Func<object> serializedApply;
+                object serializedValue;
+                object serializedOld;
+                string serializedError;
+                if (TryResolveSerializedWrite(component, fieldName, raw, context,
+                        out serializedApply, out serializedValue, out serializedOld, out serializedError))
+                {
+                    return new FieldOp
+                    {
+                        componentHolder = component,
+                        fieldName = fieldName,
+                        converted = serializedValue,
+                        oldValue = serializedOld,
+                        applyOverride = serializedApply
+                    };
+                }
+
+                // 两条路都不行：以反射通道的错为主（它的"可用子字段"提示更贴近调用方的写法），
+                // 但把序列化通道失败的原因一并带上，否则调用方会以为只试过一条路
+                if (string.IsNullOrEmpty(serializedError))
+                {
+                    throw convertFailure;
+                }
+
+                throw new CommandException(
+                    convertFailure.Message + $"；序列化通道也写不进：{serializedError}");
             }
 
             Func<object> applyOverride;
@@ -341,6 +391,24 @@ namespace Aketsuki.UnityMcp
             throw new CommandArgumentException(context.CommandId, "field",
                 string.IsNullOrEmpty(fallbackError) ? resolveError : resolveError + "；" + fallbackError);
         }
+
+        /// <summary>
+        /// 反射通道转换失败时，值不值得再退到序列化通道试一次。
+        /// <para>
+        /// 只对**普通 class 与集合**开口子：<c>List&lt;[Serializable] 配置类&gt;</c> 是主要场景（IMPR-016）。
+        /// 标量、string、UnityEngine.Object 转不过去就是值本身的问题，多试一次只会把错误信息搅乱。
+        /// </para>
+        /// </summary>
+        private static bool PrefersSerializedWrite(Type type)
+        {
+            if (type == null || type == typeof(string) || type.IsValueType)
+            {
+                return false;
+            }
+
+            return !typeof(UnityEngine.Object).IsAssignableFrom(type);
+        }
+
 
         /// <summary>把 <see cref="ResolveField"/> 解析出的结果真正写入组件（含 Undo/脏标记），并返回新值。</summary>
         internal static object ApplyField(FieldOp op, bool recordUndo)
@@ -462,20 +530,27 @@ namespace Aketsuki.UnityMcp
             var prop = FindSerializedProperty(probe, fieldPath);
             if (prop == null)
             {
-                error = SerializedPathHint(component, fieldPath);
+                // 原来只对粒子模块给提示，普通路径返回 null —— 调用方拿到的是一句空错误，
+                // 于是"序列化通道也走不通"这件事在报告里完全看不出来。
+                error = SerializedPathHint(component, fieldPath)
+                        ?? $"'{component.GetType().Name}' 上没有序列化路径 '{fieldPath}'";
                 return false;
             }
 
-            object pending;
+            // 旧值必须在构建写计划之前读走：构建数组计划时会临时改探针的 arraySize
+            // （SerializedObject 是副本，不 ApplyModifiedProperties 就不会落到真实对象上）。
+            var previous = DescribeSerializedValue(prop);
+
+            SerializedWritePlan pending;
             string convertError;
-            if (!TryConvertSerializedValue(prop, raw, context, fieldPath, out pending, out convertError))
+            if (!TryBuildSerializedPlan(prop, raw, context, fieldPath, out pending, out convertError))
             {
                 error = convertError;
                 return false;
             }
 
-            oldValue = DescribeSerializedValue(prop);
-            converted = pending;
+            oldValue = previous;
+            converted = pending.Describe();
 
             var resolvedPath = prop.propertyPath;
             var holder = component;
@@ -489,11 +564,11 @@ namespace Aketsuki.UnityMcp
                         $"序列化写入失败：'{holder.GetType().Name}' 上找不到路径 '{resolvedPath}'（对象可能已被销毁）");
                 }
 
-                WriteSerializedValue(target, pending);
+                ApplySerializedPlan(target, pending, resolvedPath);
                 fresh.ApplyModifiedProperties();
                 UnityEditor.EditorUtility.SetDirty(holder);
                 UnityEditor.PrefabUtility.RecordPrefabInstancePropertyModifications(holder);
-                return pending;
+                return pending.Describe();
             };
 
             return true;
@@ -548,11 +623,54 @@ namespace Aketsuki.UnityMcp
                    $"或直接写 Unity 序列化路径 {mapped}.…（component.get 读回来的路径可直接用）";
         }
 
-        /// <summary>按 <c>SerializedProperty</c> 的类型做值转换；不支持的类型给出明确原因。</summary>
-        private static bool TryConvertSerializedValue(UnityEditor.SerializedProperty prop, JsonValue raw,
-            CommandContext context, string fieldName, out object value, out string error)
+        /// <summary>
+        /// 一次序列化写入的计划：标量存值，数组存元素计划，复合结构存「子字段名 → 计划」。
+        /// <para>
+        /// 之所以要"计划"而不是直接写，是为了让 <c>component.setFields</c> 的原子语义
+        /// （先全部校验、再整体写入）延伸到数组与复合结构：键名对不对、元素能不能转，
+        /// 全部在解析期用探针对象验完（IMPR-016 方案 D）。
+        /// </para>
+        /// </summary>
+        private sealed class SerializedWritePlan
         {
-            value = null;
+            public object Scalar;
+            public List<SerializedWritePlan> Elements;
+            public List<KeyValuePair<string, SerializedWritePlan>> Fields;
+
+            /// <summary>回显给调用方的新值描述；标量原样返回，复合结构给个摘要。</summary>
+            public object Describe()
+            {
+                if (Elements != null)
+                {
+                    return $"<数组[{Elements.Count}]>";
+                }
+
+                if (Fields != null)
+                {
+                    var names = new string[Fields.Count];
+                    for (var i = 0; i < Fields.Count; i++)
+                    {
+                        names[i] = Fields[i].Key;
+                    }
+
+                    return $"<对象：{string.Join(", ", names)}>";
+                }
+
+                return Scalar;
+            }
+        }
+
+        /// <summary>
+        /// 把 JSON 值编译成写入计划：标量走类型转换，数组逐元素、复合结构逐字段递归。
+        /// <para>
+        /// 数组元素与复合字段的结构校验都借探针属性完成：临时改 <c>arraySize</c> 只影响
+        /// 这份 SerializedObject 副本，不 Apply 就不会落到真实对象上。
+        /// </para>
+        /// </summary>
+        private static bool TryBuildSerializedPlan(UnityEditor.SerializedProperty prop, JsonValue raw,
+            CommandContext context, string fieldName, out SerializedWritePlan plan, out string error)
+        {
+            plan = null;
             error = null;
 
             if (raw == null || raw.IsNull)
@@ -560,6 +678,245 @@ namespace Aketsuki.UnityMcp
                 error = $"字段 {fieldName}：缺少 value";
                 return false;
             }
+
+            if (IsArrayProperty(prop))
+            {
+                return TryBuildArrayPlan(prop, raw, context, fieldName, out plan, out error);
+            }
+
+            if (prop.propertyType == UnityEditor.SerializedPropertyType.Generic)
+            {
+                return TryBuildObjectPlan(prop, raw, context, fieldName, out plan, out error);
+            }
+
+            object value;
+            if (!TryConvertScalar(prop, raw, context, fieldName, out value, out error))
+            {
+                return false;
+            }
+
+            plan = new SerializedWritePlan { Scalar = value };
+            return true;
+        }
+
+        /// <summary>
+        /// 这个属性是不是数组 / List。
+        /// <para>
+        /// **不能只看 <c>SerializedProperty.isArray</c>**：2022.3 上 string 属性它也返回 true
+        /// （Unity 内部把字符串当字符数组），只看它会把每个 String 字段都误判成数组，
+        /// 报出"需要 JSON 数组，实际给的是 String"。真正的数组/List 的 propertyType 一定是 Generic。
+        /// </para>
+        /// </summary>
+        private static bool IsArrayProperty(UnityEditor.SerializedProperty prop)
+        {
+            return prop.propertyType == UnityEditor.SerializedPropertyType.Generic && prop.isArray;
+        }
+
+        /// <summary>数组 / List：整体替换元素个数，再逐个元素递归。</summary>
+        private static bool TryBuildArrayPlan(UnityEditor.SerializedProperty prop, JsonValue raw,
+            CommandContext context, string fieldName, out SerializedWritePlan plan, out string error)
+        {
+            plan = null;
+            error = null;
+
+            if (!raw.IsArray)
+            {
+                error = $"字段 {fieldName}：'{prop.propertyPath}' 是数组/List，需要 JSON 数组，实际给的是 {raw.Type}";
+                return false;
+            }
+
+            var items = raw.ArrayValue;
+            var size = items == null ? 0 : items.Count;
+
+            // 探针上先把元素个数摆好，GetArrayElementAtIndex 才有东西可验
+            var originalSize = prop.arraySize;
+            prop.arraySize = size;
+
+            var elements = new List<SerializedWritePlan>(size);
+            for (var i = 0; i < size; i++)
+            {
+                SerializedWritePlan child;
+                string childError;
+                if (!TryBuildSerializedPlan(prop.GetArrayElementAtIndex(i), items[i], context,
+                        $"{fieldName}[{i}]", out child, out childError))
+                {
+                    prop.arraySize = originalSize;
+                    error = childError;
+                    return false;
+                }
+
+                elements.Add(child);
+            }
+
+            // 探针复原：后面的 oldValue 描述、同一组件上的其它字段都还要读这份副本
+            prop.arraySize = originalSize;
+            plan = new SerializedWritePlan { Elements = elements };
+            return true;
+        }
+
+        /// <summary>复合结构：按 JSON 对象的键逐个子字段递归（只覆盖 Unity 能序列化的字段）。</summary>
+        private static bool TryBuildObjectPlan(UnityEditor.SerializedProperty prop, JsonValue raw,
+            CommandContext context, string fieldName, out SerializedWritePlan plan, out string error)
+        {
+            plan = null;
+            error = null;
+
+            if (!raw.IsObject)
+            {
+                error = $"字段 {fieldName}：'{prop.propertyPath}' 是复合结构，需要 JSON 对象（键为子字段名），" +
+                        $"实际给的是 {raw.Type}；可用子字段：{string.Join("、", CollectChildNames(prop))}";
+                return false;
+            }
+
+            var fields = new List<KeyValuePair<string, SerializedWritePlan>>();
+            foreach (var pair in raw.ObjectValue)
+            {
+                var child = ResolveChildProperty(prop, pair.Key);
+                if (child == null)
+                {
+                    error = $"字段 {fieldName}：'{prop.propertyPath}' 下没有子字段 '{pair.Key}'" +
+                            $"（可用子字段：{string.Join("、", CollectChildNames(prop))}；" +
+                            "写 text 或 m_Text 都认）";
+                    return false;
+                }
+
+                SerializedWritePlan childPlan;
+                string childError;
+                if (!TryBuildSerializedPlan(child, pair.Value, context, $"{fieldName}.{pair.Key}",
+                        out childPlan, out childError))
+                {
+                    error = childError;
+                    return false;
+                }
+
+                // 存解析后的真实字段名（写 text 也要按 m_Text 落盘）
+                fields.Add(new KeyValuePair<string, SerializedWritePlan>(child.name, childPlan));
+            }
+
+            plan = new SerializedWritePlan { Fields = fields };
+            return true;
+        }
+
+        /// <summary>子字段名解析：原名 → m_ 前缀互换 → 忽略大小写（与反射通道的 C5 同口径）。</summary>
+        private static UnityEditor.SerializedProperty ResolveChildProperty(
+            UnityEditor.SerializedProperty prop, string key)
+        {
+            if (string.IsNullOrEmpty(key))
+            {
+                return null;
+            }
+
+            // 候选写法：原名、去掉 m_ 前缀、加上 m_ 前缀（Dropdown.OptionData 的 text ↔ m_Text 就靠这条）
+            var candidates = new List<string> { key };
+            candidates.Add(key.StartsWith("m_", StringComparison.Ordinal)
+                ? key.Substring(2)
+                : "m_" + key);
+
+            for (var i = 0; i < candidates.Count; i++)
+            {
+                var hit = prop.FindPropertyRelative(candidates[i]);
+                if (hit != null)
+                {
+                    return hit;
+                }
+            }
+
+            // 精确写法都不中时按大小写不敏感再扫一遍（m_text → m_Text）
+            var names = CollectChildNames(prop);
+            for (var c = 0; c < candidates.Count; c++)
+            {
+                for (var i = 0; i < names.Count; i++)
+                {
+                    if (string.Equals(names[i], candidates[c], StringComparison.OrdinalIgnoreCase))
+                    {
+                        return prop.FindPropertyRelative(names[i]);
+                    }
+                }
+            }
+
+            return null;
+        }
+
+        /// <summary>列出一个复合属性下**直接**子字段的名字（用于报错与大小写兜底）。</summary>
+        private static List<string> CollectChildNames(UnityEditor.SerializedProperty prop)
+        {
+            var names = new List<string>();
+            if (prop == null || prop.propertyType != UnityEditor.SerializedPropertyType.Generic || IsArrayProperty(prop))
+            {
+                return names;
+            }
+
+            var end = prop.GetEndProperty();
+            var iterator = prop.Copy();
+            var parentDepth = iterator.depth;
+            while (iterator.NextVisible(true) && !UnityEditor.SerializedProperty.EqualContents(iterator, end))
+            {
+                if (iterator.depth == parentDepth + 1)
+                {
+                    names.Add(iterator.name);
+                }
+                else if (iterator.depth <= parentDepth)
+                {
+                    break;
+                }
+            }
+
+            return names;
+        }
+
+        /// <summary>把写入计划落到真实属性上（数组先定长、复合结构逐字段递归）。</summary>
+        private static void ApplySerializedPlan(UnityEditor.SerializedProperty prop, SerializedWritePlan plan,
+            string path)
+        {
+            if (plan == null)
+            {
+                return;
+            }
+
+            if (plan.Elements != null)
+            {
+                if (!IsArrayProperty(prop))
+                {
+                    throw new CommandException(
+                        $"序列化写入失败：'{path}' 已不是数组（对象在解析后被改动过），请重试");
+                }
+
+                prop.arraySize = plan.Elements.Count;
+                for (var i = 0; i < plan.Elements.Count; i++)
+                {
+                    ApplySerializedPlan(prop.GetArrayElementAtIndex(i), plan.Elements[i], $"{path}[{i}]");
+                }
+
+                return;
+            }
+
+            if (plan.Fields != null)
+            {
+                for (var i = 0; i < plan.Fields.Count; i++)
+                {
+                    var field = plan.Fields[i];
+                    var child = prop.FindPropertyRelative(field.Key);
+                    if (child == null)
+                    {
+                        throw new CommandException(
+                            $"序列化写入失败：'{path}' 下找不到子字段 '{field.Key}'（对象在解析后被改动过），请重试");
+                    }
+
+                    ApplySerializedPlan(child, field.Value, $"{path}.{field.Key}");
+                }
+
+                return;
+            }
+
+            WriteSerializedValue(prop, plan.Scalar);
+        }
+
+        /// <summary>标量的值转换；不认识的具体类型给出明确原因。</summary>
+        private static bool TryConvertScalar(UnityEditor.SerializedProperty prop, JsonValue raw,
+            CommandContext context, string fieldName, out object value, out string error)
+        {
+            value = null;
+            error = null;
 
             switch (prop.propertyType)
             {
@@ -590,9 +947,14 @@ namespace Aketsuki.UnityMcp
                 case UnityEditor.SerializedPropertyType.Enum:
                     value = ResolveEnumIndex(prop, raw, context, fieldName);
                     return true;
+                case UnityEditor.SerializedPropertyType.ObjectReference:
+                    value = ToObjectReference(raw, context, fieldName);
+                    return true;
                 case UnityEditor.SerializedPropertyType.Generic:
+                    // 走到这里说明是无参可递归的复合结构（比如数组元素里再套数组时的边角），
+                    // 明确报出来而不是静默跳过。
                     error = $"字段 {fieldName}：'{prop.propertyPath}' 是复合结构（{prop.propertyType}），" +
-                            "序列化通道不支持整体写入，请写到具体分量（如 main.startSize.scalar）";
+                            "请写成 JSON 对象逐子字段赋值";
                     return false;
                 default:
                     error = $"字段 {fieldName}：序列化类型 {prop.propertyType} 暂不支持写入";
@@ -600,6 +962,50 @@ namespace Aketsuki.UnityMcp
             }
         }
 
+        /// <summary>
+        /// 对象引用字段的取值：字符串按资源路径加载（<c>Assets/…</c>，可带 <c>asset:</c> 前缀），
+        /// <c>null</c> 表示清空，<c>{"asset": "…"}</c> 与字符串等价。
+        /// </summary>
+        private static UnityEngine.Object ToObjectReference(JsonValue raw, CommandContext context,
+            string fieldName)
+        {
+            if (raw == null || raw.IsNull)
+            {
+                return null;
+            }
+
+            string path = null;
+            if (raw.IsString)
+            {
+                path = raw.AsString();
+            }
+            else if (raw.IsObject)
+            {
+                path = raw.GetString("asset", raw.GetString("path", null));
+            }
+
+            if (string.IsNullOrEmpty(path))
+            {
+                throw new CommandArgumentException(context.CommandId, "value",
+                    $"字段 {fieldName}：对象引用要么给资源路径（如 \"Assets/UI/a.png\"），要么给 null 清空");
+            }
+
+            if (path.StartsWith("asset:", StringComparison.OrdinalIgnoreCase))
+            {
+                path = path.Substring("asset:".Length).Trim();
+            }
+
+            var asset = UnityEditor.AssetDatabase.LoadAssetAtPath<UnityEngine.Object>(path);
+            if (asset == null)
+            {
+                throw new CommandArgumentException(context.CommandId, "value",
+                    $"字段 {fieldName}：找不到资源 '{path}'（路径以 Assets/ 或 Packages/ 开头，大小写要一致）");
+            }
+
+            return asset;
+        }
+
+        /// <summary>把序列化属性的当前值写进组件；复合结构由 <see cref="ApplySerializedPlan"/> 拆开，这里只处理标量。</summary>
         private static void WriteSerializedValue(UnityEditor.SerializedProperty prop, object value)
         {
             switch (prop.propertyType)
@@ -631,10 +1037,14 @@ namespace Aketsuki.UnityMcp
                 case UnityEditor.SerializedPropertyType.Enum:
                     prop.enumValueIndex = Convert.ToInt32(value, CultureInfo.InvariantCulture);
                     break;
+                case UnityEditor.SerializedPropertyType.ObjectReference:
+                    prop.objectReferenceValue = value as UnityEngine.Object;
+                    break;
                 default:
                     throw new CommandException($"序列化写入不支持类型 {prop.propertyType}（'{prop.propertyPath}'）");
             }
         }
+
 
         private static int ResolveEnumIndex(UnityEditor.SerializedProperty prop, JsonValue raw,
             CommandContext context, string fieldName)
@@ -691,7 +1101,16 @@ namespace Aketsuki.UnityMcp
                     return prop.vector3Value.ToString();
                 case UnityEditor.SerializedPropertyType.Vector4:
                     return prop.vector4Value.ToString();
+                case UnityEditor.SerializedPropertyType.ObjectReference:
+                    return prop.objectReferenceValue == null
+                        ? "<none>"
+                        : UnityEditor.AssetDatabase.GetAssetPath(prop.objectReferenceValue);
                 default:
+                    if (IsArrayProperty(prop))
+                    {
+                        return $"<数组[{prop.arraySize}]>";
+                    }
+
                     return $"<{prop.propertyType}>";
             }
         }
