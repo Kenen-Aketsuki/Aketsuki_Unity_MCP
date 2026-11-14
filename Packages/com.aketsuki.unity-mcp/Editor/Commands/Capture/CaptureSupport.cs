@@ -259,7 +259,15 @@ namespace Aketsuki.UnityMcp.Editor
             if (isUi)
             {
                 // UI 只在正面看才有意义；正交投影下 size 是"半高"，不是距离
-                view.rotation = Quaternion.identity;
+                //
+                // 2D 模式下 SceneView 的 rotation 被强制锁成 identity，再赋值会打
+                // "SceneView rotation is fixed to identity when in 2D mode" 警告（未来版本会变成 error）。
+                // 2D 模式本来就在正交正面看，跳过即可 —— 目的已经达到，不必触发警告。
+                if (!view.in2DMode)
+                {
+                    view.rotation = Quaternion.identity;
+                }
+
                 view.orthographic = true;
             }
 
