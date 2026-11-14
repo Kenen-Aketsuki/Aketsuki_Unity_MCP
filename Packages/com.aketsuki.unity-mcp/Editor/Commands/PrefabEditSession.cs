@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using UnityEditor;
+using UnityEditor.SceneManagement;
 using UnityEngine;
 
 namespace Aketsuki.UnityMcp.Editor
@@ -35,13 +36,24 @@ namespace Aketsuki.UnityMcp.Editor
         private sealed class Entry
         {
             public GameObject Root;
-
-            /// <summary>提交过至少一次：用来在收尾时如实报告"本次会话有没有真的写过盘"</summary>
-            public bool Committed;
         }
 
         private static readonly Dictionary<string, Entry> Open =
             new Dictionary<string, Entry>(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>
+        /// 本批次写过盘的 Prefab 路径（IMPR-029 / IMPR-030）。
+        /// <para>
+        /// 不按条目记：某条指令失败会 <see cref="Discard"/> 掉整条会话，条目跟着消失，
+        /// 但"这之前已经提交成功过"是既成事实——那一份改动躺在磁盘上，照样需要重绘。
+        /// </para>
+        /// <para>
+        /// 记路径而不只是 bool：批次结束时要比对"当前 PrefabStage 开的是不是其中一个"，
+        /// 只有命中才值得抢系统前台（抢焦点有代价，不能无差别触发）。
+        /// </para>
+        /// </summary>
+        private static HashSet<string> _committedInBatch =
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         /// <summary>当前是否还有打开的会话（调试 / 状态排查用）</summary>
         public static int OpenCount
@@ -108,11 +120,7 @@ namespace Aketsuki.UnityMcp.Editor
                     $"写回 Prefab 失败：{prefabPath}（SaveAsPrefabAsset 返回 null，本次改动未落盘）");
             }
 
-            Entry entry;
-            if (Open.TryGetValue(prefabPath, out entry))
-            {
-                entry.Committed = true;
-            }
+            _committedInBatch.Add(prefabPath);
         }
 
         /// <summary>
@@ -134,17 +142,116 @@ namespace Aketsuki.UnityMcp.Editor
         /// <summary>批次结束：卸载全部会话（改动早已逐条提交过，这里只回收内存）。</summary>
         public static void Close()
         {
-            if (Open.Count == 0)
+            // 先消费"本批次写过哪些盘"：中途 Discard 会移除条目，
+            // 但前面已经提交过的改动仍然躺在磁盘上，那一份照样该触发重绘
+            var committed = _committedInBatch;
+            _committedInBatch = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            if (Open.Count > 0)
             {
-                return;
+                var entries = new List<KeyValuePair<string, Entry>>(Open);
+                Open.Clear();
+                for (var i = 0; i < entries.Count; i++)
+                {
+                    UnloadQuietly(entries[i].Value, entries[i].Key);
+                }
             }
 
-            var entries = new List<KeyValuePair<string, Entry>>(Open);
-            Open.Clear();
-            for (var i = 0; i < entries.Count; i++)
+            // 只有真的写过盘的批次才值得重绘；纯读（prefab.tree 借用会话）不打扰视图
+            if (committed.Count > 0)
             {
-                UnloadQuietly(entries[i].Value, entries[i].Key);
+                RequestViewRepaint(committed);
             }
+        }
+
+        /// <summary>
+        /// 写完 Prefab 后请求一次全视图重绘；若 Stage 正开着本批次写过的 prefab，再把编辑器提到前台
+        /// （IMPR-029 / IMPR-030）。
+        ///
+        /// <para>
+        /// <b>为什么需要：</b><c>SaveAsPrefabAsset</c> 是同步 import，正开在 Prefab 编辑模式里的
+        /// Stage 会因此整份重建 —— Canvas / Graphic 全是新的，<c>CanvasUpdateRegistry</c> 的
+        /// layout rebuild 队列也在重建时被清空。这个队列只由一次 <c>Canvas.willRenderCanvases</c>
+        /// （即一次视图 repaint）驱动；而 MCP 的泵跑在 <c>EditorApplication.update</c> 里，跑完就收工，
+        /// 不会触发任何重绘 —— Stage 于是停在"布局还没算完"的一帧：ContentSizeFitter / LayoutGroup
+        /// 还没把 sizeDelta 写回，Graphic 也还没 batch，整块 UI 一片空白。
+        /// 必须人手点一下节点（触发 <c>OnSelectionChanged</c> → SceneView repaint）才显示出来。
+        /// </para>
+        ///
+        /// <para>
+        /// <b>为什么只 repaint、不做 <c>LayoutRebuilder.ForceRebuildLayoutImmediate</c>：</b>
+        /// 后者会主动改写 Stage 里 RectTransform 的值，把 Stage 弄成 dirty，用户关窗口时
+        /// Auto Save 一覆盖就是 BUG-018 的重演。repaint 是只读的，与用户手动点一下完全等价。
+        /// </para>
+        ///
+        /// <para>
+        /// <b>为什么扔到 <c>delayCall</c>：</b>Stage 的重建可能落在本次提交之后（import 收尾阶段），
+        /// 立刻 repaint 会赶在重建之前，等于白请求。放到下一帧，重建已经落定。
+        /// </para>
+        /// </summary>
+        /// <param name="committed">本批次写过盘的 prefab 路径集合，用来判断"要不要抢前台"</param>
+        private static void RequestViewRepaint(HashSet<string> committed)
+        {
+            EditorApplication.delayCall += () =>
+            {
+                try
+                {
+                    // SceneView repaint 是真正驱动 Canvas.willRenderCanvases 的那一下；
+                    // RepaintAllViews 顺带刷 Hierarchy / Inspector / Project，避免还显示旧节点树。
+                    // （InspectorWindow 在 2021.3/2022.3 是 internal，拿不到；
+                    //   InternalEditorUtility.RepaintAllViews 是跨版本稳定的等价入口。）
+                    SceneView.RepaintAll();
+                    UnityEditorInternal.InternalEditorUtility.RepaintAllViews();
+
+                    // 编辑器在后台时 GUI 重绘会被节流：RepaintAllViews 只把视图标脏，
+                    // 真正的 paint 要等窗口重新活跃。所以命中 Stage 时顺手把编辑器提到前台，
+                    // 否则用户切回来看到的仍是旧画面，还得再点一下节点（IMPR-030）。
+                    // 只在"Stage 正开着刚写过的那个 prefab"时抢，避免无差别打断用户。
+                    var stage = PrefabStageUtility.GetCurrentPrefabStage();
+                    if (stage == null || string.IsNullOrEmpty(stage.assetPath))
+                    {
+                        return;
+                    }
+
+                    if (!committed.Contains(stage.assetPath))
+                    {
+                        return;
+                    }
+
+                    string note;
+                    if (!EditorWindowFocus.TryBringToFront(FindStageView(stage), out note)
+                        && !string.IsNullOrEmpty(note))
+                    {
+                        CommandLog.Warning("Prefab 写入后未能把编辑器提到前台：" + note);
+                    }
+                }
+                catch (Exception error)
+                {
+                    // 重绘失败绝不能把已经完成的批次变成失败
+                    CommandLog.Warning("Prefab 写入后重绘视图失败：" + error.Message);
+                }
+            };
+        }
+
+        /// <summary>找 PrefabStage 自己那个 SceneView（不是主场景的那个）。</summary>
+        private static SceneView FindStageView(PrefabStage stage)
+        {
+            var views = SceneView.sceneViews;
+            if (views != null)
+            {
+                for (var i = 0; i < views.Count; i++)
+                {
+                    var view = views[i] as SceneView;
+
+                    // SceneView 本身没有 scene 属性，要经由它的相机反查所属场景
+                    if (view != null && view.camera != null && view.camera.scene == stage.scene)
+                    {
+                        return view;
+                    }
+                }
+            }
+
+            return SceneView.lastActiveSceneView;
         }
 
         private static void UnloadQuietly(Entry entry, string prefabPath)
