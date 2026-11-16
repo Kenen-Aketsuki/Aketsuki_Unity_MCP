@@ -317,6 +317,19 @@ Unity 没启动时 `tools/list` 仍会在半秒内返回元工具，调用会得
 并附上"最近一次真正完成的编译在何时"；`data.rejectedReason` 非空 / `requestedUtc` 比
 `finishedUtc` 新，是同一件事的机读判据。**摘要说"成功"而 `rejectedReason` 非空时，以被拒为准。**
 
+**要证明"这次真的编出来了"，看磁盘产物，别看 `Library/ScriptAssemblies/` 的时间戳**：
+`compile --clean` 干净重编之后，如果产物与上一版逐字节相同，Unity 的增量复制会**跳过**
+`Library/ScriptAssemblies/<程序集>.dll`，mtime 停在旧值——只看它会得出"编译压根没跑"的结论。
+可信判据：`Library/Bee/artifacts/*.dag/`（含 `post-processed/`）下同名 dll 的 mtime、
+`lastCompile.finishedUtc` 与 `durationMs`，再按 UTF-16LE 在二进制里搜新加的类型名 / 方法名，
+确认符号真的进了程序集。三条对上才算"这次的代码编出来了"。
+
+**离线编译工具（`unity_offline_compile.py`）只是参考，且它曾经假绿**：它对 asmdef 程序集是
+「按 asmdef 目录实扫 + 并上 Unity 生成的 csproj 清单」，早期只扫 `Assets/`，
+于是 `Packages/` 下的 UPM 包一个文件都扫不到、退回读那份**滞后的 csproj**，
+把新写的类报成一屏假 `CS0103`（"当前上下文中不存在名称 Xxx"，而文件明明在盘上）。
+看到这类"名称不存在"而文件确实存在时，先怀疑工具，不要怀疑代码。
+
 **编译错误 vs 运行时错误**：上面管的是"编不编得过"。若编译通过但跑起来异常
 （NullReferenceException、资源缺失等），用 `console.read`：
 
