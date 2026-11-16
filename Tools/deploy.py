@@ -498,6 +498,56 @@ def apply_skill_plan(plan, root, dry_run=False, skill_root=None):
     return len(entries)
 
 
+def report_local_skill_copy():
+    """比对本仓库自己那份 `.workbuddy/skills/unity-cmd/`（IMPR-031，2026-11-16 拍板 A）。
+
+    `<目标工程>/.workbuddy/skills/unity-cmd/` 是部署对象，本仓库自己这份**不是** ——
+    于是它只能靠人记着同步，长期漂移：2026-11-14 实测 `scripts/send.py` 还停在 11-04，
+    比包内落后 286 行（缺"`--target` 只认全名"、"`prune`"这些关键变更），
+    而 AI 读的 SKILL.md 正是从这里取的 —— 文档旧比代码旧更坑人。
+
+    拍板选的 A：**只比对、只告警，绝不写**。部署工具不该改自己的仓库；
+    真要对齐，把包内 `Editor/McpBridge/` 的这几个文件覆盖过去就行。
+    """
+    if not SKILL_FILES:
+        return  # ADB 这种不带桥的模块：没这回事
+
+    base = os.path.join(REPO, *SKILL_DIR_REL.split("/"))
+    head = "    本仓库技能副本 %s" % SKILL_DIR_REL
+
+    if not os.path.isdir(base):
+        print("%s：不存在（AI 侧读不到说明文档，也不会有任何自动同步）" % head)
+        return
+
+    absent, differs = [], []
+    for name, rel in SKILL_FILES:
+        src_abs = os.path.join(BRIDGE_ROOT, name)
+        dst_abs = os.path.join(base, *rel.split("/"))
+        if not os.path.isfile(dst_abs):
+            absent.append(rel)
+            continue
+        try:
+            if norm(read_bytes(src_abs)) != norm(read_bytes(dst_abs)):
+                differs.append(rel)
+        except Exception:       # noqa: BLE001 —— 读不了就当不一致，别让校验本身炸掉部署
+            differs.append(rel)
+
+    if not absent and not differs:
+        print("%s：✓ 与包内一致（%d 个文件）" % (head, len(SKILL_FILES)))
+        return
+
+    bits = []
+    if absent:
+        bits.append("缺 %d 个" % len(absent))
+    if differs:
+        bits.append("内容不同 %d 个" % len(differs))
+    print("%s：⚠ %s —— %s"
+          % (head, " / ".join(bits), ", ".join(absent + differs)))
+    bridge_rel = "/".join(p for p in (SRC_REL, MODULES[ACTIVE_MODULE]["bridge"]) if p)
+    print("      它不是部署目标，不会自动同步；要用最新的说明文档，就把 %s/ 下的同名文件覆盖过去"
+          % bridge_rel)
+
+
 def install_fresh(plan, dest_root, root, dry_run=False):
     """首次安装：整个目录一次落地。
 
@@ -1184,6 +1234,9 @@ def main(argv=None):
                 failures += 1
 
         print("")
+
+    # 目标都处理完了，最后看一眼本仓库自己那份（它不是部署目标，只能告警）
+    report_local_skill_copy()
 
     if args.list or args.check:
         print("（%s 模式：未修改任何文件）" % ("list" if args.list else "check"))
