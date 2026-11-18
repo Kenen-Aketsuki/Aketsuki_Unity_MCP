@@ -274,6 +274,44 @@ def test_tool_modes():
     check("meta 模式体积 < 4k 字符", size_meta < 4000, "%d" % size_meta)
 
 
+def test_usage_schema():
+    """usage → JSON Schema：联合类型不能只留第一个候选，纯取值列表必须有 type。"""
+    print("参数 schema：")
+
+    def schema(text):
+        return mcp._type_to_schema(text)
+
+    # 单一类型：行为不变
+    check("string 带中文括注仍识别为 string",
+          schema("string（Prefab 模式下空串=根）").get("type") == "string")
+
+    # 真·联合类型：类型名必须整个丢掉，否则客户端按 schema 校验会判另一半写法非法
+    for text in ("string|object", "int|string", "number|array"):
+        item = schema(text)
+        check("%s 不硬塞第一个候选" % text, "type" not in item, str(item))
+        check("%s 保留原文" % text, text in (item.get("description") or ""), str(item))
+
+    # 纯取值列表：没有一个是类型名，本质是字符串枚举
+    for text, options in (("frame|window|full", "frame / window / full"),
+                          ("info|warn|error", "info / warn / error"),
+                          ("V|D|I|W|E|F|A", "V / D / I / W / E / F / A")):
+        item = schema(text)
+        check("%s 识别为 string" % text, item.get("type") == "string", str(item))
+        check("%s 列出可选值" % text, options in (item.get("description") or ""), str(item))
+
+    # 括号里的 | 不是候选分隔符：整段仍是一个 string
+    item = schema("string(rect|transform|none)")
+    check("括号内的 | 不拆", item.get("type") == "string", str(item))
+
+    # 同义候选（都映射到同一个 JSON 类型）仍应按该类型处理
+    check("int|integer 仍是 integer",
+          schema("int|integer").get("type") == "integer")
+
+    # any / 空：故意不给 type（任意 JSON 值）
+    check("any 不给 type", "type" not in schema("any"))
+    check("空类型不给 type", "type" not in schema(""))
+
+
 def test_catalog():
     """本地指令清单：读得到、按工程精确挑、不串到别的工程。"""
     print("本地指令清单：")
@@ -407,6 +445,7 @@ def main():
     test_cli_target_selector()
     test_name_match_real()
     test_tool_modes()
+    test_usage_schema()
     test_catalog()
 
     print("")

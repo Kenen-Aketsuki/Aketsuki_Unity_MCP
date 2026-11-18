@@ -629,6 +629,34 @@ def _split_type_token(text):
     return text[:i], text[i:]
 
 
+def _is_simple_identifier(text):
+    """`frame` / `V` / `onDirty` 这类候选值；`(rect|transform|none)` 这种带括号的不算。"""
+    if not text or text[0].isdigit():
+        return False
+    for ch in text:
+        if not (ch.isascii() and (ch.isalnum() or ch == "_")):
+            return False
+    return True
+
+
+def _split_alternatives(text):
+    """把 `a|b|c` 拆成候选列表；不是纯候选列表时返回 None。
+
+    只认「整段都是简单标识符、且至少两个候选」的写法。`string(rect|transform|none)`
+    里的 `|` 在括号内，语义是"这个字符串取三种值之一"，整段仍是一个 string，不能拆。
+    """
+    if "|" not in text:
+        return None
+
+    parts = [part.strip() for part in text.split("|")]
+    if len(parts) < 2:
+        return None
+    for part in parts:
+        if not _is_simple_identifier(part):
+            return None
+    return parts
+
+
 def _type_to_schema(type_text):
     text = (type_text or "").strip()
 
@@ -636,11 +664,30 @@ def _type_to_schema(type_text):
         # [x,y,z] / [...] / [w,h] —— 一律当数组；元素类型无法从 usage 精确得知
         return {"type": "array", "description": text}
 
+    # `a|b|c` 有两种完全不同的语义，必须分开处理：
+    #   ① 取值列表（frame|window|full、info|warn|error、V|D|I|W|E|F|A）——没有一个候选是类型名，
+    #      本质是"字符串，取这几个值之一"。以前这里落到"未知类型"分支，连 type 都不给。
+    #   ② 真·联合类型（string|object、int|string、number|array）——**不能只留第一个候选**：
+    #      schema 会因此把另一半合法写法判成类型错误（target 传 {"scene":..} 就是典型）。
+    alternatives = _split_alternatives(text)
+    if alternatives is not None:
+        mapped = [_TYPE_ALIASES.get(part.lower()) for part in alternatives]
+        known = [item for item in mapped if item]
+
+        if not known:
+            return {"type": "string", "description": "可选：%s" % " / ".join(alternatives)}
+
+        if len(known) == len(alternatives) and len(set(known)) == 1:
+            # 同义候选（int|integer）：它就是那一个类型
+            return {"type": known[0], "description": text}
+
+        return {"description": text + "（任选其中一种写法）"}
+
     name, rest = _split_type_token(text)
     schema_type = _TYPE_ALIASES.get(name.lower())
 
     if schema_type is None:
-        # 未知类型（target / vertical|horizontal / any / 空）：不限制，把原文写进描述
+        # 未知类型（target / any / 空）：不限制，把原文写进描述
         if not text:
             return {"description": "任意 JSON 值"}
         return {"description": text if name.lower() != "any" else text + "（任意 JSON 值）"}
