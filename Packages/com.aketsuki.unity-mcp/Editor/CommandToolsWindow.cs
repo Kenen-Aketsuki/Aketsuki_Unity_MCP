@@ -19,6 +19,7 @@ namespace Aketsuki.UnityMcp.Editor
         // 靠下的「已注册指令」「运行日志」就永久看不到——内部那两个固定高度滚动区救不了它。
         private Vector2 _windowScroll;
         private bool _showSettings = true;
+        private bool _showCleanup = true;
         private bool _showCommands;
         private bool _showRuntimeCommands;
         private bool _captureLogs = true;
@@ -69,6 +70,8 @@ namespace Aketsuki.UnityMcp.Editor
             // ——它们是刻意限高的，长列表不该把外层撑开；外层这层只负责"窗口矮的时候也能滚到底"。
             _windowScroll = EditorGUILayout.BeginScrollView(_windowScroll);
             DrawExecuteSection();
+            EditorGUILayout.Space();
+            DrawCleanupSection();
             EditorGUILayout.Space();
             DrawSettingsSection();
             EditorGUILayout.Space();
@@ -148,6 +151,112 @@ namespace Aketsuki.UnityMcp.Editor
 
         #endregion
 
+        #region 指令目录清理区
+
+        /// <summary>
+        /// 指令目录清理（2026-11-18 主人提的需求）。
+        /// <para>
+        /// 清理规则早就实现了，但在 <c>command.cleanup</c> 指令里，窗口上没有入口——
+        /// "指令 .json 攒了一堆 / 截图堆满"的时候，人只能去敲 JSON 或等外部定时任务。
+        /// 这里补一个按钮，<b>直连同一个指令类</b>，不复制清理规则（两套规则迟早会跑偏）。
+        /// </para>
+        /// <para>
+        /// 一律先空跑报数，人点「删除」才真删：这个动作不可撤销，值得多一次确认。
+        /// </para>
+        /// </summary>
+        private void DrawCleanupSection()
+        {
+            _showCleanup = EditorGUILayout.Foldout(_showCleanup, "指令目录清理", true);
+            if (!_showCleanup)
+            {
+                return;
+            }
+
+            EditorGUI.indentLevel++;
+
+            EditorGUILayout.HelpBox(
+                "清理范围：指令目录根下已用过的 .json、_done 归档、各子目录里的截图。\n" +
+                "不动：consent-results.json 与 commands.<工程哈希>.json（服务端自有），以及近 60 分钟内的截图。",
+                MessageType.None);
+
+            EditorGUILayout.BeginHorizontal();
+            if (GUILayout.Button("清空旧指令"))
+            {
+                RunCleanup(true);
+            }
+            if (GUILayout.Button("仅预览（不删）", GUILayout.Width(120)))
+            {
+                RunCleanup(false);
+            }
+            EditorGUILayout.EndHorizontal();
+
+            EditorGUI.indentLevel--;
+        }
+
+        /// <summary>
+        /// 跑一次清理。<paramref name="confirm"/> 为 true 时先空跑、弹窗报数、人点确认才真删。
+        /// </summary>
+        private void RunCleanup(bool confirm)
+        {
+            var preview = ExecuteCleanup(true);
+            if (!preview.Success)
+            {
+                CommandLog.Warning("清理预演失败：" + preview.Message);
+                return;
+            }
+
+            var scanned = preview.Data is JsonValue data ? data.GetInt("scanned") : 0;
+            if (scanned <= 0)
+            {
+                // 没有可删的也照实报——省得人以为按钮没反应
+                CommandLog.Info(preview.Message);
+                return;
+            }
+
+            if (!confirm)
+            {
+                CommandLog.Info(preview.Message);
+                return;
+            }
+
+            if (!EditorUtility.DisplayDialog("清空旧指令",
+                    preview.Message + "\n\n删除后不可撤销，确认继续？", "删除", "取消"))
+            {
+                CommandLog.Info("已取消清理");
+                return;
+            }
+
+            var result = ExecuteCleanup(false);
+            if (result.Success)
+            {
+                CommandLog.Info(result.Message);
+            }
+            else
+            {
+                CommandLog.Warning("清理失败：" + result.Message);
+            }
+        }
+
+        /// <summary>
+        /// 直接调用 <see cref="CleanupCommandFilesCommand"/>。
+        /// <para>
+        /// 不传 <c>olderThanMinutes</c>：走指令自己的默认值（截图豁免 60 分钟、指令/归档不限时间），
+        /// 传了 0 反而会把刚截的图一起删掉。
+        /// </para>
+        /// </summary>
+        private static CommandResult ExecuteCleanup(bool dryRun)
+        {
+            var args = JsonValue.NewObject();
+            args.Set("target", JsonValue.Of("all"));
+            args.Set("dryRun", JsonValue.Of(dryRun));
+
+            var context = new CommandContext("command.cleanup",
+                new CommandArgs(args, "command.cleanup"), dryRun: dryRun);
+            return new CleanupCommandFilesCommand().Execute(context);
+        }
+
+        #endregion
+
         #region 设置区
 
         private void DrawSettingsSection()
@@ -208,7 +317,7 @@ namespace Aketsuki.UnityMcp.Editor
             }
 
             EditorGUILayout.HelpBox(
-                "执行后处理三选一：删除（优先）> 归档到 _done > 都不勾则保留原文件。想批量清理已攒文件可用 command.cleanup 指令。",
+                "执行后处理三选一：删除（优先）> 归档到 _done > 都不勾则保留原文件。想批量清理已攒文件用上方「指令目录清理」按钮，或 command.cleanup 指令。",
                 MessageType.None);
 
             var watchdog = EditorGUILayout.IntField("单指令超时告警（秒，0=关）",
