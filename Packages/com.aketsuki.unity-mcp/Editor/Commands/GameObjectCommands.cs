@@ -161,7 +161,8 @@ namespace Aketsuki.UnityMcp
 
 #if UNITY_EDITOR
             // 在 Prefab 编辑模式里改到了别的场景的对象：几乎一定是"想改 prefab 资产、结果改了场景实例"
-            var stageWarning = DescribeSceneHitWhileEditingPrefab(go, prefabParam);
+            var stageWarning = GameObjectEditWarning.DescribeSceneHitWhileEditingPrefab(
+                go, prefabParam, "prefab.setActive");
             if (stageWarning != null)
             {
                 result.AddWarning(stageWarning);
@@ -169,33 +170,6 @@ namespace Aketsuki.UnityMcp
 #endif
             return result;
         }
-
-#if UNITY_EDITOR
-        /// <summary>
-        /// 当前正开着 PrefabStage，而命中的对象不在那个 Stage 里 → 返回一句警告。
-        /// <para>
-        /// 这个组合本身就是 IMPR-017 实际踩到的场景：Stage 打开时 <c>SceneQuery</c> 只搜已加载的场景
-        /// （Stage 是预览场景，搜不到），同一个层级路径就会命中场景里的实例，改动落进场景文件。
-        /// </para>
-        /// </summary>
-        private static string DescribeSceneHitWhileEditingPrefab(GameObject hit, string prefabParam)
-        {
-            var stage = UnityEditor.SceneManagement.PrefabStageUtility.GetCurrentPrefabStage();
-            if (stage == null || hit == null)
-            {
-                return null;
-            }
-
-            if (hit.scene == stage.scene)
-            {
-                return null;
-            }
-
-            return $"当前处于 Prefab 编辑模式（{stage.scene.name}），但命中的 {hit.name} 在场景 " +
-                   $"'{hit.scene.name}' 里——本次改的是那个场景实例，不是 Prefab 资产。" +
-                   "要改 Prefab 资产请用 prefab.setActive，或给本指令加 prefab 参数。";
-        }
-#endif
     }
 
     /// <summary>
@@ -232,6 +206,24 @@ namespace Aketsuki.UnityMcp
     }
 
     /// <summary>
+    /// <c>gameobject.setProperty</c> / <c>prefab.setProperty</c> 两个域共用的入参解析结果（IMPR-032）。
+    /// <para>
+    /// 抽成结构体而不是"各自读一遍 context"，是为了让 layer 名解析、0-31 范围校验、"至少给一项"的提示
+    /// 只有一份实现——IMPR-017 修完 setActive 之后 setProperty 又留下半年的那类分叉，就是这么来的。
+    /// </para>
+    /// </summary>
+    internal struct SetPropertySpec
+    {
+        public bool HasLayer;
+        public int Layer;
+        public bool HasTag;
+        public string Tag;
+        public bool HasStatic;
+        public bool IsStatic;
+        public bool IncludeChildren;
+    }
+
+    /// <summary>
     /// 设置 GameObject **自身**属性（layer / tag / isStatic）——IMPR-002。
     /// <para>
     /// <c>component.setField</c> 只作用于组件字段，而 layer / tag / isStatic 挂在 GameObject 上
@@ -241,66 +233,66 @@ namespace Aketsuki.UnityMcp
     /// </para>
     /// <para>
     /// 参数：target（必填）、layer（int 或层名，如 "UI"）、tag（string）、isStatic（bool）、
-    /// includeChildren（默认 false，只对 layer 生效，连同整棵子树一起刷）
+    /// includeChildren（默认 false，只对 layer 生效，连同整棵子树一起刷）、
+    /// prefab（可选，给了就改这个 <b>Prefab 资产</b>而不是场景，语义同 <c>gameobject.setActive</c>）
+    /// </para>
+    /// <para>
+    /// IMPR-032：与 IMPR-017 的 setActive 完全同型——早期没有 <c>prefab</c> 参数，调用方按
+    /// <c>component.setField</c> 的习惯带上它时参数被静默丢掉，节点路径再命中"打开着的场景里的同名实例"，
+    /// 就会**改错地方**（Prefab 里的节点没动、场景文件被改）。现在给了 prefab 就转投 prefab 域；
+    /// 场景分支在 Prefab 编辑模式下命中场景实例时也会明确警告。
     /// </para>
     /// </summary>
     [Command("gameobject.setProperty",
-        Description = "设置 GameObject 自身属性（layer / tag / isStatic），layer 可连同子树",
-        Usage = "target: string, layer: int|string, tag: string, isStatic: bool, includeChildren: bool",
+        Description = "设置 GameObject 自身属性（layer / tag / isStatic），layer 可连同子树；可指定 prefab 改资产",
+        Usage = "target: string, layer: int|string, tag: string, isStatic: bool, includeChildren: bool, prefab: string",
         EditorOnly = true)]
     public sealed class SetGameObjectPropertyCommand : ICommand
     {
         public CommandResult Execute(CommandContext context)
         {
             var targetSpec = context.Args.RequireString("target");
+
+            // prefab 参数：转投 prefab 域，绝不"忽略参数继续改场景"（IMPR-032，与 IMPR-017 同根因）
+            var prefabParam = context.Args.GetString("prefab", null);
+            if (!string.IsNullOrEmpty(prefabParam))
+            {
+#if UNITY_EDITOR
+                var normalized = Aketsuki.UnityMcp.Editor.PrefabEditUtil.NormalizePrefabPath(context, prefabParam);
+                return Aketsuki.UnityMcp.Editor.PrefabEditUtil.SetPropertyOnAsset(context, normalized, targetSpec);
+#else
+                throw new CommandException($"指令 '{context.CommandId}' 只能在编辑器内执行");
+#endif
+            }
+
             if (!SceneQuery.TryResolveUnique(targetSpec, out var target, out var resolveError))
             {
                 throw new CommandArgumentException(context.CommandId, "target", resolveError);
             }
 
-            var hasLayer = context.Args.Has("layer");
-            var hasTag = context.Args.Has("tag");
-            var hasStatic = context.Args.Has("isStatic");
-            if (!hasLayer && !hasTag && !hasStatic)
-            {
-                throw new CommandArgumentException(context.CommandId, "layer",
-                    "至少要给 layer / tag / isStatic 之一（激活态请用 gameobject.setActive，改名请用 gameobject.rename）");
-            }
-
-            var includeChildren = context.Args.GetBool("includeChildren", false);
-            var layer = hasLayer ? ResolveLayer(context, context.Args.Get("layer")) : -1;
-            var tag = hasTag ? context.Args.GetString("tag", string.Empty) : null;
-            var isStatic = hasStatic && context.Args.GetBool("isStatic", false);
+            var spec = ParseSpec(context);
 
             var go = target.gameObject;
 #if UNITY_EDITOR
             UnityEditor.Undo.RecordObject(go, "CommandSystem.SetGameObjectProperty");
             UnityEditor.Undo.RecordObject(target, "CommandSystem.SetGameObjectProperty");
 #endif
-            if (hasTag)
+            if (spec.HasTag)
             {
-                try
-                {
-                    go.tag = tag;
-                }
-                catch (UnityException)
-                {
-                    throw new CommandArgumentException(context.CommandId, "tag",
-                        $"'{tag}' 不是工程里已定义的 Tag（未定义的 Tag 需先在 Project Settings → Tags and Layers 里加）");
-                }
+                ApplyTag(context, go, spec.Tag);
             }
 
-            if (hasStatic)
+            if (spec.HasStatic)
             {
-                go.isStatic = isStatic;
+                go.isStatic = spec.IsStatic;
             }
 
             var affected = 0;
-            if (hasLayer)
+            if (spec.HasLayer)
             {
-                go.layer = layer;
+                go.layer = spec.Layer;
                 affected = 1;
-                if (includeChildren)
+                if (spec.IncludeChildren)
                 {
                     foreach (var child in target.GetComponentsInChildren<Transform>(true))
                     {
@@ -312,7 +304,7 @@ namespace Aketsuki.UnityMcp
 #if UNITY_EDITOR
                         UnityEditor.Undo.RecordObject(child.gameObject, "CommandSystem.SetGameObjectProperty");
 #endif
-                        child.gameObject.layer = layer;
+                        child.gameObject.layer = spec.Layer;
                         affected++;
                     }
                 }
@@ -325,31 +317,89 @@ namespace Aketsuki.UnityMcp
 
             var data = JsonValue.NewObject();
             data.Set("path", JsonValue.Of(SceneQuery.BuildPath(target)));
-            data.Set("layer", hasLayer ? JsonValue.Of(layer) : JsonValue.Null);
-            data.Set("layerName", hasLayer ? JsonValue.Of(LayerMask.LayerToName(layer)) : JsonValue.Null);
-            data.Set("tag", hasTag ? JsonValue.Of(go.tag) : JsonValue.Null);
-            data.Set("isStatic", hasStatic ? JsonValue.Of(go.isStatic) : JsonValue.Null);
+            data.Set("layer", spec.HasLayer ? JsonValue.Of(spec.Layer) : JsonValue.Null);
+            data.Set("layerName", spec.HasLayer ? JsonValue.Of(LayerMask.LayerToName(spec.Layer)) : JsonValue.Null);
+            data.Set("tag", spec.HasTag ? JsonValue.Of(go.tag) : JsonValue.Null);
+            data.Set("isStatic", spec.HasStatic ? JsonValue.Of(go.isStatic) : JsonValue.Null);
             data.Set("affectedCount", JsonValue.Of(affected));
             SceneQueryCommandsUtil.AttachScene(data);
 
             var parts = new System.Collections.Generic.List<string>();
-            if (hasLayer)
+            if (spec.HasLayer)
             {
-                parts.Add($"layer={layer}({LayerMask.LayerToName(layer)})" + (includeChildren ? $"（含子树 {affected} 个节点）" : string.Empty));
+                parts.Add($"layer={spec.Layer}({LayerMask.LayerToName(spec.Layer)})"
+                          + (spec.IncludeChildren ? $"（含子树 {affected} 个节点）" : string.Empty));
             }
 
-            if (hasTag)
+            if (spec.HasTag)
             {
                 parts.Add($"tag={go.tag}");
             }
 
-            if (hasStatic)
+            if (spec.HasStatic)
             {
                 parts.Add($"isStatic={go.isStatic}");
             }
 
-            return CommandResult.Ok(
+            var result = CommandResult.Ok(
                 $"已设置 {SceneQuery.BuildPath(target)} 的 {string.Join("、", parts.ToArray())}", data);
+
+#if UNITY_EDITOR
+            // 在 Prefab 编辑模式里改到了别的场景的对象：几乎一定是"想改 prefab 资产、结果改了场景实例"
+            var stageWarning = GameObjectEditWarning.DescribeSceneHitWhileEditingPrefab(
+                go, prefabParam, "prefab.setProperty");
+            if (stageWarning != null)
+            {
+                result.AddWarning(stageWarning);
+            }
+#endif
+            return result;
+        }
+
+        /// <summary>
+        /// 解析 layer / tag / isStatic / includeChildren（场景与 Prefab 两个域共用一份）。
+        /// <para>
+        /// 缺省语义：<c>includeChildren</c> 只影响 layer，且对 <b>整棵子树</b> 生效——
+        /// 注意这与 <c>setActive</c> / <c>prefab.setActive</c> 的"只切一级子节点"不同，
+        /// 两个命令从 IMPR-002 起就不一样，别为了"对齐"把它改成一级。
+        /// </para>
+        /// </summary>
+        internal static SetPropertySpec ParseSpec(CommandContext context)
+        {
+            var spec = new SetPropertySpec
+            {
+                HasLayer = context.Args.Has("layer"),
+                HasTag = context.Args.Has("tag"),
+                HasStatic = context.Args.Has("isStatic"),
+                IncludeChildren = context.Args.GetBool("includeChildren", false),
+            };
+
+            if (!spec.HasLayer && !spec.HasTag && !spec.HasStatic)
+            {
+                throw new CommandArgumentException(context.CommandId, "layer",
+                    "至少要给 layer / tag / isStatic 之一"
+                    + "（激活态请用 gameobject.setActive / prefab.setActive，"
+                    + "改名请用 gameobject.rename / prefab.renameNode）");
+            }
+
+            spec.Layer = spec.HasLayer ? ResolveLayer(context, context.Args.Get("layer")) : -1;
+            spec.Tag = spec.HasTag ? context.Args.GetString("tag", string.Empty) : null;
+            spec.IsStatic = spec.HasStatic && context.Args.GetBool("isStatic", false);
+            return spec;
+        }
+
+        /// <summary>设 tag；未定义的 tag 转成可读的参数错误（场景与 Prefab 域共用）。</summary>
+        internal static void ApplyTag(CommandContext context, GameObject go, string tag)
+        {
+            try
+            {
+                go.tag = tag;
+            }
+            catch (UnityException)
+            {
+                throw new CommandArgumentException(context.CommandId, "tag",
+                    $"'{tag}' 不是工程里已定义的 Tag（未定义的 Tag 需先在 Project Settings → Tags and Layers 里加）");
+            }
         }
 
         /// <summary>layer 参数：数字（0-31）或层名（"UI"/"Default"/自定义层），失败时列出可选层名。</summary>
@@ -594,4 +644,42 @@ namespace Aketsuki.UnityMcp
 #endif
         }
     }
+
+#if UNITY_EDITOR
+    /// <summary>
+    /// 场景类指令共用的"改错地方"检测（IMPR-017 为 setActive 建，IMPR-032 扩到 setProperty）。
+    /// <para>
+    /// 提到类外面是因为原来它是 <c>SetActiveGameObjectCommand</c> 的 private 方法：setProperty 想复用
+    /// 就够不着，而"照着复制一份、文案里的推荐指令忘了改"正是这类提示最容易腐化的方式。
+    /// </para>
+    /// </summary>
+    internal static class GameObjectEditWarning
+    {
+        /// <summary>
+        /// 当前正开着 PrefabStage，而命中的对象不在那个 Stage 里 → 返回一句警告。
+        /// <para>
+        /// 这个组合本身就是 IMPR-017 实际踩到的场景：Stage 打开时 <c>SceneQuery</c> 只搜已加载的场景
+        /// （Stage 是预览场景，搜不到），同一个层级路径就会命中场景里的实例，改动落进场景文件。
+        /// </para>
+        /// </summary>
+        /// <param name="prefabCommand">推荐给调用方的 prefab 域指令名（setActive / setProperty 各不相同）。</param>
+        public static string DescribeSceneHitWhileEditingPrefab(GameObject hit, string prefabParam, string prefabCommand)
+        {
+            var stage = UnityEditor.SceneManagement.PrefabStageUtility.GetCurrentPrefabStage();
+            if (stage == null || hit == null)
+            {
+                return null;
+            }
+
+            if (hit.scene == stage.scene)
+            {
+                return null;
+            }
+
+            return $"当前处于 Prefab 编辑模式（{stage.scene.name}），但命中的 {hit.name} 在场景 " +
+                   $"'{hit.scene.name}' 里——本次改的是那个场景实例，不是 Prefab 资产。" +
+                   $"要改 Prefab 资产请用 {prefabCommand}，或给本指令加 prefab 参数。";
+        }
+    }
+#endif
 }

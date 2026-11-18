@@ -204,6 +204,146 @@ namespace Aketsuki.UnityMcp.Editor
         }
 
         /// <summary>
+        /// 设置 Prefab 资产内某个节点的自身属性（layer / tag / isStatic）——IMPR-032。
+        /// <para>
+        /// <c>prefab.setProperty</c> 直接调用；<c>gameobject.setProperty</c> 带 <c>prefab</c> 参数时也走这里。
+        /// 参数解析共用 <see cref="SetGameObjectPropertyCommand.ParseSpec"/>，两个域天然同口径。
+        /// </para>
+        /// <para>
+        /// 与 <c>SetActiveOnAsset</c> 有一处**故意不一致**：<c>includeChildren</c> 在这里刷的是
+        /// <b>整棵子树</b>（<c>GetComponentsInChildren</c>），而 setActive 那边只切一级子节点。
+        /// 这是 gameobject 域从 IMPR-002 起就存在的差异，两个域各自保持一致，不互相"对齐"——
+        /// 照抄 setActive 的写法会造出"同一个参数两个域行为不同"的新坑。
+        /// </para>
+        /// </summary>
+        public static CommandResult SetPropertyOnAsset(CommandContext context, string prefabPath, string targetSpec)
+        {
+            var spec = SetGameObjectPropertyCommand.ParseSpec(context);
+
+            return EditPrefab(context, prefabPath, root =>
+            {
+                var node = SetComponentFieldCommand.ResolvePrefabTarget(root, targetSpec, context);
+                var go = node.gameObject;
+
+                if (spec.HasTag)
+                {
+                    SetGameObjectPropertyCommand.ApplyTag(context, go, spec.Tag);
+                }
+
+                // isStatic 的 setter 会把 m_StaticEditorFlags 整体置满 / 清零，
+                // 改前留一份原值，改动后回显 + 清零时给警告（坑见 IMPR-032 反馈单第 3 条）
+                var staticFlagsBefore = 0;
+                if (spec.HasStatic)
+                {
+                    staticFlagsBefore = (int)GameObjectUtility.GetStaticEditorFlags(go);
+                    go.isStatic = spec.IsStatic;
+                }
+
+                var affected = 0;
+                var changed = 0;
+                if (spec.HasLayer)
+                {
+                    ApplyLayer(go, spec.Layer, ref affected, ref changed);
+                    if (spec.IncludeChildren)
+                    {
+                        foreach (var child in node.GetComponentsInChildren<Transform>(true))
+                        {
+                            if (child == node)
+                            {
+                                continue;
+                            }
+
+                            ApplyLayer(child.gameObject, spec.Layer, ref affected, ref changed);
+                        }
+                    }
+                }
+
+                var path = PrefabEditCommandsUtil.BuildNodePath(node);
+                var data = JsonValue.NewObject();
+                data.Set("prefab", JsonValue.Of(prefabPath));
+                data.Set("path", JsonValue.Of(path));
+                data.Set("layer", spec.HasLayer ? JsonValue.Of(go.layer) : JsonValue.Null);
+                data.Set("layerName", spec.HasLayer ? JsonValue.Of(LayerMask.LayerToName(go.layer)) : JsonValue.Null);
+                data.Set("tag", spec.HasTag ? JsonValue.Of(go.tag) : JsonValue.Null);
+                data.Set("isStatic", spec.HasStatic ? JsonValue.Of(go.isStatic) : JsonValue.Null);
+                data.Set("includeChildren", JsonValue.Of(spec.IncludeChildren && spec.HasLayer));
+                data.Set("affectedCount", JsonValue.Of(affected));
+                data.Set("changedCount", JsonValue.Of(changed));
+                if (spec.HasStatic)
+                {
+                    data.Set("staticEditorFlagsBefore", JsonValue.Of(staticFlagsBefore));
+                }
+
+                var parts = new List<string>();
+                if (spec.HasLayer)
+                {
+                    parts.Add($"layer={go.layer}({LayerMask.LayerToName(go.layer)})"
+                              + (spec.IncludeChildren ? $"（含子树 {affected} 个节点，实际改动 {changed} 个）" : string.Empty));
+                }
+
+                if (spec.HasTag)
+                {
+                    parts.Add($"tag={go.tag}");
+                }
+
+                if (spec.HasStatic)
+                {
+                    parts.Add($"isStatic={go.isStatic}");
+                }
+
+                var result = CommandResult.Ok(
+                    $"已设置 {prefabPath} 里的 {path} 的 {string.Join("、", parts.ToArray())}"
+                    + (spec.HasLayer && spec.IncludeChildren && changed == 0 ? "（本来就已是该层，未改动）" : string.Empty),
+                    data);
+
+                // 嵌套实例：改的是"本资产里这个实例的 override"，源 Prefab 不跟着变。
+                // 不说明的话，下一个人看到"改了没生效"又会怀疑指令坏了。
+                var instanceRoot = PrefabUtility.GetNearestPrefabInstanceRoot(go);
+                if (instanceRoot != null && instanceRoot != root)
+                {
+                    var source = PrefabUtility.GetCorrespondingObjectFromSource(instanceRoot);
+                    var sourcePath = source != null ? AssetDatabase.GetAssetPath(source) : null;
+                    result.AddWarning(
+                        $"{path} 属于嵌套 Prefab 实例"
+                        + (string.IsNullOrEmpty(sourcePath) ? string.Empty : $"（{sourcePath}）")
+                        + "：本次只改了这个实例的 override，源 Prefab 不受影响；要改源请用它的 prefab 路径。");
+                }
+
+                if (spec.HasStatic && !spec.IsStatic && staticFlagsBefore != 0)
+                {
+                    result.AddWarning(
+                        $"isStatic=false 把 m_StaticEditorFlags 整体清零了（改前 {DescribeStaticFlags(staticFlagsBefore)}）。"
+                        + "只想取消其中某一项请在编辑器面板 / YAML 里改，容器里没有细分 flags 的直通指令。");
+                }
+
+                return result;
+            });
+        }
+
+        /// <summary>把 StaticEditorFlags 的位值还原成面板上的名字（实测回的是 2147483647 这种数字，对使用者没意义）。</summary>
+        private static string DescribeStaticFlags(int flags)
+        {
+            if (flags == 0)
+            {
+                return "none";
+            }
+
+            var text = ((StaticEditorFlags)flags).ToString();
+            return text == flags.ToString() ? $"0x{flags:X}" : text;
+        }
+
+        /// <summary>给单个节点刷 layer，顺带统计"参与数 / 真的变了数"（幂等判定用）。</summary>
+        private static void ApplyLayer(GameObject go, int layer, ref int affected, ref int changed)
+        {
+            affected++;
+            if (go.layer != layer)
+            {
+                go.layer = layer;
+                changed++;
+            }
+        }
+
+        /// <summary>
         /// 把 source 节点上的所有组件复制到 dest（Transform 除外，Hierarchy 已自带）。
         /// 用 <c>EditorUtility.CopySerialized</c> 保真复制；对象引用不重映射（仍指向源节点）。
         /// </summary>
@@ -1191,6 +1331,38 @@ namespace Aketsuki.UnityMcp.Editor
             var includeChildren = context.Args.GetBool("includeChildren", false);
 
             return PrefabEditUtil.SetActiveOnAsset(context, prefabPath, targetSpec, active, includeChildren);
+#else
+            throw new CommandException($"指令 '{context.CommandId}' 只能在编辑器内执行");
+#endif
+        }
+    }
+
+    /// <summary>
+    /// 设置 Prefab 资产内某个节点的自身属性（layer / tag / isStatic）——IMPR-032。
+    /// <para>
+    /// 为什么必须有这条：<c>gameobject.setProperty</c> 只在当前已加载场景里找节点，传 <c>prefab</c>
+    /// 参数会被静默忽略、然后按路径命中场景里的同名实例——与 IMPR-017 的 setActive 完全同型的坑。
+    /// 补上之前，想在 Prefab 资产里改某个节点的 layer，唯一办法是手改 <c>.prefab</c> 的 YAML。
+    /// </para>
+    /// <para>参数：prefab（必填）、target（节点路径，空串 = Prefab 根）、layer（int 或层名）、
+    /// tag（string）、isStatic（bool）、includeChildren（默认 false，只对 layer 生效，
+    /// 刷<b>整棵子树</b>，与 gameobject.setProperty 同口径）</para>
+    /// </summary>
+    [Command("prefab.setProperty",
+        Description = "设置 Prefab 资产内节点的自身属性（layer / tag / isStatic，layer 可连同整棵子树）",
+        Usage = "prefab: string, target: string, layer: int|string, tag: string, isStatic: bool, includeChildren: bool",
+        EditorOnly = true)]
+    public sealed class PrefabSetPropertyCommand : ICommand
+    {
+        public CommandResult Execute(CommandContext context)
+        {
+#if UNITY_EDITOR
+            var prefabPath = PrefabEditUtil.NormalizePrefabPath(context, context.Args.RequireString("prefab"));
+            // target 允许空串（= Prefab 根）：根节点的 layer 决定实例化后挂在哪一层，是真需求。
+            // 与 component.setField 的 IMPR-006 约定一致，也区别于 setActive 那边必须写节点名。
+            var targetSpec = context.Args.GetString("target", string.Empty);
+
+            return PrefabEditUtil.SetPropertyOnAsset(context, prefabPath, targetSpec);
 #else
             throw new CommandException($"指令 '{context.CommandId}' 只能在编辑器内执行");
 #endif
