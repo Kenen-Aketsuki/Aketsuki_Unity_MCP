@@ -266,6 +266,12 @@ Unity 没启动时 `tools/list` 仍会在半秒内返回元工具，调用会得
 
 **资源**（`asset.*`）：`refresh` / `save` / `compile` / `compileReport` / `importSprite`
 
+**动画**（`animator.*`，装状态机用）：`controller.create`（新建，缺省把首层权重写成 1——
+`CreateAnimatorControllerAtPath` 建的层 `m_DefaultWeight` 是 0，权重 0 等于不参与混合）/
+`parameter.add` / `parameter.remove` / `state.add` / `state.remove` /
+`transition.add`（`from`/`to` 认 `AnyState` / `Entry` / `Exit` 保留字，`hasExitTime` 默认 false）/
+`transition.remove` / `controller.get`（只读，别再去硬啃 `.controller` 的 YAML）
+
 **编辑器**（`editor.*`）：`state` 只读、`play`※ / `stop`※ 进出 Play（敏感操作）
 
 **运行时**（`runtime.*`，默认关闭，需在控制台开「启用运行时指令」）：

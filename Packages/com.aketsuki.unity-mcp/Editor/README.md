@@ -404,6 +404,14 @@ CommandRegistry.Default.RegisterInstance("my.cmd", new MyCommand(dependency));
 | `prefab.delete` | 删除 Prefab 资产文件（`AssetDatabase.DeleteAsset`，路径过白名单） | `prefab`(必填) |
 | `addressables.addEntry` | 把资产注册为 Addressable 条目（地址缺省=资产路径，组缺省 Default Group；未装 Addressables 的工程报友好错误不炸编译，全部走反射） | `asset`(必填), `address`, `group`, `labels` |
 | `addressables.removeEntry` | 移除 Addressable 条目（不动资产文件；条目不存在时报错） | `asset`(必填) |
+| `animator.controller.create` | 新建 `AnimatorController` 资产（`cleanup` 缺省清掉自动生成的空默认状态，使状态机从空开始）。**实测坑**：`CreateAnimatorControllerAtPath` 建出来的层 `m_DefaultWeight` 是 **0**，权重 0 的层等于不参与混合（动画"完全没生效"且不报任何错），所以本指令**无条件**把首层权重写成 `weight`（默认 1） | `path`(必填), `layer`, `weight`(默认 1), `overwrite`(默认 false), `cleanup`(默认 true), `addressable`(默认 false) |
+| `animator.parameter.add` | 加参数（`Trigger` / `Bool` / `Float` / `Int`），可同时给默认值。Trigger 没有默认值，传了 `default` 会 warning 而不是静默吞掉 | `controller`(必填), `name`(必填), `type`(默认 Trigger), `default` |
+| `animator.parameter.remove` | 删参数，**先清掉引用它的过渡条件**再删（Unity 直接删会留下"永远不触发"的条件）；回报 `removedConditions` / `touchedTransitions` | `controller`(必填), `name`(必填) |
+| `animator.state.add` | 往某一层加状态，可同时绑工程内已有的 `.anim`、设默认状态、给图位置（不给 `position` 时按状态数自动往右排）。同名状态直接报错并列出该层现有状态 | `controller`(必填), `name`(必填), `layer`, `motion`, `default`, `position`, `tag`, `speed`, `writeDefaultValues` |
+| `animator.state.remove` | 删状态；是默认状态时先清 `defaultState` 再删，并 warning 提醒重新指定 | `controller`(必填), `name`(必填), `layer` |
+| `animator.transition.add` | 加过渡。`from` / `to` 支持保留字 `AnyState` / `Entry` / `Exit`：`AnyState→状态`、`Entry→状态`（**不支持条件**，传了 warning）、`状态→Exit`、`状态→状态` 四种组合都走这条。**`hasExitTime` 默认 false**（条件满足即切；默认 true 会让"加了 trigger 却没反应"变成常态）。条件在创建**之前**全部校验（参数存在 + 模式与参数类型兼容），不合法直接失败、不留半条过渡 | `controller`(必填), `from`(必填), `to`(必填), `layer`, `conditions`, `hasExitTime`, `exitTime`, `duration`, `hasFixedDuration`, `canTransitionToSelf` |
+| `animator.transition.remove` | 删过渡（默认删**全部** `from→to` 匹配项；`index` 只删第 N 条）。0 命中报错并提示先用 `controller.get` 看实际结构 | `controller`(必填), `from`(必填), `to`(必填), `layer`, `index` |
+| `animator.controller.get` | **只读**：参数 / 层 / 状态 / 过渡 / 条件全量读回（替代"把 `.controller` 当 YAML 硬啃"）。`layer` 省略读全部层；`maxTransitions` 默认 200 防爆量，截断时标 `truncated` | `controller`(必填), `layer`, `includeTransitions`(默认 true), `maxTransitions` |
 | `editor.play` | 进入 Play 模式（会触发域重载，服务随后自动恢复）。**敏感操作：默认需人工确认**，见 §5.6。进 Play 前先采样内存水位，超阈值直接拒绝并说明代价，`force:true` 放行（**只作用于本指令**，编辑器自己的 Play 按钮不受影响），见 §5.7 | `force`(默认 false) |
 | `editor.stop` | 退出 Play 模式（幂等）。**敏感操作：默认需人工确认**，见 §5.6 | - |
 | `editor.state` | 查询编辑器状态（isPlaying/isPaused/isCompiling/isUpdating/willChangePlayMode）；另附 `memory` 内存水位采样，可进 Play 前先查 | - |
@@ -1047,6 +1055,57 @@ HTTP 早已返回 `pending`，客户端不依赖编辑器同步响应）。
 > （同一个对象的 `StartTime` 却正常），只看它这道检查会形同虚设。
 > 现在先走 PSAPI 的 `GetProcessMemoryInfo`，取不到才退回 `WorkingSet64`，最后兜 `GC.GetTotalMemory`。
 > 别把它改回只读 `WorkingSet64`。
+
+---
+
+## 5.8 动画资产（`animator.*`）：状态机装配
+
+补这块的起因：把一个面板从 `MonoBehaviour` 换成项目标准基类（要 Animator 上四个 Trigger +
+五个状态 + `Exit` 末帧把 `CanvasGroup` 拉到 0）时，**指令集里一条都做不到**——
+`Animator` 只能当普通组件读写（`component.setField` 换 `m_Controller` 正常），
+但没有任何指令能创建或编辑 `AnimatorController` / `AnimationClip` 本身。
+最后的解法是"撞"：全工程扫带 `OnEnter`/`OnExit` 的 controller，找到一个 clip 绑定路径恰好和
+自己的子节点同名的，再把子节点改名去凑 —— 纯属巧合，换个面板就没退路。
+
+为什么不手写 `.controller` YAML：它靠一堆 `fileID` 互相引用（StateMachine ↔ State ↔ Transition ↔
+Condition），还要和 `m_DefaultState` / `m_AnyStateTransitions` / 每个 State 的 `m_Transitions` 四方对齐。
+错一个 fileID **不报错**，表现只是"controller 打开是空的"或"过渡永远不触发"——
+和后文"控制台诊断"里那些静默失效一样难查。走编辑器 API，交叉引用由 Unity 自己维护。
+
+**范围：只做状态机装配，不做 clip 曲线写入。** `AnimationUtility.SetEditorCurve` 的 binding
+（`type` / `propertyName` / `path` 三元组）写错同样是静默不生效，需要单独的验证面；
+当前工程里能复用的现成 clip 足够用，等真有需求再单开一条。
+
+### 两个实测出来的坑（改代码前先读）
+
+1. **`CreateAnimatorControllerAtPath` 建出来的层 `m_DefaultWeight` 是 0**（2026-11-19 实测，2022.3）。
+   权重 0 的层等于不参与混合：动画看起来"完全没生效"，控制台一个字都不报。
+   `animator.controller.create` 因此**无条件**把首层权重写成 `weight`（默认 1）——
+   这段不要优化成"值不同才写"，上一版就是那么写的，结果默认值恰好是 1，短路后照样留下 0。
+2. **Trigger 是可以做过渡条件的**，且模式恒为 `If`。所以别按"Trigger 不能当条件"去校验——
+   那会把最常用的 `Empty --OnEnter--> Enter` 直接拦死。反过来 Bool 只能 `If` / `IfNot`，
+   Float / Int 只能比较类（`Greater` / `Less` / `Equals` / `NotEqual`），写反了 Unity 也是静默不触发，
+   所以指令在创建过渡**之前**就校验，不合法直接失败、不留半条过渡。
+
+### `hasExitTime` 为什么默认 false
+
+Unity 新建过渡默认 `hasExitTime = true`：条件满足了还得等当前动画播到 `exitTime` 才切。
+对"trigger 一到就切"这类需求，表现就是"加了 trigger 却没反应"，而这正是这套指令要消灭的坑。
+所以本指令口径是**条件满足即切换**，要等动画播完请显式传 `hasExitTime:true`（配 `exitTime` / `duration`）。
+
+### 已知边界
+
+- `AnyState → Exit` 不支持：`AnimatorStateMachine.AddAnyStateTransition` 只接受具体状态，
+  没有通向 `Exit` 的重载。要"任何状态都能收尾"，给需要收尾的状态各加一条 `状态 → Exit`，
+  或统一进一个 `Exit` 状态。
+- `Entry → 状态` 的过渡**没有条件**（Unity 模型如此），传了 `conditions` 会 warning 并忽略。
+- 只处理**层内的顶层状态**与顶层状态机：嵌套子状态机（`ChildAnimatorStateMachine`）里的状态
+  读写不到，`controller.get` 只回报 `subStateMachineCount`。
+- 不新建 `AnimationClip`：`state.add` 的 `motion` 只接受工程内已有的 `.anim`，找不到直接报错。
+- `controller.create` 的 `addressable` 默认 **false**（要注册才传 true）。工程的传统做法就是
+  "controller 不单独进 Addressable、跟着引用它的 prefab 走"，所以这里刻意不跟 `ui.savePrefab`
+  的"默认注册"对齐——每建一个 controller 就改一次 Addressables settings 属于噪音。
+  2026-11-19 已确认这条口径（同批确认：`hasExitTime` 默认 false 照旧、`AnyState → Exit` 维持不支持）。
 
 ---
 
